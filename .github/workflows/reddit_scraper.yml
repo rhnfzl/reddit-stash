@@ -1,0 +1,45 @@
+name: Reddit Stash Scraper
+
+on:
+  schedule:
+    - cron: "0 23 * * *"  # Adjust according to your desired schedule (e.g., 23:00 UTC for midnight CET)
+  workflow_dispatch:  # Allows manual trigger of the workflow
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Download existing Reddit data from Dropbox
+      env:
+        DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+      run: |
+        python dropbox_utils.py --download  # Add a command-line option to control what the script does
+
+    - name: Run Reddit Stash Script
+      env:
+        REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+        REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+        REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+        REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+      run: |
+        python reddit_stash.py  # Run the Reddit processing script
+
+    - name: Upload updated Reddit data to Dropbox
+      env:
+        DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+      run: |
+        python dropbox_utils.py --upload  # Another command-line option for the upload process
