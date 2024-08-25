@@ -110,9 +110,9 @@ Before proceeding with any installation method, ensure that you have set the Red
 ###### Setting Up Reddit Environment Variables
     - Create a Reddit app at https://old.reddit.com/prefs/apps/
     - Set up the name, select `script`, and provide the `redirect_uri` as per the [PRAW docs](https://praw.readthedocs.io/en/latest/getting_started/authentication.html#password-flow).
-    ![Step 1](resources/reddit_create_app1.png)
+![Step 1](resources/reddit_create_app1.png)
     - Copy the provided `REDDIT_CLIENT_ID` and the `REDDIT_CLIENT_SECRET` based on the following screenshot:
-    ![Step 2](resources/reddit_create_app2.png)
+![Step 2](resources/reddit_create_app2.png)
     - `REDDIT_USERNAME` is your reddit username
     - `REDDIT_PASSWORD` is your reddit passowrd
     Keep these credentials for the setup.
@@ -122,14 +122,14 @@ Before proceeding with any installation method, ensure that you have set the Red
     - Click on Create app.
     - Select `Scoped access` and choose `Full Dropbox` for access type.
     - Name your app and click `Create app`.
-    ![](resources/dropbox_app1.png)
+![dropbox1](resources/dropbox_app1.png)
     - In the `Permissions` tab, ensure the following are checked under `Files and folders`:
         - `files.metadata.write`
         - `files.metadata.read`
         - `files.content.write`
         - `files.content.read`
         - Click `Submit` in the bottom.
-    ![](resources/dropbox_app2.png)
+![dropbox2](resources/dropbox_app2.png)
     - Go to `Settings` tab scroll down and click on `Generated access token`, this is your `DROPBOX_TOKEN`.
     For more information about the setup visit [OAuth Guide](https://developers.dropbox.com/oauth-guide).
 
