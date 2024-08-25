@@ -107,7 +107,7 @@ Before proceeding with any installation method, ensure that you have set the Red
     python dropbox_utils.py --upload
     ```
 
-###### Setting Up Reddit Environment Variables
+#### Setting Up Reddit Environment Variables
 
     * Create a Reddit app at https://old.reddit.com/prefs/apps/
     * Set up the name, select `script`, and provide the `redirect_uri` as per the [PRAW docs](https://praw.readthedocs.io/en/latest/getting_started/authentication.html#password-flow).
@@ -122,7 +122,7 @@ Before proceeding with any installation method, ensure that you have set the Red
     * `REDDIT_PASSWORD` is your reddit passowrd
     Keep these credentials for the setup.
 
-###### Setting Up Dropbox app
+#### Setting Up Dropbox app
     * Go to [Dropbox Developer App](https://www.dropbox.com/developers/apps).
     * Click on Create app.
     * Select `Scoped access` and choose `Full Dropbox` for access type.
