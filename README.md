@@ -93,7 +93,7 @@ Example after adding all secrets: ![Repository Secrets](resources/repositiory_se
     ```
     python dropbox_utils.py --upload
     ```
-    * Subsequent runs:
+    * Subsequent runs, as per your convenience:
     1. Download from Dropbox:
     ```
     python dropbox_utils.py --download
