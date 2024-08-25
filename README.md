@@ -110,9 +110,13 @@ Before proceeding with any installation method, ensure that you have set the Red
 ###### Setting Up Reddit Environment Variables
     - Create a Reddit app at https://old.reddit.com/prefs/apps/
     - Set up the name, select `script`, and provide the `redirect_uri` as per the [PRAW docs](https://praw.readthedocs.io/en/latest/getting_started/authentication.html#password-flow).
+
 ![Step 1](resources/reddit_create_app1.png)
+
     - Copy the provided `REDDIT_CLIENT_ID` and the `REDDIT_CLIENT_SECRET` based on the following screenshot:
+
 ![Step 2](resources/reddit_create_app2.png)
+
     - `REDDIT_USERNAME` is your reddit username
     - `REDDIT_PASSWORD` is your reddit passowrd
     Keep these credentials for the setup.
