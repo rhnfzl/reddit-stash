@@ -26,18 +26,18 @@ Before proceeding with any installation method, ensure that you have set the Red
 1. **Fork this repository**.
 
 2. **Set Up Secrets:**
-   - Go to your forked repository’s **Settings** > **Secrets and variables** > **Actions** > Click on **New repository secret**.
-   - Add the following secrets individually:
-     - `REDDIT_CLIENT_ID`
-     - `REDDIT_CLIENT_SECRET`
-     - `REDDIT_USERNAME`
-     - `DROPBOX_TOKEN` (for Dropbox)
-   - Enter the respective secret values without any quotes.
+- Go to your forked repository’s **Settings** > **Secrets and variables** > **Actions** > Click on **New repository secret**.
+- Add the following secrets individually:
+    - `REDDIT_CLIENT_ID`
+    - `REDDIT_CLIENT_SECRET`
+    - `REDDIT_USERNAME`
+    - `DROPBOX_TOKEN` (for Dropbox)
+- Enter the respective secret values without any quotes.
 
-   Example after adding all secrets: ![Repository Secrets](resources/repositiory_secrets.png).
+Example after adding all secrets: ![Repository Secrets](resources/repositiory_secrets.png).
 
 3. **Manually Trigger the Workflow**:
-   - Go to the **Actions** tab > Select the **Reddit Stash Workflow** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
+- Go to the **Actions** tab > Select the **Reddit Stash Workflow** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
 
 #### Local Installation
 
@@ -109,34 +109,34 @@ Before proceeding with any installation method, ensure that you have set the Red
 
 #### Setting Up Reddit Environment Variables
 
-    * Create a Reddit app at https://old.reddit.com/prefs/apps/
-    * Set up the name, select `script`, and provide the `redirect_uri` as per the [PRAW docs](https://praw.readthedocs.io/en/latest/getting_started/authentication.html#password-flow).
+* Create a Reddit app at https://old.reddit.com/prefs/apps/
+* Set up the name, select `script`, and provide the `redirect_uri` as per the [PRAW docs](https://praw.readthedocs.io/en/latest/getting_started/authentication.html#password-flow).
 
 ![Step 1](resources/reddit_create_app1.png)
 
-    * Copy the provided `REDDIT_CLIENT_ID` and the `REDDIT_CLIENT_SECRET` based on the following screenshot:
+* Copy the provided `REDDIT_CLIENT_ID` and the `REDDIT_CLIENT_SECRET` based on the following screenshot:
 
 ![Step 2](resources/reddit_create_app2.png)
 
-    * `REDDIT_USERNAME` is your reddit username
-    * `REDDIT_PASSWORD` is your reddit passowrd
-    Keep these credentials for the setup.
+* `REDDIT_USERNAME` is your reddit username
+* `REDDIT_PASSWORD` is your reddit passowrd
+Keep these credentials for the setup.
 
 #### Setting Up Dropbox app
-    * Go to [Dropbox Developer App](https://www.dropbox.com/developers/apps).
-    * Click on Create app.
-    * Select `Scoped access` and choose `Full Dropbox` for access type.
-    * Name your app and click `Create app`.
+* Go to [Dropbox Developer App](https://www.dropbox.com/developers/apps).
+* Click on Create app.
+* Select `Scoped access` and choose `Full Dropbox` for access type.
+* Name your app and click `Create app`.
 ![dropbox1](resources/dropbox_app1.png)
-    - In the `Permissions` tab, ensure the following are checked under `Files and folders`:
-        * `files.metadata.write`
-        * `files.metadata.read`
-        * `files.content.write`
-        * `files.content.read`
-        * Click `Submit` in the bottom.
+- In the `Permissions` tab, ensure the following are checked under `Files and folders`:
+    * `files.metadata.write`
+    * `files.metadata.read`
+    * `files.content.write`
+    * `files.content.read`
+    * Click `Submit` in the bottom.
 ![dropbox2](resources/dropbox_app2.png)
-    - Go to `Settings` tab scroll down and click on `Generated access token`, this is your `DROPBOX_TOKEN`.
-    For more information about the setup visit [OAuth Guide](https://developers.dropbox.com/oauth-guide).
+- Go to `Settings` tab scroll down and click on `Generated access token`, this is your `DROPBOX_TOKEN`.
+For more information about the setup visit [OAuth Guide](https://developers.dropbox.com/oauth-guide).
 
 ### Contributing
 Feel free to open issues or submit pull requests if you have any improvements or bug fixes.
