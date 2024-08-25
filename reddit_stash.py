@@ -1,4 +1,8 @@
-import praw, os, config, time, sys
+import os
+import re
+import sys
+import dropbox
+import praw
 from praw.models import Submission, Comment
 from datetime import datetime
 import prawcore
@@ -22,12 +26,10 @@ reddit = praw.Reddit(
     user_agent='Reddit Saved Saver by /u/complexrexton'
 )
 
-print("Fetching...")
-
-try:
-    saved = reddit.user.me().saved(limit=1000)
-except:
-    sys.exit("Failed to find your saved posts, did you add your credentials to config.py?")
+# Initialize statistics
+processed_count = 0
+skipped_count = 0
+total_size = 0  # in bytes
 
 top_dir = 'reddit/'
 
@@ -38,46 +40,31 @@ def process_comments(comments, f, depth=0):
     """Process all comments and visualize depth using indentation."""
     for i, comment in enumerate(comments):
         if isinstance(comment, Comment):
-            # Write the comment with indentation based on depth
             indent = '    ' * depth
             f.write(f'{indent}### Comment {i+1} by /u/{comment.author.name if comment.author else "[deleted]"}\n')
             f.write(f'{indent}- **Upvotes:** {comment.score} | **Permalink:** [Link](https://reddit.com{comment.permalink})\n')
             f.write(f'{indent}{comment.body}\n\n')
-            
-            # Process replies recursively without limit
+
             if comment.replies:
                 process_comments(comment.replies, f, depth + 1)
 
             f.write(f'{indent}---\n\n')
 
 def dynamic_sleep(processed_count, content_length):
-    """
-    Dynamically adjust sleep time based on the number of submissions processed
-    and the cumulative content length processed.
-    
-    Parameters:
-    processed_count (int): The number of submissions processed so far.
-    content_length (int): The estimated cumulative length of the content processed.
-    
-    Returns:
-    float: The number of seconds to sleep.
-    """
-    base_sleep_time = 1  # Base time to start with
-    
-    # Adjust sleep based on the number of submissions processed
+    """Dynamically adjust sleep time based on processed submissions and content length."""
+    base_sleep_time = 1
+    sleep_time = base_sleep_time
+
     if processed_count > 100:
-        sleep_time = base_sleep_time * 2
-    elif processed_count > 50:
-        sleep_time = base_sleep_time * 1.5
-    else:
-        sleep_time = base_sleep_time
-    
-    # Further adjust sleep based on the content length
-    if content_length > 10000:  # Large content length threshold
         sleep_time *= 2
-    elif content_length > 5000:  # Moderate content length threshold
+    elif processed_count > 50:
         sleep_time *= 1.5
-    
+
+    if content_length > 10000:
+        sleep_time *= 2
+    elif content_length > 5000:
+        sleep_time *= 1.5
+
     return sleep_time
 
 def lazy_load_comments(submission):
@@ -87,8 +74,8 @@ def lazy_load_comments(submission):
             yield comment
     except prawcore.exceptions.TooManyRequests:
         print("Rate limit exceeded. Sleeping for 120 seconds...")
-        time.sleep(120)  # Sleep for 120 seconds before retrying
-        yield from lazy_load_comments(submission)  # Retry the request
+        time.sleep(120)
+        yield from lazy_load_comments(submission)
 
 def save_comment_and_context(comment, f):
     """Save a comment and its context."""
@@ -97,8 +84,7 @@ def save_comment_and_context(comment, f):
     f.write(f'- **Upvotes:** {comment.score} | **Permalink:** [Link](https://reddit.com{comment.permalink})\n')
     f.write(f'{comment.body}\n\n')
     f.write('---\n\n')
-    
-    # Fetch and save the parent post or comment for context
+
     parent = comment.parent()
     if isinstance(parent, Submission):
         f.write(f'## Context: Post by /u/{parent.author.name if parent.author else "[deleted]"}\n')
@@ -113,24 +99,19 @@ def save_comment_and_context(comment, f):
         f.write(f'- **Upvotes:** {parent.score} | **Permalink:** [Link](https://reddit.com{parent.permalink})\n')
         f.write(f'{parent.body}\n\n')
 
-processed_count = 0  # Counter to keep track of processed submissions
-
-for saved_item in tqdm(saved, desc="Processing Saved Items"):
-    # Determine the save location based on subreddit
+for saved_item in tqdm(reddit.user.me().saved(limit=1000), desc="Processing Saved Items"):
     sub_dir = top_dir + saved_item.subreddit.display_name + '/'
     if not os.path.exists(sub_dir):
         os.mkdir(sub_dir)
 
     file_path = sub_dir + saved_item.id + '.md'
 
-    # Check if the file already exists to avoid overwriting
     if os.path.exists(file_path):
-        print(f"File {file_path} already exists. Skipping to prevent overwriting.")
+        skipped_count += 1
         continue
 
     with open(file_path, 'w', encoding="utf-8") as f:
         if isinstance(saved_item, Submission):
-            # Save the post and its comments
             f.write('---\n')
             f.write(f'id: {saved_item.id}\n')
             f.write(f'subreddit: /r/{saved_item.subreddit.display_name}\n')
@@ -148,10 +129,11 @@ for saved_item in tqdm(saved, desc="Processing Saved Items"):
             lazy_comments = lazy_load_comments(saved_item)
             process_comments(lazy_comments, f)
         elif isinstance(saved_item, Comment):
-            # Save the comment and its context
             save_comment_and_context(saved_item, f)
-    
-    processed_count += 1  # Increment the processed counter
+
+    processed_count += 1
+    total_size += os.path.getsize(file_path)
     time.sleep(dynamic_sleep(processed_count, len(saved_item.body if isinstance(saved_item, Comment) else saved_item.selftext or saved_item.url)))
 
-print("All saved items have been processed.")
+print(f"Processing completed. {processed_count} items processed, {skipped_count} items skipped.")
+print(f"Total size of processed data: {total_size / (1024 * 1024):.2f} MB")

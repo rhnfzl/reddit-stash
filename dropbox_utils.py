@@ -38,6 +38,10 @@ def upload_directory_to_dropbox(local_directory, dropbox_folder="/"):
     # List all files currently in the Dropbox folder
     existing_files = list_dropbox_files(dbx, dropbox_folder)
 
+    uploaded_count = 0
+    uploaded_size = 0
+    skipped_count = 0
+
     for root, dirs, files in os.walk(local_directory):
         for file_name in files:
             # Skip .DS_Store and other hidden files
@@ -52,31 +56,53 @@ def upload_directory_to_dropbox(local_directory, dropbox_folder="/"):
             dropbox_path = dropbox_path.replace(file_name, sanitized_name)
 
             if dropbox_path.lower() in existing_files:
+                skipped_count += 1
                 continue
 
             try:
                 with open(file_path, "rb") as f:
+                    file_size = os.path.getsize(file_path)
                     dbx.files_upload(f.read(), dropbox_path)
+                    uploaded_count += 1
+                    uploaded_size += file_size
             except dropbox.exceptions.ApiError as e:
                 print(f"Failed to upload {file_path} to Dropbox: {e}")
 
+    print(f"Upload completed. {uploaded_count} files uploaded ({uploaded_size / (1024 * 1024):.2f} MB).")
+    print(f"{skipped_count} files were skipped (already existed).")
+
 def download_directory_from_dropbox(dbx, dropbox_folder, local_directory):
     """Downloads all files in the specified Dropbox folder to the local directory."""
+    downloaded_count = 0
+    downloaded_size = 0
+    skipped_count = 0
+
     try:
         result = dbx.files_list_folder(dropbox_folder, recursive=True)
         while True:
             for entry in result.entries:
                 if isinstance(entry, dropbox.files.FileMetadata):
                     local_path = os.path.join(local_directory, entry.path_lower[len(dropbox_folder):].lstrip('/'))
+
+                    # Skip the download if the file already exists locally
+                    if os.path.exists(local_path):
+                        skipped_count += 1
+                        continue
+                    
                     os.makedirs(os.path.dirname(local_path), exist_ok=True)
                     with open(local_path, "wb") as f:
                         metadata, res = dbx.files_download(entry.path_lower)
                         f.write(res.content)
+                        downloaded_count += 1
+                        downloaded_size += metadata.size
             if not result.has_more:
                 break
             result = dbx.files_list_folder_continue(result.cursor)
     except dropbox.exceptions.ApiError as err:
         print(f"Failed to download files from Dropbox folder {dropbox_folder}: {err}")
+
+    print(f"Download completed. {downloaded_count} files downloaded ({downloaded_size / (1024 * 1024):.2f} MB).")
+    print(f"{skipped_count} files were skipped (already existed locally).")
 
 if __name__ == "__main__":
     dbx = dropbox.Dropbox(os.getenv('DROPBOX_TOKEN'))
