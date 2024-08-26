@@ -5,6 +5,7 @@ Reddit Stash is a Python script that automatically saves your Reddit saved posts
 ## Features
 - Downloads the saved Reddit folder from Dropbox.
 - Automatically retrieves saved posts and comments from Reddit.
+- Allows for flexible saving options (all activity or only saved items) via `settings.ini`.
 - Uploads the files to Dropbox for storage.
 - Saves the content as markdown files.
 
@@ -12,8 +13,8 @@ Reddit Stash is a Python script that automatically saves your Reddit saved posts
 
 ### Prerequisites
 - Python 3.10
-- A Dropbox account with an API token.
 - Reddit API credentials.
+- A Dropbox account with an API token. (Optional)
 
 ### Installation
 
@@ -54,7 +55,9 @@ Example after adding all secrets: ![Repository Secrets](resources/repositiory_se
 
 3. Setup the [Dropbox App setup](#setting-up-dropbox-app). Skip it if you don't want to setup the dropbox and only want to save the file locally in your system.
 
-4. Set Environment Variables:
+4. Edit the settings.ini file, here is [how to](#`settings.ini`-file)
+
+5. Set Environment Variables (Optional but preferred):
 
     For macOS and Linux:
     ```
@@ -84,7 +87,7 @@ Example after adding all secrets: ![Repository Secrets](resources/repositiory_se
     echo $DROPBOX_TOKEN
     ```
 
-4. Usage:
+6. Usage:
     * First-time setup:
     ```
     python reddit_stash.py
@@ -106,6 +109,29 @@ Example after adding all secrets: ![Repository Secrets](resources/repositiory_se
     ```
     python dropbox_utils.py --upload
     ```
+## Configuration
+
+#### `settings.ini` File
+
+The `settings.ini` file in the root directory of the project allows you to configure how Reddit Stash operates. Here’s what each section of the file does:
+
+```ini
+[Settings]
+save_directory = reddit/
+save_type = ALL  # Options: 'ALL' to save all activity, 'SAVED' to save only saved posts/comments
+
+[Configuration]
+client_id = None  # Can be set here or via environment variables
+client_secret = None  # Can be set here or via environment variables
+username = None  # Can be set here or via environment variables
+password = None  # Can be set here or via environment variables
+```
+save_directory: Specifies the directory where the Reddit content will be saved, modify it to the location you want it to be in.
+save_type: Determines what user activity is saved, accepts these two values:
+* `ALL`: Saves all posts and comments made by the user, along with the saved posts and comments with it's context.
+* `SAVED`: Saves only the posts and comments the user has saved on Reddit with it's context.
+
+Note: You can still use environment variables as a fallback or override for the Reddit API credentials if they are not set in the settings.ini file.
 
 #### Setting Up Reddit Environment Variables
 
@@ -137,6 +163,15 @@ Keep these credentials for the setup.
 ![dropbox2](resources/dropbox_app2.png)
 - Go to `Settings` tab scroll down and click on `Generated access token`, this is your `DROPBOX_TOKEN`.
 For more information about the setup visit [OAuth Guide](https://developers.dropbox.com/oauth-guide).
+
+
+### Key Additions and Changes:
+
+- **Configuration Section**: Added a new section explaining the `settings.ini` file and the `save_type` option.
+- **Setup Instructions**: Provided guidance on editing the `settings.ini` file and clarifying the role of environment variables as a fallback.
+- **Consistent Documentation**: Updated the usage instructions to reflect the new configuration options.
+
+This ensures that users are fully informed on how to configure and use the script, taking advantage of the flexibility provided by the `settings.ini` file.
 
 ### Contributing
 Feel free to open issues or submit pull requests if you have any improvements or bug fixes.
