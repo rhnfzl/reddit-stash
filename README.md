@@ -178,3 +178,7 @@ Feel free to open issues or submit pull requests if you have any improvements or
 
 ### Acknowledgement
 - This project was inspired by [reddit-saved-saver](https://github.com/tobiasvl/reddit-saved-saver).
+
+### Issues:
+
+- The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.
