@@ -163,7 +163,7 @@ cython_debug/
 
 # custom ignore directory and files
 archive
-reddit
+/reddit
 *.md
-reddit_acvhive*
-dropbox_operations.py
+/reddit_acvhive*
+/dropbox_operations.py
