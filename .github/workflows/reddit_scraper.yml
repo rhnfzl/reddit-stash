@@ -29,7 +29,7 @@ jobs:
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
         DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       run: |
-        python dropbox_utils.py --download  # Add a command-line option to control what the script does
+        python dropbox_utils.py --download  # dowload the files
 
     - name: Run Reddit Stash Script
       env:
@@ -38,7 +38,7 @@ jobs:
         REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
         REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
       run: |
-        python reddit_stash.py  # Run the Reddit processing script
+        python reddit_stash.py  # process the files
 
     - name: Upload updated Reddit data to Dropbox
       env:
@@ -46,4 +46,4 @@ jobs:
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
         DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       run: |
-        python dropbox_utils.py --upload  # Another command-line option for the upload process
+        python dropbox_utils.py --upload  # upload the files

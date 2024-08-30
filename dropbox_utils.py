@@ -140,7 +140,7 @@ def download_directory_from_dropbox(dbx, dropbox_folder, local_directory):
         print(f"Failed to download files from Dropbox folder {dropbox_folder}: {err}")
 
     print(f"Download completed. {downloaded_count} files downloaded ({downloaded_size / (1024 * 1024):.2f} MB).")
-    print(f"{skipped_count} files were skipped (already existed locally).")
+    print(f"{skipped_count} files were skipped (i.e. they already existed).")
 
 if __name__ == "__main__":
     # Refresh the access token because it expires
