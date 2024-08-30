@@ -25,7 +25,9 @@ jobs:
 
     - name: Download existing Reddit data from Dropbox
       env:
-        DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+        DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+        DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+        DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       run: |
         python dropbox_utils.py --download  # Add a command-line option to control what the script does
 
@@ -40,6 +42,8 @@ jobs:
 
     - name: Upload updated Reddit data to Dropbox
       env:
-        DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+        DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+        DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+        DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       run: |
         python dropbox_utils.py --upload  # Another command-line option for the upload process
