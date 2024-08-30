@@ -204,7 +204,8 @@ Go to [Postman](https://www.postman.com/), and create a new POST request with be
 ![postman3](resources/postman_post3.png)
 
 After you click send the request, you will receive JSON payload containing **refresh_token**.
-```{
+```
+{
     "access_token": "sl.****************",
     "token_type": "bearer",
     "expires_in": 14400,
@@ -212,7 +213,8 @@ After you click send the request, you will receive JSON payload containing **ref
     "scope": <SCOPES>,
     "uid": "**********",
     "account_id": "***********************"
-}```
+}
+```
 
 and add/export the above r**refresh_token** to DROPBOX_REFRESH_TOKEN in your environment.
 For more information about the setup visit [OAuth Guide](https://developers.dropbox.com/oauth-guide).
@@ -233,8 +235,7 @@ Feel free to open issues or submit pull requests if you have any improvements or
 - This project was inspired by [reddit-saved-saver](https://github.com/tobiasvl/reddit-saved-saver).
 
 ### Issues:
-
-- ~~The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.~~
+~~The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.~~
 - The dropbox code needs to have the hashing mechanism, to make the upload faster.
 - The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.
 - The file size calculation should be done once rather than in each iterations.
