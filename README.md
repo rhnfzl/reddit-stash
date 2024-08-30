@@ -176,7 +176,7 @@ Keep these credentials for the setup.
 ![dropbox2](resources/dropbox_app2.png)
 * Your `DROPBOX_APP_KEY` and `DROPBOX_APP_SECRET` are in the settings page of the app you created.
 ![dropbox3](resources/dropbox_app3.png)
-* To get the (`DROPBOX_REFRESH_TOKEN`)[https://stackoverflow.com/a/71794390/12983596] follow the follwing steps:
+* To get the `DROPBOX_REFRESH_TOKEN` follow the follwing steps:
 
 Replace `<DROPBOX_APP_KEY>` with your `DROPBOX_APP_KEY` you got in previous step and add that in the below Authorization URL
 
