@@ -151,7 +151,7 @@ Keep these credentials for the setup.
 #### Setting Up Dropbox app
 * Go to [Dropbox Developer App](https://www.dropbox.com/developers/apps).
 * Click on Create app.
-* Select `Scoped access` and choose `Full Dropbox` for access type.
+* Select `Scoped access` and choose `Full Dropbox` or the `App folder` for access type.
 * Name your app and click `Create app`.
 ![dropbox1](resources/dropbox_app1.png)
 - In the `Permissions` tab, ensure the following are checked under `Files and folders`:
@@ -161,6 +161,52 @@ Keep these credentials for the setup.
     * `files.content.read`
     * Click `Submit` in the bottom.
 ![dropbox2](resources/dropbox_app2.png)
+* Follow the follwing steps to get the (`DROPBOX_REFRESH_TOKEN`)[https://stackoverflow.com/a/71794390/12983596].
+- Copying the content based on this repo usecase:
+
+Replace <APP_KEY> with your dropbox app key in the below Authorization URL
+
+https://www.dropbox.com/oauth2/authorize?client_id=<APP_KEY>&token_access_type=offline&response_type=code
+
+Complete the code flow on the Authorization URL. You will receive an __AUTHORIZATION_CODE__ at the end.
+
+Go to [Postman](https://www.postman.com/) and create a new POST request with below configuration
+
++ Request URL- https://api.dropboxapi.com/oauth2/token
++ Authorization -> Type = Basic Auth -> *Username* = <APP_KEY> , *Password* = <APP_SECRET>
+(Refer this [answer](https://stackoverflow.com/a/28529598/18744450) for cURL -u option)
++ Body -> Select "x-www-form-urlencoded"
+
+|    Key   |      Value          |
+|:--------:|:-------------------:|
+|    code  |<AUTHORIZATION_CODE> |
+|grant_type| authorization_code  |
+
+After you send the request, you will receive JSON payload containing **refresh_token**.
+```
+{
+    "access_token": "sl.****************",
+    "token_type": "bearer",
+    "expires_in": 14400,
+    "refresh_token": "*********************",
+    "scope": <SCOPES>,
+    "uid": "**********",
+    "account_id": "***********************"
+}
+```
+In your python application,
+```
+import dropbox
+
+dbx = dropbox.Dropbox(
+            app_key = <APP_KEY>,
+            app_secret = <APP_SECRET>,
+            oauth2_refresh_token = <REFRESH_TOKEN>
+        )
+```
+Hope this works for you too!
+
+
 - Go to `Settings` tab scroll down and click on `Generated access token`, this is your `DROPBOX_TOKEN`.
 For more information about the setup visit [OAuth Guide](https://developers.dropbox.com/oauth-guide).
 
@@ -181,4 +227,7 @@ Feel free to open issues or submit pull requests if you have any improvements or
 
 ### Issues:
 
-- The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.
+- [x] The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.
+- [ ] The dropbox code needs to have the hashing mechanism, to make the upload faster.
+- [ ] The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.
+- [ ] The file size calculation should be done once rather than in each iterations.

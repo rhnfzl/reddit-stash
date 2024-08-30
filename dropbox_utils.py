@@ -2,6 +2,44 @@ import os
 import re
 import sys
 import dropbox
+import requests
+import configparser
+# Import the validate_and_set_directory function from utils
+from utils.file_path_validate import validate_and_set_directory
+
+def refresh_dropbox_token():
+    refresh_token = os.getenv('DROPBOX_REFRESH_TOKEN')
+    client_id = os.getenv('DROPBOX_APP_KEY')
+    client_secret = os.getenv('DROPBOX_APP_SECRET')
+
+    response = requests.post('https://api.dropboxapi.com/oauth2/token', data={
+        'grant_type': 'refresh_token',
+        'refresh_token': refresh_token,
+        'client_id': client_id,
+        'client_secret': client_secret,
+    })
+
+    if response.status_code == 200:
+        new_access_token = response.json().get('access_token')
+        os.environ['DROPBOX_TOKEN'] = new_access_token
+        print(" -- Access Token Refreshed -- ")
+        return new_access_token
+    else:
+        raise Exception("Failed to refresh Dropbox token")
+
+# Load configuration
+config_parser = configparser.ConfigParser()
+config_parser.read('settings.ini')
+
+# Local directory for Reddit data
+# Fetch the local_dir from the settings.ini file with a fallback
+local_dir = config_parser.get('Settings', 'save_directory', fallback='reddit/')
+
+# Validate and set the local directory using the utility function
+local_dir = validate_and_set_directory(local_dir)
+
+# Fetch the dropbox_folder from the settings.ini file with a fallback
+dropbox_folder = config_parser.get('Settings', 'dropbox_directory', fallback='/reddit')
 
 def sanitize_filename(filename):
     """Sanitize the filename to be Dropbox-compatible."""
@@ -105,9 +143,9 @@ def download_directory_from_dropbox(dbx, dropbox_folder, local_directory):
     print(f"{skipped_count} files were skipped (already existed locally).")
 
 if __name__ == "__main__":
+    # Refresh the access token because it expires
+    refresh_dropbox_token()
     dbx = dropbox.Dropbox(os.getenv('DROPBOX_TOKEN'))
-    local_dir = 'reddit/'  # Local directory for Reddit data
-    dropbox_folder = "/reddit"  # Dropbox folder where Reddit data is stored
 
     if '--download' in sys.argv:
         download_directory_from_dropbox(dbx, dropbox_folder, local_dir)
