@@ -162,8 +162,7 @@ cython_debug/
 #.idea/
 
 # custom ignore directory and files
-archive
-/reddit
+archive/
+reddit/
 *.md
-/reddit_acvhive*
-/dropbox_operations.py
+reddit_acvhive*
