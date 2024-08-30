@@ -32,10 +32,13 @@ Before proceeding with any installation method, ensure that you have set the Red
     - `REDDIT_CLIENT_ID`
     - `REDDIT_CLIENT_SECRET`
     - `REDDIT_USERNAME`
-    - `DROPBOX_TOKEN` (for Dropbox)
+    For Dropbox Setup
+    - `DROPBOX_APP_KEY`
+    - `DROPBOX_APP_SECRET`
+    - `DROPBOX_REFRESH_TOKEN`
 - Enter the respective secret values without any quotes.
 
-Example after adding all secrets: ![Repository Secrets](resources/repositiory_secrets.png).
+After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.png).
 
 3. **Manually Trigger the Workflow**:
 - Go to the **Actions** tab > Select the **Reddit Stash Workflow** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
@@ -65,7 +68,10 @@ Example after adding all secrets: ![Repository Secrets](resources/repositiory_se
     export REDDIT_CLIENT_SECRET='your_client_secret'
     export REDDIT_USERNAME='your_username'
     export REDDIT_PASSWORD='your_password'
-    export DROPBOX_TOKEN='dropbox-token'
+    # Optional, if you need dropbox locally
+    export DROPBOX_APP_KEY='dropbox-app-key'
+    export DROPBOX_APP_SECRET='dropbox-secret-key'
+    export DROPBOX_REFRESH_TOKEN='dropbox-secret-key'
     ```
 
     For Windows:
@@ -75,7 +81,10 @@ Example after adding all secrets: ![Repository Secrets](resources/repositiory_se
     set REDDIT_CLIENT_SECRET='your_client_secret'
     set REDDIT_USERNAME='your_username'
     set REDDIT_PASSWORD='your_password'
-    set DROPBOX_TOKEN='dropbox-token'
+    # Optional, if you need dropbox locally
+    set DROPBOX_APP_KEY='dropbox-app-key'
+    set DROPBOX_APP_SECRET='dropbox-secret-key'
+    set DROPBOX_REFRESH_TOKEN='dropbox-secret-key'
     ```
     
     You can verify the setup with:
@@ -84,7 +93,9 @@ Example after adding all secrets: ![Repository Secrets](resources/repositiory_se
     echo $REDDIT_CLIENT_SECRET
     echo $REDDIT_USERNAME
     echo $REDDIT_PASSWORD
-    echo $DROPBOX_TOKEN
+    echo $DROPBOX_APP_KEY
+    echo $DROPBOX_APP_SECRET
+    echo $DROPBOX_REFRESH_TOKEN
     ```
 
 6. Usage:
@@ -92,12 +103,12 @@ Example after adding all secrets: ![Repository Secrets](resources/repositiory_se
     ```
     python reddit_stash.py
     ```
-    To upload to Dropbox:
+    To upload to Dropbox (optional):
     ```
     python dropbox_utils.py --upload
     ```
     * Subsequent runs, as per your convenience:
-    1. Download from Dropbox:
+    1. Download from Dropbox (optional):
     ```
     python dropbox_utils.py --download
     ```
@@ -105,7 +116,7 @@ Example after adding all secrets: ![Repository Secrets](resources/repositiory_se
     ```
     python reddit_stash.py
     ```
-    3. Upload to Dropbox:
+    3. Upload to Dropbox (optional):
     ```
     python dropbox_utils.py --upload
     ```
@@ -117,7 +128,8 @@ The `settings.ini` file in the root directory of the project allows you to confi
 
 ```ini
 [Settings]
-save_directory = reddit/
+save_directory = reddit/ # your system save directory
+dropbox_directory = /reddit # your dropbox directory
 save_type = ALL  # Options: 'ALL' to save all activity, 'SAVED' to save only saved posts/comments
 
 [Configuration]
@@ -127,6 +139,7 @@ username = None  # Can be set here or via environment variables
 password = None  # Can be set here or via environment variables
 ```
 save_directory: Specifies the directory where the Reddit content will be saved, modify it to the location you want it to be in.
+dropbox_directory : Specifies the folder where the Reddit content will be saved on dropbox, modify it to the location you want it to be in.
 save_type: Determines what user activity is saved, accepts these two values:
 * `ALL`: Saves all posts and comments made by the user, along with the saved posts and comments with it's context.
 * `SAVED`: Saves only the posts and comments the user has saved on Reddit with it's context.
@@ -151,8 +164,8 @@ Keep these credentials for the setup.
 #### Setting Up Dropbox app
 * Go to [Dropbox Developer App](https://www.dropbox.com/developers/apps).
 * Click on Create app.
-* Select `Scoped access` and choose `Full Dropbox` or the `App folder` for access type.
-* Name your app and click `Create app`.
+* Select `Scoped access` and choose `Full Dropbox` or `App folder` for access type.
+* give a Name to your app and click `Create app`.
 ![dropbox1](resources/dropbox_app1.png)
 - In the `Permissions` tab, ensure the following are checked under `Files and folders`:
     * `files.metadata.write`
@@ -161,30 +174,37 @@ Keep these credentials for the setup.
     * `files.content.read`
     * Click `Submit` in the bottom.
 ![dropbox2](resources/dropbox_app2.png)
-* Follow the follwing steps to get the (`DROPBOX_REFRESH_TOKEN`)[https://stackoverflow.com/a/71794390/12983596].
-- Copying the content based on this repo usecase:
+* Your `DROPBOX_APP_KEY` and `DROPBOX_APP_SECRET` are in the settings page of the app you created.
+![dropbox3](resources/dropbox_app3.png)
+* To get the (`DROPBOX_REFRESH_TOKEN`)[https://stackoverflow.com/a/71794390/12983596] follow the follwing steps:
 
-Replace <APP_KEY> with your dropbox app key in the below Authorization URL
+Replace `<DROPBOX_APP_KEY>` with your `DROPBOX_APP_KEY` you got in previous step and add that in the below Authorization URL
 
-https://www.dropbox.com/oauth2/authorize?client_id=<APP_KEY>&token_access_type=offline&response_type=code
+https://www.dropbox.com/oauth2/authorize?client_id=<DROPBOX_APP_KEY>&token_access_type=offline&response_type=code
 
-Complete the code flow on the Authorization URL. You will receive an __AUTHORIZATION_CODE__ at the end.
+Paste the URL in browser and complete the code flow on the Authorization URL. You will receive an `<AUTHORIZATION_CODE>` at the end, save it you will need this later.
 
-Go to [Postman](https://www.postman.com/) and create a new POST request with below configuration
+Go to [Postman](https://www.postman.com/), and create a new POST request with below configuration
 
-+ Request URL- https://api.dropboxapi.com/oauth2/token
-+ Authorization -> Type = Basic Auth -> *Username* = <APP_KEY> , *Password* = <APP_SECRET>
+* Add Request URL- https://api.dropboxapi.com/oauth2/token
+![postman1](resources/postman_post1.png)
+
+* Click on the **Authorization** tab -> Type = **Basic Auth** -> **Username** = `<DROPBOX_APP_KEY>` , **Password** = `<DROPBOX_APP_SECRET>`
 (Refer this [answer](https://stackoverflow.com/a/28529598/18744450) for cURL -u option)
-+ Body -> Select "x-www-form-urlencoded"
+
+![postman2](resources/postman_post2.png)
+
+* Body -> Select "x-www-form-urlencoded"
 
 |    Key   |      Value          |
 |:--------:|:-------------------:|
-|    code  |<AUTHORIZATION_CODE> |
+|    code  |`<AUTHORIZATION_CODE>` |
 |grant_type| authorization_code  |
 
-After you send the request, you will receive JSON payload containing **refresh_token**.
-```
-{
+![postman3](resources/postman_post3.png)
+
+After you click send the request, you will receive JSON payload containing **refresh_token**.
+```{
     "access_token": "sl.****************",
     "token_type": "bearer",
     "expires_in": 14400,
@@ -192,32 +212,19 @@ After you send the request, you will receive JSON payload containing **refresh_t
     "scope": <SCOPES>,
     "uid": "**********",
     "account_id": "***********************"
-}
-```
-In your python application,
-```
-import dropbox
+}```
 
-dbx = dropbox.Dropbox(
-            app_key = <APP_KEY>,
-            app_secret = <APP_SECRET>,
-            oauth2_refresh_token = <REFRESH_TOKEN>
-        )
-```
-Hope this works for you too!
-
-
-- Go to `Settings` tab scroll down and click on `Generated access token`, this is your `DROPBOX_TOKEN`.
+and add/export the above r**refresh_token** to DROPBOX_REFRESH_TOKEN in your environment.
 For more information about the setup visit [OAuth Guide](https://developers.dropbox.com/oauth-guide).
 
+
+- Credits for above DROPBOX_REFRESH_TOKEN solution : https://stackoverflow.com/a/71794390/12983596
 
 ### Key Additions and Changes:
 
 - **Configuration Section**: Added a new section explaining the `settings.ini` file and the `save_type` option.
 - **Setup Instructions**: Provided guidance on editing the `settings.ini` file and clarifying the role of environment variables as a fallback.
 - **Consistent Documentation**: Updated the usage instructions to reflect the new configuration options.
-
-This ensures that users are fully informed on how to configure and use the script, taking advantage of the flexibility provided by the `settings.ini` file.
 
 ### Contributing
 Feel free to open issues or submit pull requests if you have any improvements or bug fixes.
