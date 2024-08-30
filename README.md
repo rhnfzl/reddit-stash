@@ -1,13 +1,13 @@
-# Reddit Stash
+# Reddit Stash: Automatically Save Reddit Posts and Comments to Dropbox
 
-Reddit Stash is a Python script that automatically saves your Reddit saved posts and comments to your local machine or Dropbox. It uses GitHub Actions to run the script on a daily schedule for Dropbox.
+**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit saved posts and comments to Dropbox or your local machine. Utilizing GitHub Actions, this script runs daily, automating the process of archiving your Reddit data in Dropbox after a simple setup.
 
-## Features
-- Downloads the saved Reddit folder from Dropbox.
-- Automatically retrieves saved posts and comments from Reddit.
-- Allows for flexible saving options (all activity or only saved items) via `settings.ini`.
-- Uploads the files to Dropbox for storage.
-- Saves the content as markdown files.
+## Key Features
+
+- **Automated Reddit Backup:** Automatically retrieves saved posts and comments from Reddit, even your posts and comments if you setit up.
+- **Flexible Storage Options:** Allows for flexible saving options (all activity or only saved items) via `settings.ini`.
+- **Dropbox Integration** : Downloads and Uploads the files to Dropbox for storage.
+- **Markdown Support:** Saves the content as markdown files.
 
 ## Setup
 
@@ -18,9 +18,9 @@ Reddit Stash is a Python script that automatically saves your Reddit saved posts
 
 ### Installation
 
-Before proceeding with any installation method, ensure that you have set the Reddit environment variables. Follow [this guide](#setting-up-reddit-environment-variables) to create a Reddit app and obtain the necessary credentials.
+Before proceeding with any installation method, ensure that you have set the Reddit environment variables. Follow [Reddit API guide](#setting-up-reddit-environment-variables) to create a Reddit app and obtain the necessary credentials.
 
-#### GitHub Action Installation
+#### GitHub Action Installation (Recommended)
 
 **Note:** The following process requires the [Dropbox App setup](#setting-up-dropbox-app). The GitHub Actions workflow runs the script daily at midnight CET, uploading the files to Dropbox. The workflow is defined in `.github/workflows/reddit_scraper.yml`.
 
@@ -235,7 +235,5 @@ Feel free to open issues or submit pull requests if you have any improvements or
 - This project was inspired by [reddit-saved-saver](https://github.com/tobiasvl/reddit-saved-saver).
 
 ### Issues:
-~~The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.~~
-- The dropbox code needs to have the hashing mechanism, to make the upload faster.
-- The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.
-- The file size calculation should be done once rather than in each iterations.
+- ~~The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.~~
+- ~~The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.~~

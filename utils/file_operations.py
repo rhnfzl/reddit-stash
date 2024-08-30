@@ -4,9 +4,8 @@ import configparser
 from tqdm import tqdm
 from datetime import datetime
 
-import prawcore
 from praw.models import Submission, Comment
-from utils.time_utilities import dynamic_sleep, exponential_backoff, lazy_load_comments
+from utils.time_utilities import dynamic_sleep, lazy_load_comments
 
 # Dynamically determine the path to the root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -18,11 +17,6 @@ config_path = os.path.join(BASE_DIR, 'settings.ini')
 config = configparser.ConfigParser()
 config.read(config_path)
 save_type = config.get('Settings', 'save_type', fallback='ALL').upper()
-
-# Initialize statistics
-processed_count = 0  # Counter for processed items
-skipped_count = 0  # Counter for skipped items
-total_size = 0  # Total size of processed data in bytes
 
 def format_date(timestamp):
     """Format a UTC timestamp into a human-readable date."""
@@ -36,22 +30,34 @@ def extract_video_id(url):
         return url.split("/")[-1]
     return None
 
-def create_directory(subreddit_name, save_directory):
+def create_directory(subreddit_name, save_directory, created_dirs_cache):
     """Create the directory for saving data if it does not exist."""
     sub_dir = os.path.join(save_directory, subreddit_name)
-    if not os.path.exists(sub_dir):
-        os.makedirs(sub_dir)
+    if sub_dir not in created_dirs_cache:
+        os.makedirs(sub_dir, exist_ok=True)
+        created_dirs_cache.add(sub_dir)
     return sub_dir
 
-def save_to_file(content, file_path, save_function):
+def get_existing_files(save_directory):
+    """Build a set of all existing files in the save directory."""
+    existing_files = set()
+    for root, dirs, files in os.walk(save_directory):
+        for file in files:
+            existing_files.add(os.path.join(root, file))
+    return existing_files
+
+def save_to_file(content, file_path, save_function, existing_files):
     """Save content to a file using the specified save function."""
-    if os.path.exists(file_path):
-        return
+    if file_path in existing_files:
+        # File already exists, skip saving
+        return True  # Indicate that the file already exists and no saving was performed
     try:
         with open(file_path, 'w', encoding="utf-8") as f:
             save_function(content, f)
+        return False  # Indicate that the file was saved successfully
     except Exception as e:
         print(f"Failed to save {file_path}: {e}")
+        return False  # Indicate that the file could not be saved
 
 def save_submission(submission, f):
     """Save a submission and its metadata."""
@@ -122,7 +128,7 @@ def process_comments(comments, f, depth=0, simple_format=False):
             f.write(f'{indent}---\n\n')
 
 def save_user_activity(reddit, save_directory):
-    """Save user's posts and comments based on the save_type setting."""
+    """Save user's posts, comments, and saved items."""
     user = reddit.user.me()
 
     # Retrieve all necessary data
@@ -130,39 +136,74 @@ def save_user_activity(reddit, save_directory):
     comments = list(user.comments.new(limit=1000))
     saved_items = list(user.saved(limit=1000))
 
+    existing_files = get_existing_files(save_directory)
+    created_dirs_cache = set()
+
+    processed_count = 0  # Counter for processed items
+    skipped_count = 0  # Counter for skipped items
+    total_size = 0  # Total size of processed data in bytes
+
     if save_type == 'ALL':
-        # Process all submissions, comments and saved items
-        save_all_user_activity(submissions, comments, save_directory)
-        save_saved_user_activity(saved_items, save_directory)
+        processed_count, skipped_count, total_size = save_all_user_activity(
+            submissions, comments, saved_items, save_directory, existing_files, 
+            created_dirs_cache, processed_count, skipped_count, total_size
+        )
+        processed_count, skipped_count, total_size = save_saved_user_activity(
+            saved_items, save_directory, existing_files, created_dirs_cache, 
+            processed_count, skipped_count, total_size
+        )
     elif save_type == 'SAVED':
-        # Only process saved items
-        save_saved_user_activity(saved_items, save_directory)
+        processed_count, skipped_count, total_size = save_saved_user_activity(
+            saved_items, save_directory, existing_files, created_dirs_cache, 
+            processed_count, skipped_count, total_size
+        )
 
-def save_all_user_activity(submissions, comments, save_directory):
+    return processed_count, skipped_count, total_size
+
+def save_all_user_activity(submissions, comments, saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size):
     """Save all user posts and comments."""
-    # Save submissions
     for submission in tqdm(submissions, desc="Processing Submissions"):
-        sub_dir = create_directory(submission.subreddit.display_name, save_directory)
+        sub_dir = create_directory(submission.subreddit.display_name, save_directory, created_dirs_cache)
         file_path = os.path.join(sub_dir, f"POST_{submission.id}.md")
-        save_to_file(submission, file_path, save_submission)
+        if save_to_file(submission, file_path, save_submission, existing_files):
+            skipped_count += 1  # Increment skipped count if the file already exists
+            continue  # Skip further processing if the file already exists
 
-    # Save comments
+        processed_count += 1  # Increment processed count
+        total_size += os.path.getsize(file_path)  # Accumulate total size of processed files
+
     for comment in tqdm(comments, desc="Processing Comments"):
-        sub_dir = create_directory(comment.subreddit.display_name, save_directory)
+        sub_dir = create_directory(comment.subreddit.display_name, save_directory, created_dirs_cache)
         file_path = os.path.join(sub_dir, f"COMMENT_{comment.id}.md")
-        save_to_file(comment, file_path, save_comment_and_context)
+        if save_to_file(comment, file_path, save_comment_and_context, existing_files):
+            skipped_count += 1  # Increment skipped count if the file already exists
+            continue  # Skip further processing if the file already exists
+
+        processed_count += 1  # Increment processed count
+        total_size += os.path.getsize(file_path)  # Accumulate total size of processed files
         time.sleep(dynamic_sleep(len(comment.body)))
 
-def save_saved_user_activity(saved_items, save_directory):
+    return processed_count, skipped_count, total_size
+
+
+def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size):
     """Save only saved user posts and comments."""
-    # Process saved submissions and comments in one loop
     for item in tqdm(saved_items, desc="Processing Saved Items"):
         if isinstance(item, Submission):
-            sub_dir = create_directory(item.subreddit.display_name, save_directory)
+            sub_dir = create_directory(item.subreddit.display_name, save_directory, created_dirs_cache)
             file_path = os.path.join(sub_dir, f"SAVED_POST_{item.id}.md")
-            save_to_file(item, file_path, save_submission)
+            if save_to_file(item, file_path, save_submission, existing_files):
+                skipped_count += 1  # Increment skipped count if the file already exists
+                continue  # Skip further processing if the file already exists
         elif isinstance(item, Comment):
-            sub_dir = create_directory(item.subreddit.display_name, save_directory)
+            sub_dir = create_directory(item.subreddit.display_name, save_directory, created_dirs_cache)
             file_path = os.path.join(sub_dir, f"SAVED_COMMENT_{item.id}.md")
-            save_to_file(item, file_path, save_comment_and_context)
+            if save_to_file(item, file_path, save_comment_and_context, existing_files):
+                skipped_count += 1  # Increment skipped count if the file already exists
+                continue  # Skip further processing if the file already exists
             time.sleep(dynamic_sleep(len(item.body)))
+
+        processed_count += 1  # Increment processed count
+        total_size += os.path.getsize(file_path)  # Accumulate total size of processed files
+
+    return processed_count, skipped_count, total_size
