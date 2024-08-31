@@ -242,3 +242,7 @@ Feel free to open issues or submit pull requests if you have any improvements or
 ### Issues:
 - ~~The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.~~
 - ~~The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.~~
+
+### New Features for Future
+
+- Saving the upvoted post and comments with context (https://www.reddit.com/prefs/feeds/), runs two/three times a day.
