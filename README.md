@@ -43,6 +43,8 @@ After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.pn
 3. **Manually Trigger the Workflow**:
 - Go to the **Actions** tab > Select the **Reddit Stash Workflow** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
 
+4. The workflow should run automatically at midnight CET time automatically.
+
 #### Local Installation
 
 1. **Clone this repository**:
@@ -131,6 +133,7 @@ The `settings.ini` file in the root directory of the project allows you to confi
 save_directory = reddit/ # your system save directory
 dropbox_directory = /reddit # your dropbox directory
 save_type = ALL  # Options: 'ALL' to save all activity, 'SAVED' to save only saved posts/comments
+check_type = LOG # Options: 'LOG' to use the logging file to verify the file exisitnece, 'DIR' to verify the file exisitence based on the downloaded directory. 
 
 [Configuration]
 client_id = None  # Can be set here or via environment variables
@@ -138,12 +141,14 @@ client_secret = None  # Can be set here or via environment variables
 username = None  # Can be set here or via environment variables
 password = None  # Can be set here or via environment variables
 ```
-save_directory: Specifies the directory where the Reddit content will be saved, modify it to the location you want it to be in.
-dropbox_directory : Specifies the folder where the Reddit content will be saved on dropbox, modify it to the location you want it to be in.
-save_type: Determines what user activity is saved, accepts these two values:
-* `ALL`: Saves all posts and comments made by the user, along with the saved posts and comments with it's context.
-* `SAVED`: Saves only the posts and comments the user has saved on Reddit with it's context.
-
+* save_directory: Specifies the directory where the Reddit content will be saved, modify it to the location you want it to be in.
+* dropbox_directory : Specifies the folder where the Reddit content will be saved on dropbox, modify it to the location you want it to be in.
+* save_type: Determines what user activity is saved, accepts these two values:
+    * `ALL`: Saves all posts and comments made by the user, along with the saved posts and comments with it's context.
+    * `SAVED`: Saves only the posts and comments the user has saved on Reddit with it's context.
+* check_type : Determines if the file existence needs to be checked using the log file only or using the directory.
+* `LOG` : Uses the log file only to check the file exisitence, faster processing. Recommneded to use in the github action setup.
+* `DIR` : Uses the saved/ downloaded directory to check the file existence, slower processing. Recommended to use in the local setup.
 Note: You can still use environment variables as a fallback or override for the Reddit API credentials if they are not set in the settings.ini file.
 
 #### Setting Up Reddit Environment Variables
