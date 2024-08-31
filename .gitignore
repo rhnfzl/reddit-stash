@@ -165,4 +165,6 @@ cython_debug/
 archive/
 reddit/
 *.md
+*.json
 reddit_acvhive*
+file_log.json

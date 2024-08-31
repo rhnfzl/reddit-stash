@@ -3,6 +3,7 @@ import configparser
 from utils.file_path_validate import validate_and_set_directory
 from utils.file_operations import save_user_activity
 from utils.env_config import load_config_and_env
+from utils.log_utils import load_file_log, log_file, is_file_logged
 
 # Load configuration
 config_parser = configparser.ConfigParser()
@@ -27,8 +28,11 @@ reddit = praw.Reddit(
 )
 
 if __name__ == "__main__":
+    # Load the log file from the save directory
+    file_log = load_file_log(save_directory)
+
     # Process user activity (submissions, comments, and saved items) and get statistics
-    processed_count, skipped_count, total_size = save_user_activity(reddit, save_directory)
+    processed_count, skipped_count, total_size = save_user_activity(reddit, save_directory, file_log)
 
     # Print final statistics of processing
     print(f"Processing completed. {processed_count} items processed, {skipped_count} items skipped.")
