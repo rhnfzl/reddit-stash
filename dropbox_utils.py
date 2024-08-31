@@ -100,7 +100,7 @@ local_dir = validate_and_set_directory(local_dir)
 dropbox_folder = config_parser.get('Settings', 'dropbox_directory', fallback='/reddit')
 
 # Fetch the check_type from the settings.ini file with a fallback
-check_type = config_parser.get('Settings', 'check_type', fallback='LOG').upper()
+check_type = config_parser.get('Settings', 'check_type', fallback='DIR').upper()
 
 def sanitize_filename(filename):
     """Sanitize the filename to be Dropbox-compatible."""
