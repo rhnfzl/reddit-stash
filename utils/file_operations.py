@@ -17,7 +17,7 @@ config_path = os.path.join(BASE_DIR, 'settings.ini')
 config = configparser.ConfigParser()
 config.read(config_path)
 save_type = config.get('Settings', 'save_type', fallback='ALL').upper()
-check_type = config.get('Settings', 'check_type', fallback='LOG').upper()
+check_type = config.get('Settings', 'check_type', fallback='DIR').upper()
 
 def create_directory(subreddit_name, save_directory, created_dirs_cache):
     """Create the directory for saving data if it does not exist."""
