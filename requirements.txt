@@ -1,3 +1,4 @@
 praw
 tqdm
+requests
 dropbox

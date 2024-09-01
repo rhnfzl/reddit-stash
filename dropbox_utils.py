@@ -5,6 +5,7 @@ import dropbox
 import requests
 import hashlib
 import configparser
+from tqdm import tqdm
 from dropbox.exceptions import ApiError
 from dropbox.files import FileMetadata
 
@@ -152,12 +153,17 @@ def upload_directory_to_dropbox(local_directory, dropbox_folder="/"):
     uploaded_size = 0
     skipped_count = 0
 
-    for root, dirs, files in os.walk(local_directory):
-        for file_name in files:
-            # Skip .DS_Store and other hidden files
-            if file_name.startswith('.'):
-                continue
-            
+    # Get a list of all files to upload
+    files_to_upload = [
+        (root, file_name)
+        for root, dirs, files in os.walk(local_directory)
+        for file_name in files
+        if not file_name.startswith('.')  # Skip hidden files like .DS_Store
+    ]
+
+    # Initialize tqdm with the total number of files
+    with tqdm(total=len(files_to_upload), desc="Uploading files to Dropbox") as pbar:
+        for root, file_name in files_to_upload:
             sanitized_name = sanitize_filename(file_name)
             file_path = os.path.join(root, file_name)
             dropbox_path = f"{dropbox_folder}/{os.path.relpath(file_path, local_directory).replace(os.path.sep, '/')}"
@@ -170,6 +176,7 @@ def upload_directory_to_dropbox(local_directory, dropbox_folder="/"):
             # Check if the file exists and is the same on Dropbox
             if dropbox_path.lower() in dropbox_files and dropbox_files[dropbox_path.lower()] == local_content_hash:
                 skipped_count += 1
+                pbar.update(1)
                 continue
 
             # Upload the file since it doesn't exist or has changed
@@ -181,6 +188,9 @@ def upload_directory_to_dropbox(local_directory, dropbox_folder="/"):
                     uploaded_size += file_size
             except ApiError as e:
                 print(f"Failed to upload {file_path} to Dropbox: {e}")
+
+            # Update the progress bar
+            pbar.update(1)
 
     print(f"Upload completed. {uploaded_count} files uploaded ({uploaded_size / (1024 * 1024):.2f} MB).")
     print(f"{skipped_count} files were skipped (already existed or unchanged).")
@@ -194,24 +204,30 @@ def download_directory_from_dropbox(dbx, dropbox_folder, local_directory):
     # List all files currently in the Dropbox folder along with their content hashes
     dropbox_files = list_dropbox_files_with_hashes(dbx, dropbox_folder)
 
-    try:
-        for dropbox_path, dropbox_hash in dropbox_files.items():
-            local_path = os.path.join(local_directory, dropbox_path[len(dropbox_folder):].lstrip('/'))
+    # Initialize tqdm with the total number of files
+    with tqdm(total=len(dropbox_files), desc="Downloading files from Dropbox") as pbar:
+        try:
+            for dropbox_path, dropbox_hash in dropbox_files.items():
+                local_path = os.path.join(local_directory, dropbox_path[len(dropbox_folder):].lstrip('/'))
 
-            if os.path.exists(local_path):
-                local_content_hash = calculate_local_content_hash(local_path)
-                if local_content_hash == dropbox_hash:
-                    skipped_count += 1
-                    continue
+                if os.path.exists(local_path):
+                    local_content_hash = calculate_local_content_hash(local_path)
+                    if local_content_hash == dropbox_hash:
+                        skipped_count += 1
+                        pbar.update(1)
+                        continue
 
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            with open(local_path, "wb") as f:
-                metadata, res = dbx.files_download(dropbox_path)
-                f.write(res.content)
-                downloaded_count += 1
-                downloaded_size += metadata.size
-    except ApiError as err:
-        print(f"Failed to download files from Dropbox folder {dropbox_folder}: {err}")
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, "wb") as f:
+                    metadata, res = dbx.files_download(dropbox_path)
+                    f.write(res.content)
+                    downloaded_count += 1
+                    downloaded_size += metadata.size
+
+                # Update the progress bar
+                pbar.update(1)
+        except ApiError as err:
+            print(f"Failed to download files from Dropbox folder {dropbox_folder}: {err}")
 
     print(f"Download completed. {downloaded_count} files downloaded ({downloaded_size / (1024 * 1024):.2f} MB).")
     print(f"{skipped_count} files were skipped (already existed or unchanged).")
