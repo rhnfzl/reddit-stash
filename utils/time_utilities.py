@@ -10,18 +10,6 @@ def exponential_backoff(attempt: int) -> None:
     logging.info(f"Retrying in {wait_time:.2f} seconds...")
     time.sleep(wait_time)
 
-# def dynamic_sleep(content_length):
-#     """Dynamically adjust sleep time based on content length."""
-#     base_sleep_time = 1
-#     sleep_time = base_sleep_time
-
-#     if content_length > 10000:
-#         sleep_time *= 2
-#     elif content_length > 5000:
-#         sleep_time *= 1.5
-
-#     return sleep_time
-
 def dynamic_sleep(content_length, request_failures=0, max_sleep_time=5):
     """
     Dynamically adjust sleep time based on content length and other factors,

@@ -1,6 +1,6 @@
 # Reddit Stash: Automatically Save Reddit Posts and Comments to Dropbox
 
-**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit saved posts and comments to Dropbox or your local machine. Utilizing GitHub Actions, this script runs daily, automating the process of archiving your Reddit data in Dropbox after a simple setup.
+**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox or your local machine. Utilizing GitHub Actions, this script runs daily, automating the process of archiving your Reddit data in Dropbox after a simple setup.
 
 ## Key Features
 
@@ -14,7 +14,7 @@
 ### Prerequisites
 - Python 3.10
 - Reddit API credentials.
-- A Dropbox account with an API token. (Optional)
+- A Dropbox account with an API token.
 
 ### Installation
 
@@ -132,7 +132,7 @@ The `settings.ini` file in the root directory of the project allows you to confi
 [Settings]
 save_directory = reddit/ # your system save directory
 dropbox_directory = /reddit # your dropbox directory
-save_type = ALL  # Options: 'ALL' to save all activity, 'SAVED' to save only saved posts/comments
+save_type = ALL  # Options: 'ALL' to save all activity, 'SAVED' to save only saved posts/comments, 'ACTIVITY' to save only the users posts and comments, 'UPVOTED' to save users upvoted post and comments
 check_type = LOG # Options: 'LOG' to use the logging file to verify the file exisitnece, 'DIR' to verify the file exisitence based on the downloaded directory. 
 
 [Configuration]
@@ -144,8 +144,10 @@ password = None  # Can be set here or via environment variables
 * save_directory: Specifies the directory where the Reddit content will be saved, modify it to the location you want it to be in.
 * dropbox_directory : Specifies the folder where the Reddit content will be saved on dropbox, modify it to the location you want it to be in.
 * save_type: Determines what user activity is saved, accepts these two values:
-    * `ALL`: Saves all posts and comments made by the user, along with the saved posts and comments with it's context.
+    * `ALL`: Saves all posts and comments made by the user, the saved posts and comments with it's context, along with the the upvoted posts and comments.
     * `SAVED`: Saves only the posts and comments the user has saved on Reddit with it's context.
+    * `ACTIVITY`: Saves only the posts and comments user has made/ posted on reddit with it's context.
+    * `UPVOTED`: Saves only the posts and comments the user has upvoted with it's context.
 * check_type : Determines if the file existence needs to be checked using the log file only or using the directory.
 * `LOG` : Uses the log file only to check the file exisitence, faster processing. Recommneded to use in the github action setup.
 * `DIR` : Uses the saved/ downloaded directory to check the file existence, slower processing. Recommended to use in the local setup.
@@ -153,7 +155,7 @@ Note: You can still use environment variables as a fallback or override for the 
 
 #### Setting Up Reddit Environment Variables
 
-* Create a Reddit app at https://old.reddit.com/prefs/apps/
+* Create a Reddit app at https://www.reddit.com/prefs/apps or https://old.reddit.com/prefs/apps/
 * Set up the name, select `script`, and provide the `redirect_uri` as per the [PRAW docs](https://praw.readthedocs.io/en/latest/getting_started/authentication.html#password-flow).
 
 ![Step 1](resources/reddit_create_app1.png)
@@ -244,5 +246,5 @@ Feel free to open issues or submit pull requests if you have any improvements or
 - ~~The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.~~
 
 ### New Features for Future
-
-- Saving the upvoted post and comments with context (https://www.reddit.com/prefs/feeds/), runs two/three times a day.
+- Build a Docker Image to run it on the Local/ NAS system etc.
+- Processing the export of a user's data from reddit with context. (not so relevent to implement, based on how the repo has been built, but will look into the possibility).

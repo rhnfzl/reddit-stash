@@ -23,10 +23,8 @@ def is_file_logged(log_data, unique_key):
     """Check if a unique key is already logged."""
     return unique_key in log_data
 
-def log_file(log_data, file_id, file_info, save_directory):
-    """Add a file ID and its information to the log."""
-    # Create a unique key by combining file_id and subreddit
-    unique_key = f"{file_id}-{file_info['subreddit']}"
+def log_file(log_data, unique_key, file_info, save_directory):
+    """Add a file information to the log with the provided unique key."""
     
     # Convert the absolute file path to a relative one
     relative_file_path = os.path.relpath(file_info['file_path'], start=save_directory)

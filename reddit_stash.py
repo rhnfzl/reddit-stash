@@ -36,4 +36,4 @@ if __name__ == "__main__":
 
     # Print final statistics of processing
     print(f"Processing completed. {processed_count} items processed, {skipped_count} items skipped.")
-    print(f"Total size of processed data: {total_size / (1024 * 1024):.2f} MB")
+    print(f"Total size of processed markdown file data: {total_size / (1024 * 1024):.2f} MB")

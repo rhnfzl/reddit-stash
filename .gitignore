@@ -168,3 +168,6 @@ reddit/
 *.json
 reddit_acvhive*
 file_log.json
+
+#-----
+Dockerfile
