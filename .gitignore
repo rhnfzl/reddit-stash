@@ -164,6 +164,7 @@ cython_debug/
 # custom ignore directory and files
 archive/
 reddit/
+reddit_archive/
 *.md
 *.json
 reddit_acvhive*

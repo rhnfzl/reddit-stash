@@ -1,4 +1,5 @@
 praw
+dropbox
+pandas
 tqdm
 requests
-dropbox

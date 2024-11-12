@@ -61,7 +61,7 @@ def get_existing_files_from_dir(save_directory):
             existing_files.add(unique_key)
     return existing_files
 
-def save_to_file(content, file_path, save_function, existing_files, file_log, save_directory, created_dirs_cache):
+def save_to_file(content, file_path, save_function, existing_files, file_log, save_directory, created_dirs_cache, unsave=False):
     """Save content to a file using the specified save function."""
     file_id = content.id  # Assuming `id` is unique for each Reddit content
     subreddit_name = content.subreddit.display_name  # Get the subreddit name
@@ -82,7 +82,7 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
     # Proceed with saving the file
     try:
         with open(file_path, 'w', encoding="utf-8") as f:
-            save_function(content, f)
+            save_function(content, f, unsave=unsave)
         
         # Log the file after saving successfully with the unique key
         log_file(file_log, unique_key, {  # Use the unique_key constructed in save_to_file
@@ -106,7 +106,7 @@ def handle_dynamic_sleep(item):
         time.sleep(dynamic_sleep(0))  # Minimal or no sleep for other types of posts
 
 
-def save_user_activity(reddit, save_directory, file_log):
+def save_user_activity(reddit, save_directory, file_log, unsave=False):
     """Save user's posts, comments, saved items, and upvoted content."""
     user = reddit.user.me()
 
@@ -138,7 +138,8 @@ def save_user_activity(reddit, save_directory, file_log):
         # Save all saved items (posts and comments)
         processed_count, skipped_count, total_size = save_saved_user_activity(
             list(user.saved(limit=1000)), save_directory, existing_files, 
-            created_dirs_cache, processed_count, skipped_count, total_size, file_log
+            created_dirs_cache, processed_count, skipped_count, total_size, file_log,
+            unsave=unsave
         )
         
         # Save all upvoted posts and comments
@@ -150,7 +151,8 @@ def save_user_activity(reddit, save_directory, file_log):
     elif save_type == 'SAVED':
         processed_count, skipped_count, total_size = save_saved_user_activity(
             list(user.saved(limit=1000)), save_directory, existing_files, 
-            created_dirs_cache, processed_count, skipped_count, total_size, file_log
+            created_dirs_cache, processed_count, skipped_count, total_size, file_log,
+            unsave=unsave
         )
     
     elif save_type == 'ACTIVITY':
@@ -197,23 +199,23 @@ def save_self_user_activity(submissions, comments, save_directory, existing_file
 
     return processed_count, skipped_count, total_size
 
-def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log):
+def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, unsave=False):
     """Save only saved user posts and comments."""
     for item in tqdm(saved_items, desc="Processing Saved Items"):
         if isinstance(item, Submission):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_POST_{item.id}.md")
-            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache):
-                skipped_count += 1  # Increment skipped count if the file already exists
-                continue  # Skip further processing if the file already exists
+            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave):
+                skipped_count += 1
+                continue
         elif isinstance(item, Comment):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_COMMENT_{item.id}.md")
-            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache):
-                skipped_count += 1  # Increment skipped count if the file already exists
-                continue  # Skip further processing if the file already exists
+            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave):
+                skipped_count += 1
+                continue
 
-        processed_count += 1  # Increment processed count
-        total_size += os.path.getsize(file_path)  # Accumulate total size of processed files
-        handle_dynamic_sleep(item)  # Call the refactored sleep function
+        processed_count += 1
+        total_size += os.path.getsize(file_path)
+        handle_dynamic_sleep(item)
 
     return processed_count, skipped_count, total_size
 
@@ -223,16 +225,16 @@ def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_file
         if isinstance(item, Submission):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_POST_{item.id}.md")
             if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache):
-                skipped_count += 1  # Increment skipped count if the file already exists
-                continue  # Skip further processing if the file already exists
+                skipped_count += 1
+                continue
         elif isinstance(item, Comment):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_COMMENT_{item.id}.md")
             if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache):
-                skipped_count += 1  # Increment skipped count if the file already exists
-                continue  # Skip further processing if the file already exists
+                skipped_count += 1
+                continue
 
-        processed_count += 1  # Increment processed count
-        total_size += os.path.getsize(file_path)  # Accumulate total size of processed files
-        handle_dynamic_sleep(item)  # Call the refactored sleep function
+        processed_count += 1
+        total_size += os.path.getsize(file_path)
+        handle_dynamic_sleep(item)
 
     return processed_count, skipped_count, total_size

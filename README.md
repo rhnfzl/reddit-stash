@@ -4,7 +4,7 @@
 
 ## Key Features
 
-- **Automated Reddit Backup:** Automatically retrieves saved posts and comments from Reddit, even your posts and comments if you setit up.
+- **Automated Reddit Backup:** Automatically retrieves saved posts and comments from Reddit, even your posts and comments if you set it up.
 - **Flexible Storage Options:** Allows for flexible saving options (all activity or only saved items) via `settings.ini`.
 - **Dropbox Integration** : Downloads and Uploads the files to Dropbox for storage.
 - **Markdown Support:** Saves the content as markdown files.
@@ -134,6 +134,9 @@ save_directory = reddit/ # your system save directory
 dropbox_directory = /reddit # your dropbox directory
 save_type = ALL  # Options: 'ALL' to save all activity, 'SAVED' to save only saved posts/comments, 'ACTIVITY' to save only the users posts and comments, 'UPVOTED' to save users upvoted post and comments
 check_type = LOG # Options: 'LOG' to use the logging file to verify the file exisitnece, 'DIR' to verify the file exisitence based on the downloaded directory. 
+unsave_after_download = false
+process_gdpr = false # Whether to process GDPR export data
+process_api = true # Whether to process items from Reddit API (default: true)
 
 [Configuration]
 client_id = None  # Can be set here or via environment variables
@@ -151,6 +154,10 @@ password = None  # Can be set here or via environment variables
 * check_type : Determines if the file existence needs to be checked using the log file only or using the directory.
 * `LOG` : Uses the log file only to check the file exisitence, faster processing. Recommneded to use in the github action setup.
 * `DIR` : Uses the saved/ downloaded directory to check the file existence, slower processing. Recommended to use in the local setup.
+* `unsave_after_download` : Determines if the script should unsave posts after downloading them.
+* `process_gdpr` : Whether to process GDPR export data
+* `process_api` : Whether to process items from Reddit API (default: true)
+
 Note: You can still use environment variables as a fallback or override for the Reddit API credentials if they are not set in the settings.ini file.
 
 #### Setting Up Reddit Environment Variables
@@ -229,6 +236,35 @@ For more information about the setup visit [OAuth Guide](https://developers.drop
 
 - Credits for above DROPBOX_REFRESH_TOKEN solution : https://stackoverflow.com/a/71794390/12983596
 
+### Important Note About Unsaving
+
+The script includes an option to automatically unsave posts after downloading them (`unsave_after_download` in settings.ini). This feature can be used to cycle through older saved posts beyond Reddit's 1000-item limit. 
+
+#### How it works:
+1. The script downloads and saves a post/comment
+2. If successful, it attempts to unsave the item
+3. A small delay is added between unsave operations to respect Reddit's rate limits
+4. Error handling ensures that failed unsaves don't stop the script
+
+#### Important Considerations:
+- **This process is irreversible** - Once items are unsaved, they cannot be automatically restored to your saved items list
+- **Create backups first** - Always ensure you have a backup of your saved items before enabling this feature
+- **Use with caution** - It's recommended to first run the script without unsaving to verify everything works as expected
+- **Rate Limiting** - The script includes built-in delays to avoid hitting Reddit's API limits
+- **Error Recovery** - If an unsave operation fails, the script will continue processing other items
+
+#### Usage:
+1. Set `unsave_after_download = true` in your settings.ini file
+2. Run the script as normal
+3. The script will now unsave items after successfully downloading them
+4. Run the script multiple times to gradually access older saved items
+
+#### Recommended Workflow:
+1. First run: Keep `unsave_after_download = false` and verify all content downloads correctly
+2. Create a backup of your downloaded content
+3. Enable unsaving by setting `unsave_after_download = true`
+4. Run the script multiple times to access progressively older content
+
 ### Key Additions and Changes:
 
 - **Configuration Section**: Added a new section explaining the `settings.ini` file and the `save_type` option.
@@ -248,3 +284,51 @@ Feel free to open issues or submit pull requests if you have any improvements or
 ### New Features for Future
 - Build a Docker Image to run it on the Local/ NAS system etc.
 - Processing the export of a user's data from reddit with context. (not so relevent to implement, based on how the repo has been built, but will look into the possibility).
+
+### GDPR Data Processing
+
+The script can process Reddit's GDPR data export to access your complete saved post history. This feature uses PRAW to fetch full content for each saved item in your export.
+
+#### How to Use GDPR Export:
+
+1. Request your Reddit data:
+   - Go to https://www.reddit.com/settings/data-request
+   - Request your data (processing may take several days)
+   - Download the ZIP file when ready
+
+2. Extract and place the CSV files:
+   - Inside your save directory (from settings.ini), create a `gdpr_data` folder
+   - Example structure:
+     ```
+     reddit/              # Your save directory
+     ├── gdpr_data/      # GDPR data directory
+     │   ├── saved_posts.csv
+     │   └── saved_comments.csv
+     ├── subreddit1/     # Regular saved content
+     └── file_log.json
+     ```
+
+3. Enable GDPR processing:
+   ```ini
+   [Settings]
+   process_gdpr = true
+   ```
+
+4. Run the script:
+   ```bash
+   python reddit_stash.py
+   ```
+
+#### Technical Details:
+- Uses PRAW's built-in rate limiting
+- Processes both submissions and comments
+- Maintains consistent file naming with "GDPR_" prefix
+- Integrates with existing file logging system
+- Handles API errors and retries gracefully
+
+#### Important Notes:
+- GDPR processing runs after regular API processing
+- Each item requires a separate API call to fetch full content
+- Rate limits are shared with regular API processing
+- Large exports may take significant time to process
+- Duplicate items are automatically skipped via file logging
