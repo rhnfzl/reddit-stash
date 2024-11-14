@@ -332,3 +332,52 @@ The script can process Reddit's GDPR data export to access your complete saved p
 - Rate limits are shared with regular API processing
 - Large exports may take significant time to process
 - Duplicate items are automatically skipped via file logging
+
+
+#### Docker Installation
+
+You can run Reddit Stash in a Docker container. This method provides isolation and ensures consistent environment across different systems.
+
+1. **Build the Docker image**:
+   ```bash
+   docker build -t reddit-stash .
+   ```
+
+2. **Run the container**:
+   ```bash
+   docker run -d \
+     -e REDDIT_CLIENT_ID=your_client_id \
+     -e REDDIT_CLIENT_SECRET=your_client_secret \
+     -e REDDIT_USERNAME=your_username \
+     -e REDDIT_PASSWORD=your_password \
+     -e DROPBOX_APP_KEY=your_dropbox_key \
+     -e DROPBOX_APP_SECRET=your_dropbox_secret \
+     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+     -v $(pwd)/reddit:/app/reddit \
+     reddit-stash
+   ```
+
+   For Windows Command Prompt, use:
+   ```cmd
+   docker run -d ^
+     -e REDDIT_CLIENT_ID=your_client_id ^
+     -e REDDIT_CLIENT_SECRET=your_client_secret ^
+     -e REDDIT_USERNAME=your_username ^
+     -e REDDIT_PASSWORD=your_password ^
+     -e DROPBOX_APP_KEY=your_dropbox_key ^
+     -e DROPBOX_APP_SECRET=your_dropbox_secret ^
+     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token ^
+     -v %cd%/reddit:/app/reddit ^
+     reddit-stash
+   ```
+
+#### Docker Notes:
+
+- The container runs as a non-root user for security
+- Data is persisted through a volume mount to your local machine
+- Environment variables must be provided at runtime
+- The container automatically runs the script when started
+- Logs are available through Docker's logging system:
+  ```bash
+  docker logs <container_id>
+  ```
