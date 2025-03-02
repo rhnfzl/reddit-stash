@@ -21,33 +21,93 @@ on:
   
   workflow_dispatch:           # Manual trigger option
 
+# Add concurrency to cancel redundant runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   run-script:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15  # Kill job if it runs longer than 15 minutes
+    container:
+      image: python:3.10-slim
+      
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
+      timeout-minutes: 1  # Checkout should be quick
 
-    - name: Set up Python
-      uses: actions/setup-python@v2
+    # Get date for monthly cache refresh - add to requirements hash
+    - name: Create monthly requirements file hash
+      id: req_hash
+      timeout-minutes: 1
+      run: |
+        apt-get update && apt-get install -y --no-install-recommends git
+        month_year=$(date +'%Y-%m')
+        echo "hash=$month_year-$(sha256sum requirements.txt | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+    # Try to restore compressed Reddit data cache
+    - name: Restore Reddit data from cache
+      id: cache-data
+      timeout-minutes: 2
+      uses: actions/cache@v3
       with:
-        python-version: '3.10'
+        path: ./reddit-data.tar.gz
+        key: reddit-data-${{ github.run_id }}
+        restore-keys: |
+          reddit-data-
+
+    # Extract cache if found
+    - name: Extract Reddit data if cache hit
+      if: steps.cache-data.outputs.cache-hit == 'true'
+      run: |
+        apt-get update && apt-get install -y --no-install-recommends tar gzip
+        mkdir -p ./data
+        tar -xzf ./reddit-data.tar.gz -C ./
+        echo "Data restored from cache"
+
+    # Set up pip cache
+    - name: Cache pip packages
+      timeout-minutes: 2
+      uses: actions/cache@v3
+      with:
+        path: /root/.cache/pip
+        key: ${{ runner.os }}-pip-${{ steps.req_hash.outputs.hash }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
 
     - name: Install dependencies
+      timeout-minutes: 3
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    # Only download from Dropbox if cache miss or daily sync needed
+    - name: Check if daily sync with Dropbox is needed
+      id: check-sync
+      run: |
+        # If it's midnight UTC or manual trigger, force Dropbox sync
+        if [[ "$(date +'%H')" == "00" ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "need_sync=true" >> $GITHUB_OUTPUT
+        elif [[ "${{ steps.cache-data.outputs.cache-hit }}" != "true" ]]; then
+          echo "need_sync=true" >> $GITHUB_OUTPUT
+        else
+          echo "need_sync=false" >> $GITHUB_OUTPUT
+        fi
+
     - name: Download existing Reddit data from Dropbox
+      if: steps.check-sync.outputs.need_sync == 'true'
+      timeout-minutes: 5
       env:
         DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
         DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       run: |
-        python dropbox_utils.py --download  # dowload the files
+        python dropbox_utils.py --download  # download the files
 
     - name: Run Reddit Stash Script
+      timeout-minutes: 5
       env:
         REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
         REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
@@ -56,7 +116,15 @@ jobs:
       run: |
         python reddit_stash.py  # process the files
 
+    # Compress data directory to speed up cache storage
+    - name: Compress data for caching
+      run: |
+        apt-get update && apt-get install -y --no-install-recommends tar gzip
+        tar -czf reddit-data.tar.gz ./data
+
+    # Only upload to Dropbox if data was updated
     - name: Upload updated Reddit data to Dropbox
+      timeout-minutes: 5
       env:
         DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
