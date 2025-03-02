@@ -2,8 +2,11 @@ name: Reddit Stash Scraper
 
 on:
   schedule:
-    - cron: "0 */4 * * *"  # Run every 4 hours (at minute 0 of hours 0, 4, 8, 12, 16, 20)
-  workflow_dispatch:  # Allows manual trigger of the workflow
+    # Higher frequency during peak Reddit activity
+    - cron: "0 8-23/2 * * *"  # Every 2 hours during peak hours (8:00, 10:00, 12:00, 14:00, 16:00, 18:00, 20:00, 22:00 UTC)
+    # Lower frequency during off-peak hours
+    - cron: "0 1,7 * * *"      # Twice during off-peak (01:00 and 07:00 UTC)
+  workflow_dispatch:           # Manual trigger option
 
 jobs:
   run-script:
