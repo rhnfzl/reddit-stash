@@ -2,7 +2,7 @@ name: Reddit Stash Scraper
 
 on:
   schedule:
-    - cron: "0 23 * * *"  # Adjust according to your desired schedule (e.g., 23:00 UTC for midnight CET)
+    - cron: "0 */4 * * *"  # Run every 4 hours (at minute 0 of hours 0, 4, 8, 12, 16, 20)
   workflow_dispatch:  # Allows manual trigger of the workflow
 
 jobs:
