@@ -46,21 +46,19 @@ jobs:
         month_year=$(date +'%Y-%m')
         echo "hash=$month_year-$(sha256sum requirements.txt | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
-    # Setup Python with pip caching
-    - name: Set up pip cache
-      uses: actions/cache@v3
-      with:
-        path: /root/.cache/pip
-        key: ${{ runner.os }}-pip-${{ steps.req_hash.outputs.hash }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-
-    # Install dependencies
-    - name: Install dependencies
+    # Setup pip cache directly with pip
+    - name: Install dependencies with cache
       timeout-minutes: 2
       run: |
+        # Create directory for pip cache
+        mkdir -p /tmp/pip-cache
+        
+        # Use the monthly hash for cache invalidation
+        echo "Using pip cache in /tmp/pip-cache with monthly refresh: ${{ steps.req_hash.outputs.hash }}"
+        
+        # Install with cache
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install --cache-dir=/tmp/pip-cache -r requirements.txt
 
     # Download only the log file from Dropbox
     - name: Download log file from Dropbox
