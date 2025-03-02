@@ -425,7 +425,8 @@ Feel free to open issues or submit pull requests if you have any improvements or
 ### Issues:
 - ~~The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.~~
 - ~~The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.~~
+- ~~ Build a Docker Image to run it on the Local/ NAS system etc. ~~
+- ~~ Processing the export of a user's data from reddit with context. (not so relevent to implement, based on how the repo has been built, but will look into the possibility). ~~
 
 ### New Features for Future
-- Build a Docker Image to run it on the Local/ NAS system etc.
-- Processing the export of a user's data from reddit with context. (not so relevent to implement, based on how the repo has been built, but will look into the possibility).
+- Test the export of users data
