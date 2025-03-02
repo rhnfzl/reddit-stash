@@ -30,40 +30,38 @@ jobs:
   run-script:
     runs-on: ubuntu-latest
     timeout-minutes: 10  # Kill job if it runs longer than 10 minutes
-    container:
-      image: python:3.10-slim
       
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       timeout-minutes: 1
 
-    # Install git and create monthly hash for dependency versioning
-    - name: Create monthly requirements file hash
-      id: req_hash
+    # Create monthly hash for dependency cache invalidation
+    - name: Create monthly cache key
+      id: cache-key
       run: |
-        apt-get update && apt-get install -y --no-install-recommends git
         month_year=$(date +'%Y-%m')
-        echo "hash=$month_year-$(sha256sum requirements.txt | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+        echo "date=$month_year" >> $GITHUB_OUTPUT
 
-    # Optimize pip installation with caching
+    # Set up Python with built-in caching
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+        cache-dependency-path: requirements.txt
+
+    # Install dependencies with pip
     - name: Install dependencies
-      timeout-minutes: 2
       env:
         PIP_DISABLE_PIP_VERSION_CHECK: 1
         PIP_NO_WARN_SCRIPT_LOCATION: 1
         PIP_ROOT_USER_ACTION: ignore
+        # This forces cache invalidation each month
+        MONTHLY_REFRESH: ${{ steps.cache-key.outputs.date }}
       run: |
-        # Configure pip for faster installation
-        mkdir -p /tmp/pip-cache
-        
-        # Output hash for debugging
-        echo "Using monthly refresh: ${{ steps.req_hash.outputs.hash }}"
-        
-        # Install dependencies efficiently
         python -m pip install --upgrade pip
-        pip install --no-cache-dir --upgrade pip setuptools wheel
-        pip install --cache-dir=/tmp/pip-cache -r requirements.txt
+        pip install -r requirements.txt
 
     # Download only the log file from Dropbox
     - name: Download log file from Dropbox
