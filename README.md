@@ -8,6 +8,9 @@
 - **Flexible Storage Options:** Allows for flexible saving options (all activity or only saved items) via `settings.ini`.
 - **Dropbox Integration** : Downloads and Uploads the files to Dropbox for storage.
 - **Markdown Support:** Saves the content as markdown files.
+- **File Deduplication:** Uses intelligent file existence checking to avoid re-downloading content.
+- **Rate Limit Management:** Implements dynamic sleep timers to respect Reddit's API rate limits.
+- **GDPR Data Processing:** Optional processing of Reddit's GDPR export data.
 
 ## Setup
 
@@ -27,7 +30,7 @@ Before proceeding with any installation method, ensure that you have set the Red
 1. **Fork this repository**.
 
 2. **Set Up Secrets:**
-- Go to your forked repository’s **Settings** > **Secrets and variables** > **Actions** > Click on **New repository secret**.
+- Go to your forked repository's **Settings** > **Secrets and variables** > **Actions** > Click on **New repository secret**.
 - Add the following secrets individually:
     - `REDDIT_CLIENT_ID`
     - `REDDIT_CLIENT_SECRET`
@@ -126,7 +129,7 @@ After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.pn
 
 #### `settings.ini` File
 
-The `settings.ini` file in the root directory of the project allows you to configure how Reddit Stash operates. Here’s what each section of the file does:
+The `settings.ini` file in the root directory of the project allows you to configure how Reddit Stash operates. Here's what each section of the file does:
 
 ```ini
 [Settings]
@@ -144,19 +147,22 @@ client_secret = None  # Can be set here or via environment variables
 username = None  # Can be set here or via environment variables
 password = None  # Can be set here or via environment variables
 ```
-* save_directory: Specifies the directory where the Reddit content will be saved, modify it to the location you want it to be in.
-* dropbox_directory : Specifies the folder where the Reddit content will be saved on dropbox, modify it to the location you want it to be in.
-* save_type: Determines what user activity is saved, accepts these two values:
-    * `ALL`: Saves all posts and comments made by the user, the saved posts and comments with it's context, along with the the upvoted posts and comments.
-    * `SAVED`: Saves only the posts and comments the user has saved on Reddit with it's context.
-    * `ACTIVITY`: Saves only the posts and comments user has made/ posted on reddit with it's context.
-    * `UPVOTED`: Saves only the posts and comments the user has upvoted with it's context.
-* check_type : Determines if the file existence needs to be checked using the log file only or using the directory.
-* `LOG` : Uses the log file only to check the file exisitence, faster processing. Recommneded to use in the github action setup.
-* `DIR` : Uses the saved/ downloaded directory to check the file existence, slower processing. Recommended to use in the local setup.
-* `unsave_after_download` : Determines if the script should unsave posts after downloading them.
-* `process_gdpr` : Whether to process GDPR export data
-* `process_api` : Whether to process items from Reddit API (default: true)
+
+#### Settings Explained:
+
+* **save_directory**: Specifies the directory where the Reddit content will be saved, modify it to the location you want it to be in.
+* **dropbox_directory**: Specifies the folder where the Reddit content will be saved on dropbox, modify it to the location you want it to be in.
+* **save_type**: Determines what user activity is saved:
+    * `ALL`: Saves all posts and comments made by the user, the saved posts and comments with their context, along with the upvoted posts and comments.
+    * `SAVED`: Saves only the posts and comments the user has saved on Reddit with their context.
+    * `ACTIVITY`: Saves only the posts and comments user has made/posted on Reddit with their context.
+    * `UPVOTED`: Saves only the posts and comments the user has upvoted with their context.
+* **check_type**: Determines how file existence is checked:
+    * `LOG`: Uses only the log file to check for file existence (faster processing). Recommended for GitHub Actions setup.
+    * `DIR`: Checks the saved/downloaded directory for file existence (slower but more thorough). Recommended for local setup.
+* **unsave_after_download**: When set to `true`, automatically unsaves posts after downloading them (see notes below).
+* **process_gdpr**: When set to `true`, processes GDPR export data (explained in detail below).
+* **process_api**: When set to `true` (default), processes items from the Reddit API.
 
 Note: You can still use environment variables as a fallback or override for the Reddit API credentials if they are not set in the settings.ini file.
 
@@ -265,26 +271,6 @@ The script includes an option to automatically unsave posts after downloading th
 3. Enable unsaving by setting `unsave_after_download = true`
 4. Run the script multiple times to access progressively older content
 
-### Key Additions and Changes:
-
-- **Configuration Section**: Added a new section explaining the `settings.ini` file and the `save_type` option.
-- **Setup Instructions**: Provided guidance on editing the `settings.ini` file and clarifying the role of environment variables as a fallback.
-- **Consistent Documentation**: Updated the usage instructions to reflect the new configuration options.
-
-### Contributing
-Feel free to open issues or submit pull requests if you have any improvements or bug fixes.
-
-### Acknowledgement
-- This project was inspired by [reddit-saved-saver](https://github.com/tobiasvl/reddit-saved-saver).
-
-### Issues:
-- ~~The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.~~
-- ~~The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.~~
-
-### New Features for Future
-- Build a Docker Image to run it on the Local/ NAS system etc.
-- Processing the export of a user's data from reddit with context. (not so relevent to implement, based on how the repo has been built, but will look into the possibility).
-
 ### GDPR Data Processing
 
 The script can process Reddit's GDPR data export to access your complete saved post history. This feature uses PRAW to fetch full content for each saved item in your export.
@@ -343,9 +329,9 @@ You can run Reddit Stash in a Docker container. This method provides isolation a
    docker build -t reddit-stash .
    ```
 
-2. **Run the container**:
+2. **Run the container for standard operation**:
    ```bash
-   docker run -d \
+   docker run -it \
      -e REDDIT_CLIENT_ID=your_client_id \
      -e REDDIT_CLIENT_SECRET=your_client_secret \
      -e REDDIT_USERNAME=your_username \
@@ -359,7 +345,7 @@ You can run Reddit Stash in a Docker container. This method provides isolation a
 
    For Windows Command Prompt, use:
    ```cmd
-   docker run -d ^
+   docker run -it ^
      -e REDDIT_CLIENT_ID=your_client_id ^
      -e REDDIT_CLIENT_SECRET=your_client_secret ^
      -e REDDIT_USERNAME=your_username ^
@@ -371,13 +357,75 @@ You can run Reddit Stash in a Docker container. This method provides isolation a
      reddit-stash
    ```
 
+3. **Run the container for Dropbox operations**:
+
+   To upload to Dropbox:
+   ```bash
+   docker run -it \
+     -e DROPBOX_APP_KEY=your_dropbox_key \
+     -e DROPBOX_APP_SECRET=your_dropbox_secret \
+     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+     -v $(pwd)/reddit:/app/reddit \
+     reddit-stash dropbox_utils.py --upload
+   ```
+
+   To download from Dropbox:
+   ```bash
+   docker run -it \
+     -e DROPBOX_APP_KEY=your_dropbox_key \
+     -e DROPBOX_APP_SECRET=your_dropbox_secret \
+     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+     -v $(pwd)/reddit:/app/reddit \
+     reddit-stash dropbox_utils.py --download
+   ```
+
+   Windows Command Prompt versions follow the same pattern with `^` for line continuation.
+
 #### Docker Notes:
 
 - The container runs as a non-root user for security
-- Data is persisted through a volume mount to your local machine
+- Data is persisted through a volume mount (`-v $(pwd)/reddit:/app/reddit`) to your local machine
 - Environment variables must be provided at runtime
-- The container automatically runs the script when started
-- Logs are available through Docker's logging system:
+- The container uses an ENTRYPOINT/CMD configuration for flexibility in running different scripts
+- We use `-it` flags for interactive operation with output visible in your terminal
+- You can also run in detached mode with `-d` if you prefer:
+  ```bash
+  docker run -d \
+    -e REDDIT_CLIENT_ID=your_client_id \
+    [other environment variables] \
+    -v $(pwd)/reddit:/app/reddit \
+    reddit-stash
+  ```
+- Logs are available through Docker's logging system when running in detached mode:
   ```bash
   docker logs <container_id>
   ```
+
+### File Organization and Utilities
+
+Reddit Stash organizes content by subreddit with a clear file naming convention:
+
+- **Posts**: `POST_[post_id].md` or `GDPR_POST_[post_id].md`
+- **Comments**: `COMMENT_[comment_id].md` or `GDPR_COMMENT_[comment_id].md`
+
+The system includes several utility modules:
+
+- **file_operations.py**: Handles all file saving and organization logic
+- **save_utils.py**: Contains the core content formatting functions
+- **gdpr_processor.py**: Processes the GDPR data export
+- **time_utilities.py**: Manages rate limiting and API request timing
+- **log_utils.py**: Tracks processed files to avoid duplicates
+
+### Contributing
+Feel free to open issues or submit pull requests if you have any improvements or bug fixes.
+
+### Acknowledgement
+- This project was inspired by [reddit-saved-saver](https://github.com/tobiasvl/reddit-saved-saver).
+
+### Issues:
+- ~~The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.~~
+- ~~The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.~~
+
+### New Features for Future
+- Build a Docker Image to run it on the Local/ NAS system etc.
+- Processing the export of a user's data from reddit with context. (not so relevent to implement, based on how the repo has been built, but will look into the possibility).
