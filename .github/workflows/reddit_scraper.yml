@@ -38,7 +38,7 @@ jobs:
       uses: actions/checkout@v4
       timeout-minutes: 1
 
-    # Create a hash that changes monthly for dependency cache refresh
+    # Install git and create monthly hash for dependency versioning
     - name: Create monthly requirements file hash
       id: req_hash
       run: |
@@ -46,18 +46,23 @@ jobs:
         month_year=$(date +'%Y-%m')
         echo "hash=$month_year-$(sha256sum requirements.txt | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
-    # Setup pip cache directly with pip
-    - name: Install dependencies with cache
+    # Optimize pip installation with caching
+    - name: Install dependencies
       timeout-minutes: 2
+      env:
+        PIP_DISABLE_PIP_VERSION_CHECK: 1
+        PIP_NO_WARN_SCRIPT_LOCATION: 1
+        PIP_ROOT_USER_ACTION: ignore
       run: |
-        # Create directory for pip cache
+        # Configure pip for faster installation
         mkdir -p /tmp/pip-cache
         
-        # Use the monthly hash for cache invalidation
-        echo "Using pip cache in /tmp/pip-cache with monthly refresh: ${{ steps.req_hash.outputs.hash }}"
+        # Output hash for debugging
+        echo "Using monthly refresh: ${{ steps.req_hash.outputs.hash }}"
         
-        # Install with cache
+        # Install dependencies efficiently
         python -m pip install --upgrade pip
+        pip install --no-cache-dir --upgrade pip setuptools wheel
         pip install --cache-dir=/tmp/pip-cache -r requirements.txt
 
     # Download only the log file from Dropbox
