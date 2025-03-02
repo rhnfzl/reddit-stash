@@ -2,10 +2,23 @@ name: Reddit Stash Scraper
 
 on:
   schedule:
-    # Higher frequency during peak Reddit activity
-    - cron: "0 8-23/2 * * *"  # Every 2 hours during peak hours (8:00, 10:00, 12:00, 14:00, 16:00, 18:00, 20:00, 22:00 UTC)
-    # Lower frequency during off-peak hours
-    - cron: "0 1,7 * * *"      # Twice during off-peak (01:00 and 07:00 UTC)
+    # TIMEZONE INFORMATION: 
+    # - GitHub Actions uses UTC time for all cron schedules
+    # - Netherlands is UTC+1 (CET) in winter and UTC+2 (CEST) in summer
+    # - To convert from your local time to UTC: subtract your UTC offset (e.g., for Netherlands CEST: 14:00 CEST - 2 hours = 12:00 UTC)
+    # - To convert from UTC to your local time: add your UTC offset (e.g., for Netherlands CEST: 12:00 UTC + 2 hours = 14:00 CEST)
+    #
+    # ADJUSTING FOR YOUR TIMEZONE:
+    # 1. Determine your timezone's UTC offset (examples: US Eastern = UTC-4/5, Japan = UTC+9, UK = UTC+0/1)
+    # 2. For desired local time X, set the UTC time to: X - (your UTC offset)
+    # 3. Update both cron expressions below with your calculated UTC times
+    
+    # Higher frequency during Netherlands peak hours (8:00-23:00 CEST = 6:00-21:00 UTC)
+    - cron: "0 6-21/2 * * *"  # Every 2 hours during peak hours (converts to 8:00-23:00 Netherlands time in summer)
+    
+    # Lower frequency during Netherlands off-peak hours
+    - cron: "0 23,3 * * *"    # Twice during off-peak (converts to 1:00 and 5:00 Netherlands time in summer)
+  
   workflow_dispatch:           # Manual trigger option
 
 jobs:
