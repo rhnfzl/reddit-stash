@@ -36,12 +36,16 @@ jobs:
       uses: actions/checkout@v4
       timeout-minutes: 1
 
-    # Create monthly hash for dependency cache invalidation
-    - name: Create monthly cache key
+    # Create 6-month refresh key for dependency cache invalidation
+    - name: Create semi-annual cache key
       id: cache-key
       run: |
-        month_year=$(date +'%Y-%m')
-        echo "date=$month_year" >> $GITHUB_OUTPUT
+        # Get current year and determine which half of the year we're in (1 or 2)
+        year=$(date +'%Y')
+        month=$(date +'%-m')
+        half_year=$((month <= 6 ? 1 : 2))
+        echo "date=${year}-H${half_year}" >> $GITHUB_OUTPUT
+        echo "Using cache key: ${year}-H${half_year}"
 
     # Set up Python with built-in caching
     - name: Set up Python
@@ -57,8 +61,8 @@ jobs:
         PIP_DISABLE_PIP_VERSION_CHECK: 1
         PIP_NO_WARN_SCRIPT_LOCATION: 1
         PIP_ROOT_USER_ACTION: ignore
-        # This forces cache invalidation each month
-        MONTHLY_REFRESH: ${{ steps.cache-key.outputs.date }}
+        # This forces cache invalidation every 6 months
+        SEMI_ANNUAL_REFRESH: ${{ steps.cache-key.outputs.date }}
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
