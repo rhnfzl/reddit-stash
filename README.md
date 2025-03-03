@@ -1,23 +1,161 @@
 # Reddit Stash: Automatically Save Reddit Posts and Comments to Dropbox
 
+[![Python](https://img.shields.io/badge/Python-3.10-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Workflow-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/features/actions)
+[![Dropbox](https://img.shields.io/badge/Dropbox-Integration-0061FF?style=for-the-badge&logo=dropbox&logoColor=white)](https://www.dropbox.com/)
+[![Reddit](https://img.shields.io/badge/Reddit-API-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/dev/api/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
+
 **Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox or your local machine. Utilizing GitHub Actions, this script runs daily, automating the process of archiving your Reddit data in Dropbox after a simple setup.
+
+## 📋 What You Get
+
+When Reddit Stash runs successfully, your saved content is organized by subreddit in a clean folder structure and stored as markdown files:
+
+```
+reddit/
+├── r_AskReddit/
+│   ├── POST_abcd123.md
+│   └── COMMENT_efgh456.md
+├── r_ProgrammerHumor/
+│   └── POST_ijkl789.md
+└── file_log.json
+```
+
+Each post and comment is formatted with:
+- Original title and content
+- Author information
+- Post/comment URL
+- Timestamp
+- Subreddit details
+- Any images or links from the original post
+
+## How It Works
+
+```mermaid
+graph LR
+    A[Reddit API] -->|Fetch Content| B[Reddit Stash Script]
+    B -->|Save as Markdown| C[Local Storage]
+    B -->|Check Settings| D{Save Type}
+    D -->|SAVED| E[Saved Posts/Comments]
+    D -->|ACTIVITY| F[User Posts/Comments]
+    D -->|UPVOTED| G[Upvoted Content]
+    D -->|ALL| H[All Content Types]
+    C -->|Optional| I[Dropbox Upload]
+    J[GDPR Export] -->|Optional| B
+```
+
+The script connects to Reddit's API, fetches your content based on your settings, saves it locally as markdown files, and optionally uploads everything to Dropbox for safe storage.
+
+## Table of Contents
+- [How It Works](#how-it-works)
+- [What You Get](#-what-you-get)
+- [Quick Start](#-quick-start)
+  - [Setup Method Comparison](#setup-method-comparison)
+- [Key Features](#key-features)
+- [Why Use Reddit Stash](#-why-use-reddit-stash)
+- [Setup](#setup)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+    - [GitHub Action Installation](#github-action-installation-recommended)
+    - [Local Installation](#local-installation)
+    - [Docker Installation](#docker-installation)
+  - [Setup Verification Checklist](#setup-verification-checklist)
+- [Configuration](#configuration)
+  - [Settings.ini File](#settingsini-file)
+  - [Setting Up Reddit Environment Variables](#setting-up-reddit-environment-variables)
+  - [Setting Up Dropbox App](#setting-up-dropbox-app)
+- [Important Notes](#important-notes)
+  - [About Unsaving](#important-note-about-unsaving)
+  - [GDPR Data Processing](#gdpr-data-processing)
+- [File Organization and Utilities](#file-organization-and-utilities)
+- [Frequently Asked Questions](#frequently-asked-questions)
+- [Troubleshooting](#-troubleshooting)
+- [Security Considerations](#-security-considerations)
+- [Contributing](#contributing)
+- [Acknowledgement](#acknowledgement)
+- [Project Status](#project-status)
+  - [Resolved Issues](#resolved-issues)
+  - [Future Enhancements](#future-enhancements)
+- [License](#license)
+
+## ⚡ Quick Start
+
+For those who want to get up and running quickly, here's a streamlined process:
+
+### Option 1: GitHub Actions (Easiest Setup)
+
+1. Fork this repository.
+2. Set up the required secrets in your GitHub repository:
+   - From Reddit: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`
+   - From Dropbox: `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`
+3. Manually trigger the workflow from the Actions tab.
+
+### Option 2: Local Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/rhnfzl/reddit-stash.git
+   cd reddit-stash
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Set up your environment variables and run:
+   ```bash
+   python reddit_stash.py
+   ```
+
+For detailed setup instructions, continue reading the [Setup](#setup) section.
+
+### Setup Method Comparison
+
+| Feature | GitHub Actions | Local Installation | Docker |
+|---------|---------------|-------------------|--------|
+| **Ease of Setup** | ⭐⭐⭐ (Easiest) | ⭐⭐ | ⭐⭐ |
+| **Automation** | ✅ Runs on schedule | ❌ Manual or requires cron | ✅ Can be scheduled |
+| **Requirements** | GitHub account | Python 3.10 | Docker |
+| **Data Storage** | Dropbox required | Local or Dropbox | Local or Dropbox |
+| **Maintenance** | Minimal | More hands-on | Medium |
+| **Privacy** | Credentials in GitHub secrets | Credentials on local machine | Credentials in container |
+| **Best For** | Set & forget users | Power users with customization needs | Users with existing Docker infrastructure |
 
 ## Key Features
 
-- **Automated Reddit Backup:** Automatically retrieves saved posts and comments from Reddit, even your posts and comments if you set it up.
-- **Flexible Storage Options:** Allows for flexible saving options (all activity or only saved items) via `settings.ini`.
-- **Dropbox Integration** : Downloads and Uploads the files to Dropbox for storage.
-- **Markdown Support:** Saves the content as markdown files.
-- **File Deduplication:** Uses intelligent file existence checking to avoid re-downloading content.
-- **Rate Limit Management:** Implements dynamic sleep timers to respect Reddit's API rate limits.
-- **GDPR Data Processing:** Optional processing of Reddit's GDPR export data.
+- 🤖 **Automated Reddit Backup:** Automatically retrieves saved posts and comments from Reddit, even your posts and comments if you set it up.
+- 🔄 **Flexible Storage Options:** Allows for flexible saving options (all activity or only saved items) via `settings.ini`.
+- 📦 **Dropbox Integration:** Downloads and uploads the files to Dropbox for storage.
+- 📝 **Markdown Support:** Saves the content as markdown files.
+- 🔍 **File Deduplication:** Uses intelligent file existence checking to avoid re-downloading content.
+- ⏱️ **Rate Limit Management:** Implements dynamic sleep timers to respect Reddit's API rate limits.
+- 🔒 **GDPR Data Processing:** Optional processing of Reddit's GDPR export data.
+
+## 🎯 Why Use Reddit Stash
+
+Reddit Stash was designed with specific use cases in mind:
+
+### 1. Overcome Reddit's Limitations
+Reddit only shows your most recent 1000 saved posts. With Reddit Stash, you can save everything and go beyond this limitation.
+
+### 2. Create a Personal Knowledge Base
+Many users save technical posts, tutorials, or valuable discussions on Reddit. Reddit Stash helps you build a searchable archive of this knowledge.
+
+### 3. Preserve Content Before It's Deleted
+Reddit posts and comments can be deleted by users or moderation. Reddit Stash preserves this content in your personal archive.
+
+### 4. Access Your Content Offline
+All of your saved posts are available locally in markdown format, making them easily accessible even without an internet connection.
+
+### 5. Integration with Note-Taking Systems
+Since content is saved in markdown, you can easily import it into note-taking systems like Obsidian, Notion, or any markdown-compatible tool.
 
 ## Setup
 
 ### Prerequisites
-- Python 3.10
-- Reddit API credentials.
-- A Dropbox account with an API token.
+- ✅ Python 3.10
+- 🔑 Reddit API credentials
+- 📊 A Dropbox account with an API token
 
 ### Installation
 
@@ -128,6 +266,116 @@ After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.pn
     ```
     python dropbox_utils.py --upload
     ```
+
+#### Docker Installation
+
+You can run Reddit Stash in a Docker container. This method provides isolation and ensures consistent environment across different systems.
+
+1. **Build the Docker image**:
+   ```bash
+   docker build -t reddit-stash .
+   ```
+
+2. **Run the container for standard operation**:
+   ```bash
+   docker run -it \
+     -e REDDIT_CLIENT_ID=your_client_id \
+     -e REDDIT_CLIENT_SECRET=your_client_secret \
+     -e REDDIT_USERNAME=your_username \
+     -e REDDIT_PASSWORD=your_password \
+     -e DROPBOX_APP_KEY=your_dropbox_key \
+     -e DROPBOX_APP_SECRET=your_dropbox_secret \
+     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+     -v $(pwd)/reddit:/app/reddit \
+     reddit-stash
+   ```
+
+   For Windows Command Prompt, use:
+   ```cmd
+   docker run -it ^
+     -e REDDIT_CLIENT_ID=your_client_id ^
+     -e REDDIT_CLIENT_SECRET=your_client_secret ^
+     -e REDDIT_USERNAME=your_username ^
+     -e REDDIT_PASSWORD=your_password ^
+     -e DROPBOX_APP_KEY=your_dropbox_key ^
+     -e DROPBOX_APP_SECRET=your_dropbox_secret ^
+     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token ^
+     -v %cd%/reddit:/app/reddit ^
+     reddit-stash
+   ```
+
+3. **Run the container for Dropbox operations**:
+
+   To upload to Dropbox:
+   ```bash
+   docker run -it \
+     -e DROPBOX_APP_KEY=your_dropbox_key \
+     -e DROPBOX_APP_SECRET=your_dropbox_secret \
+     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+     -v $(pwd)/reddit:/app/reddit \
+     reddit-stash dropbox_utils.py --upload
+   ```
+
+   To download from Dropbox:
+   ```bash
+   docker run -it \
+     -e DROPBOX_APP_KEY=your_dropbox_key \
+     -e DROPBOX_APP_SECRET=your_dropbox_secret \
+     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+     -v $(pwd)/reddit:/app/reddit \
+     reddit-stash dropbox_utils.py --download
+   ```
+
+   Windows Command Prompt versions follow the same pattern with `^` for line continuation.
+
+#### Docker Notes:
+
+- The container runs as a non-root user for security
+- Data is persisted through a volume mount (`-v $(pwd)/reddit:/app/reddit`) to your local machine
+- Environment variables must be provided at runtime
+- The container uses an ENTRYPOINT/CMD configuration for flexibility in running different scripts
+- We use `-it` flags for interactive operation with output visible in your terminal
+- You can also run in detached mode with `-d` if you prefer:
+  ```bash
+  docker run -d \
+    -e REDDIT_CLIENT_ID=your_client_id \
+    [other environment variables] \
+    -v $(pwd)/reddit:/app/reddit \
+    reddit-stash
+  ```
+- Logs are available through Docker's logging system when running in detached mode:
+  ```bash
+  docker logs <container_id>
+  ```
+
+### Setup Verification Checklist
+
+After completing your chosen installation method, verify that everything is working correctly:
+
+#### For GitHub Actions Setup:
+- [ ] Repository forked successfully
+- [ ] All required secrets added to repository settings
+- [ ] Workflow manually triggered at least once
+- [ ] Workflow completes without errors (check Actions tab)
+- [ ] Reddit folder appears in your Dropbox account
+- [ ] Content files are present and readable
+
+#### For Local Installation:
+- [ ] Python 3.10 installed and working
+- [ ] Repository cloned successfully
+- [ ] Dependencies installed via `pip install -r requirements.txt`
+- [ ] Environment variables set correctly
+- [ ] Script runs without errors
+- [ ] Content saved to specified directory
+- [ ] (Optional) Content uploaded to Dropbox if configured
+
+#### For Docker Installation:
+- [ ] Docker installed and daemon running
+- [ ] Image built successfully
+- [ ] Container runs without errors
+- [ ] Content appears in mounted volume
+- [ ] (Optional) Content uploaded to Dropbox if configured
+
 ## Configuration
 
 #### `settings.ini` File
@@ -245,9 +493,11 @@ For more information about the setup visit [OAuth Guide](https://developers.drop
 
 - Credits for above DROPBOX_REFRESH_TOKEN solution : https://stackoverflow.com/a/71794390/12983596
 
+## Important Notes
+
 ### Important Note About Unsaving
 
-The script includes an option to automatically unsave posts after downloading them (`unsave_after_download` in settings.ini). This feature can be used to cycle through older saved posts beyond Reddit's 1000-item limit. 
+⚠️ **The script includes an option to automatically unsave posts after downloading them (`unsave_after_download` in settings.ini). This feature can be used to cycle through older saved posts beyond Reddit's 1000-item limit.**
 
 #### How it works:
 1. The script downloads and saves a post/comment
@@ -322,88 +572,6 @@ The script can process Reddit's GDPR data export to access your complete saved p
 - Large exports may take significant time to process
 - Duplicate items are automatically skipped via file logging
 
-
-#### Docker Installation
-
-You can run Reddit Stash in a Docker container. This method provides isolation and ensures consistent environment across different systems.
-
-1. **Build the Docker image**:
-   ```bash
-   docker build -t reddit-stash .
-   ```
-
-2. **Run the container for standard operation**:
-   ```bash
-   docker run -it \
-     -e REDDIT_CLIENT_ID=your_client_id \
-     -e REDDIT_CLIENT_SECRET=your_client_secret \
-     -e REDDIT_USERNAME=your_username \
-     -e REDDIT_PASSWORD=your_password \
-     -e DROPBOX_APP_KEY=your_dropbox_key \
-     -e DROPBOX_APP_SECRET=your_dropbox_secret \
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-     -v $(pwd)/reddit:/app/reddit \
-     reddit-stash
-   ```
-
-   For Windows Command Prompt, use:
-   ```cmd
-   docker run -it ^
-     -e REDDIT_CLIENT_ID=your_client_id ^
-     -e REDDIT_CLIENT_SECRET=your_client_secret ^
-     -e REDDIT_USERNAME=your_username ^
-     -e REDDIT_PASSWORD=your_password ^
-     -e DROPBOX_APP_KEY=your_dropbox_key ^
-     -e DROPBOX_APP_SECRET=your_dropbox_secret ^
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token ^
-     -v %cd%/reddit:/app/reddit ^
-     reddit-stash
-   ```
-
-3. **Run the container for Dropbox operations**:
-
-   To upload to Dropbox:
-   ```bash
-   docker run -it \
-     -e DROPBOX_APP_KEY=your_dropbox_key \
-     -e DROPBOX_APP_SECRET=your_dropbox_secret \
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-     -v $(pwd)/reddit:/app/reddit \
-     reddit-stash dropbox_utils.py --upload
-   ```
-
-   To download from Dropbox:
-   ```bash
-   docker run -it \
-     -e DROPBOX_APP_KEY=your_dropbox_key \
-     -e DROPBOX_APP_SECRET=your_dropbox_secret \
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-     -v $(pwd)/reddit:/app/reddit \
-     reddit-stash dropbox_utils.py --download
-   ```
-
-   Windows Command Prompt versions follow the same pattern with `^` for line continuation.
-
-#### Docker Notes:
-
-- The container runs as a non-root user for security
-- Data is persisted through a volume mount (`-v $(pwd)/reddit:/app/reddit`) to your local machine
-- Environment variables must be provided at runtime
-- The container uses an ENTRYPOINT/CMD configuration for flexibility in running different scripts
-- We use `-it` flags for interactive operation with output visible in your terminal
-- You can also run in detached mode with `-d` if you prefer:
-  ```bash
-  docker run -d \
-    -e REDDIT_CLIENT_ID=your_client_id \
-    [other environment variables] \
-    -v $(pwd)/reddit:/app/reddit \
-    reddit-stash
-  ```
-- Logs are available through Docker's logging system when running in detached mode:
-  ```bash
-  docker logs <container_id>
-  ```
-
 ### File Organization and Utilities
 
 Reddit Stash organizes content by subreddit with a clear file naming convention:
@@ -419,17 +587,148 @@ The system includes several utility modules:
 - **time_utilities.py**: Manages rate limiting and API request timing
 - **log_utils.py**: Tracks processed files to avoid duplicates
 
-### Contributing
+## Frequently Asked Questions
+
+### General Questions
+
+**Q: Why would I want to backup my Reddit content?**  
+A: Reddit only allows you to access your most recent 1000 saved items. This tool lets you preserve everything beyond that limit and ensures you have a backup even if content is removed from Reddit.
+
+**Q: How often does the automated backup run?**  
+A: If you use the GitHub Actions setup, it runs on a schedule:
+- Every 2 hours during peak hours (8:00-23:00 CET time in summer)
+- Twice during off-peak hours (1:00 and 5:00 CET time in summer)
+
+**Q: Can I run this without GitHub Actions?**  
+A: Yes, you can run it locally on your machine or set up the Docker container version. The README provides instructions for both options.
+
+### Technical Questions
+
+**Q: Does this access private/NSFW subreddits I've saved content from?**  
+A: Yes, as long as you're logged in with your own Reddit credentials, the script can access any content you've saved, including from private or NSFW subreddits.
+
+**Q: How can I verify the script is working correctly?**  
+A: Check your specified save directory for the backed-up files. They should be organized by subreddit with clear naming conventions.
+
+**Q: Will this impact my Reddit account in any way?**  
+A: No, unless you enable the `unsave_after_download` option. This script only reads your data by default; it doesn't modify anything on Reddit unless that specific option is enabled.
+
+**Q: What happens if the script encounters rate limits?**  
+A: The script has built-in dynamic sleep timers to respect Reddit's API rate limits. It will automatically pause and retry when necessary.
+
+## 🔧 Troubleshooting
+
+If you encounter issues with Reddit Stash, here are solutions to common problems:
+
+### Authentication Issues
+
+**Problem**: "Invalid credentials" or "Authentication failed" errors
+- **Solution**: 
+  1. Double-check your Reddit API credentials
+  2. Ensure your Reddit account is verified with an email address
+  3. Make sure your app is properly set up with the correct redirect URI
+  4. Verify that your password is correct (for local installations)
+
+### Rate Limiting
+
+**Problem**: "Too many requests" or frequent pauses during execution
+- **Solution**: 
+  1. This is normal behavior to respect Reddit's API limits
+  2. The script will automatically slow down and retry
+  3. For larger archives, consider running at off-peak hours
+  4. Try reducing the frequency of scheduled runs in GitHub Actions
+
+### Empty Results
+
+**Problem**: Script runs successfully but no files are saved
+- **Solution**: 
+  1. Verify that your Reddit account has saved posts/comments
+  2. Check your `settings.ini` file to ensure the correct `save_type` is selected
+  3. Look at the console output for any warnings or errors
+  4. Make sure your file paths in settings.ini are correct
+
+### Dropbox Issues
+
+**Problem**: Files aren't appearing in Dropbox
+- **Solution**: 
+  1. Verify your Dropbox API credentials and refresh token
+  2. Check that your Dropbox app has the correct permissions
+  3. Run `python dropbox_utils.py --upload` manually to test the upload
+  4. Look for error messages during the upload process
+
+### GitHub Actions Workflow Failures
+
+**Problem**: GitHub Actions workflow fails
+- **Solution**: 
+  1. Check the workflow logs for detailed error messages
+  2. Verify all required secrets are set correctly
+  3. Make sure your Dropbox token hasn't expired
+  4. Check for changes in the Reddit API that might affect the script
+
+If you're experiencing issues not covered here, please open an issue on GitHub with details about the problem and any error messages you received.
+
+## 🔐 Security Considerations
+
+When using Reddit Stash, keep these security considerations in mind:
+
+### API Credentials
+
+- **Never share your Reddit API credentials** or Dropbox tokens with others
+- When using GitHub Actions, your credentials are stored as encrypted secrets
+- For local installations, consider using environment variables instead of hardcoding credentials in the settings file
+- Regularly rotate your API keys and tokens, especially if you suspect they may have been compromised
+
+### Content Security
+
+- Reddit Stash downloads and stores all content from saved posts, including links and images
+- Be aware that this may include sensitive or private information if you've saved such content
+- Consider where you're storing the backed-up content and who has access to that location
+- Dropbox encryption provides some protection, but for highly sensitive data, consider additional encryption
+
+### GitHub Actions Security
+
+- The GitHub Actions workflow runs in GitHub's cloud environment
+- While GitHub has strong security measures, be aware that your Reddit content is processed in this environment
+- The workflow has access to your repository secrets and the content being processed
+- For maximum security, consider running the script locally on a trusted machine
+
+### Local Storage Considerations
+
+- Content is stored in plain text markdown files
+- If storing content locally, ensure your device has appropriate security measures (encryption, access controls)
+- If you back up your local storage to other services, be mindful of where your Reddit content might end up
+
+## Contributing
+
 Feel free to open issues or submit pull requests if you have any improvements or bug fixes.
 
 ### Acknowledgement
 - This project was inspired by [reddit-saved-saver](https://github.com/tobiasvl/reddit-saved-saver).
 
-### Issues:
-- ~~The dropbox isn't working at the moment because the token expiration, I need to find out a way to tackle that here, the main code `reddit_stash.py` works as expected.~~
-- ~~The `reddit_stash.py` downloads all the file first and decides if the file is availble or not, implement early exit startegy while relevent fetching the content.~~
-- ~~Build a Docker Image to run it on the Local/ NAS system etc.~~
-- ~~Processing the export of a user's data from reddit with context. (not so relevent to implement, based on how the repo has been built, but will look into the possibility).~~
+## Project Status
 
-### New Features for Future
-- Test the export of users data
+### Resolved Issues
+✅ The dropbox authentication now works correctly with refresh tokens  
+✅ The script implements early exit strategy while fetching content for better efficiency  
+✅ Added Docker Image support to run it on Local/NAS systems  
+✅ Added processing of the GDPR export data from Reddit
+
+### Future Enhancements
+Have an idea for improving Reddit Stash? Feel free to suggest it in the issues or contribute a pull request!
+
+- [ ] Improve error handling for edge cases
+- [ ] Add support for additional cloud storage providers
+- [ ] Create a simple web interface for configuration
+- [ ] Add metrics and statistics about saved content
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+This means you are free to:
+- Use the software for commercial purposes
+- Modify the software
+- Distribute the software
+- Use the software privately
+
+With the condition that you include the original copyright notice and license in any copy of the software/source.
