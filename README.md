@@ -46,7 +46,10 @@ After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.pn
 3. **Manually Trigger the Workflow**:
 - Go to the **Actions** tab > Select the **Reddit Stash Workflow** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
 
-4. The workflow should run automatically at midnight CET time automatically.
+4. The workflow runs automatically on a schedule:
+   - Every 2 hours during *peak hours* (8:00-23:00 CET time in summer)
+   - Twice during *off-peak hours* (1:00 and 5:00 CET time in summer)
+   - You can adjust these times in the workflow file to match your timezone if needed.
 
 #### Local Installation
 
