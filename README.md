@@ -66,68 +66,29 @@ Each post and comment is formatted with:
 
 ```mermaid
 graph TD
-    %% Data Sources
+    %% Main Data Sources
     A[Reddit API] -->|Fetch Content| B[Reddit Stash Script]
-    G1[Reddit GDPR Export] -->|Optional Input| B
+    G1[GDPR Export] -.->|Optional| B
     
-    %% Configuration and Settings
-    B -->|Check Settings| D{Save Type}
-    D -->|SAVED| E[Saved Posts/Comments]
-    D -->|ACTIVITY| F[User Posts/Comments]
-    D -->|UPVOTED| G[Upvoted Content]
-    D -->|ALL| H[All Content Types]
+    %% Simple Configuration
+    B -->|Process Based on Settings| C{Content Types}
+    C -->|SAVED| D[Saved Items]
+    C -->|ACTIVITY| E[User Posts/Comments]
+    C -->|UPVOTED| F[Upvoted Items]
     
-    %% Processing Path
-    E --> I[Content Processing]
-    F --> I
-    G --> I
-    H --> I
+    %% Core Processing Flow
+    D & E & F -->|Format as Markdown| H[Local Storage]
+    H -->|Organized by Subreddit| I[Markdown Files]
     
-    %% Storage Options
-    I -->|Format as Markdown| J[Local Storage]
-    J -->|file_log.json| J1[Track Processed Files]
-    J1 -->|Avoid Duplicates| B
-    
-    %% Installation Methods subgraph
-    subgraph "Installation Methods"
-        L[GitHub Actions]
-        M[Local Installation]
-        N[Docker Installation]
+    %% Deployment Options
+    subgraph "Deployment Options"
+        J[GitHub Actions]
+        K[Local Installation]
+        L[Docker]
     end
     
-    %% GitHub Actions Workflow
-    L -->|Step 1| L1[Download Log File]
-    L1 -->|Step 2| L2[Process Reddit Content]
-    L2 -->|Step 3| L3[Upload to Dropbox]
-    
-    %% Local Installation Flow
-    M -->|Option 1| M1[Run Locally]
-    M -->|Option 2| M2[Schedule with Cron]
-    M1 -->|Manual Process| M3[Run reddit_stash.py]
-    M2 -->|Automated| M3
-    M3 -->|Optional| M4[Upload to Dropbox]
-    
-    %% Docker Installation Flow
-    N -->|Build Image| N1[Run Container]
-    N1 -->|Volume Mount| N2[Process Content]
-    N2 -->|Optional| N3[Upload to Dropbox]
-    
     %% Dropbox Integration
-    J -->|dropbox_utils.py| K[Dropbox Storage]
-    L3 -.->|Updates| K
-    M4 -.->|Updates| K
-    N3 -.->|Updates| K
-    K -.->|Downloads| L1
-    
-    %% Output Organization
-    J -->|Organized by Subreddit| O[r_subreddit1]
-    J -->|Organized by Subreddit| P[r_subreddit2]
-    J -->|Organized by Subreddit| Q[r_subredditN]
-    
-    %% File Types
-    O -->|File Types| R[POST_id.md]
-    O -->|File Types| S[COMMENT_id.md]
-    O -->|File Types| T[GDPR_POST_id.md]
+    H <-->|Optional Sync| M[Dropbox Storage]
 ```
 
 ### Workflow Summary
