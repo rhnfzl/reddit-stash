@@ -73,13 +73,8 @@ graph LR
     D -->|ACTIVITY| F[User Posts/Comments]
     D -->|UPVOTED| G[Upvoted Content]
     D -->|ALL| H[All Content Types]
-    C -->|Optional Upload| I[Dropbox Storage]
+    C -->|Optional| I[Dropbox Upload]
     J[GDPR Export] -->|Optional| B
-    
-    %% GitHub Actions Flow
-    K[GitHub Actions] -->|1. Download Log| I
-    K -->|2. Process Content| B
-    K -->|3. Upload Changes| I
 ```
 
 ### Workflow Summary
