@@ -65,30 +65,27 @@ Each post and comment is formatted with:
 ## How It Works
 
 ```mermaid
-graph TD
-    %% Main Data Sources
+graph LR
+    %% Data Sources
     A[Reddit API] -->|Fetch Content| B[Reddit Stash Script]
-    G1[GDPR Export] -.->|Optional| B
+    J[GDPR Export] -.->|Optional| B
     
-    %% Simple Configuration
-    B -->|Process Based on Settings| C{Content Types}
-    C -->|SAVED| D[Saved Items]
-    C -->|ACTIVITY| E[User Posts/Comments]
-    C -->|UPVOTED| F[Upvoted Items]
+    %% Content Types
+    B -->|Check Settings| D{Save Type}
+    D -->|SAVED| E[Saved Posts/Comments]
+    D -->|ACTIVITY| F[User Posts/Comments]
+    D -->|UPVOTED| G[Upvoted Content]
+    D -->|ALL| H[All Content Types]
     
-    %% Core Processing Flow
-    D & E & F -->|Format as Markdown| H[Local Storage]
-    H -->|Organized by Subreddit| I[Markdown Files]
+    %% Storage & Organization
+    B -->|Save as Markdown| C[Local Storage]
+    C -->|Organized by Subreddit| S[r_subreddit folders]
     
     %% Deployment Options
-    subgraph "Deployment Options"
-        J[GitHub Actions]
-        K[Local Installation]
-        L[Docker]
-    end
+    X[Deployment: GitHub Actions/Local/Docker]
     
     %% Dropbox Integration
-    H <-->|Optional Sync| M[Dropbox Storage]
+    C <-->|Optional Sync| I[Dropbox Storage]
 ```
 
 ### Workflow Summary
