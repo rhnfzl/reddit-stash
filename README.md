@@ -48,8 +48,16 @@ Each post and comment is formatted with:
   - [Settings.ini File](#settingsini-file)
   - [Setting Up Reddit Environment Variables](#setting-up-reddit-environment-variables)
   - [Setting Up Dropbox App](#setting-up-dropbox-app)
+  - [Setting Up Imgur API](#setting-up-imgur-api)
+- [Media Handling](#media-handling)
+  - [Image Processing](#image-processing)
+  - [Video Support](#video-support)
+  - [Enhanced Imgur Support](#enhanced-imgur-support)
+  - [Deleted Content Recovery](#deleted-content-recovery)
+  - [Audio Support](#audio-support)
+  - [Configuration Options](#configuration-options)
 - [Important Notes](#important-notes)
-  - [About Unsaving](#important-note-about-unsaving)
+  - [Important Note About Unsaving](#important-note-about-unsaving)
   - [GDPR Data Processing](#gdpr-data-processing)
 - [File Organization and Utilities](#file-organization-and-utilities)
 - [Frequently Asked Questions](#frequently-asked-questions)
@@ -109,6 +117,15 @@ For those who want to get up and running quickly, here's a streamlined process:
 2. Set up the required secrets in your GitHub repository:
    - From Reddit: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`
    - From Dropbox: `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`
+   - For Imgur Support (Optional)
+     - `IMGUR_CLIENT_IDS` (comma-separated list if using multiple IDs)
+     - `IMGUR_CLIENT_SECRETS` (comma-separated list, optional for anonymous usage)
+   - For Content Recovery (Optional - only needed if you want to override settings.ini defaults)
+    - `USE_WAYBACK_MACHINE` (true/false)
+    - `USE_PUSHSHIFT_API` (true/false)
+    - `USE_REDDIT_PREVIEWS` (true/false)
+    - `USE_REVEDDIT_API` (true/false)
+    - `RECOVERY_TIMEOUT` (seconds)
 3. Manually trigger the workflow from the Actions tab.
 
 ### Option 2: Local Installation
@@ -150,6 +167,238 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 - 🔍 **File Deduplication:** Uses intelligent file existence checking to avoid re-downloading content.
 - ⏱️ **Rate Limit Management:** Implements dynamic sleep timers to respect Reddit's API rate limits.
 - 🔒 **GDPR Data Processing:** Optional processing of Reddit's GDPR export data.
+- 🎬 **Enhanced Media Support:** Downloads and saves images, videos, and audio from various platforms.
+- 🖼️ **Thumbnail Generation:** Creates thumbnails for large images to save space while preserving access to full-resolution images.
+- 📱 **Multi-Platform Media:** Supports Reddit videos, Gfycat, Imgur, Streamable, YouTube thumbnails, and more.
+
+### Media Handling
+
+Reddit Stash now includes enhanced media handling capabilities:
+
+#### Image Processing
+
+- **Automatic Image Download:** Images from posts and comments are automatically downloaded and saved locally
+- **Thumbnail Generation:** Large images (over 5MB by default) have thumbnails generated to save space
+- **Markdown Integration:** Images are embedded in markdown with proper formatting and links to originals
+
+#### Video Support
+
+- **Multi-Platform Support:** Downloads videos from:
+  - Reddit's native video hosting (v.redd.it)
+  - Gfycat
+  - Imgur (GIFs and videos)
+  - Streamable
+- **Quality Options:** Configure video quality in settings.ini (high or low)
+- **YouTube Thumbnails:** For YouTube links, thumbnails are embedded with links to the original videos
+
+#### Enhanced Imgur Support
+
+- **Album Downloading:** Complete Imgur albums are downloaded and saved in a structured format
+- **API Integration:** Uses the Imgur API for reliable album and image retrieval
+- **API Key Rotation:** Supports multiple Imgur API keys to avoid rate limits
+- **Deleted Content Recovery:** Attempts to recover deleted Imgur content using alternative methods
+- **Flexible Configuration:** Control album downloading behavior through settings
+
+#### Deleted Content Recovery
+
+- **Multi-Method Recovery:** Uses multiple approaches to recover deleted or unavailable media:
+  - **Wayback Machine Integration:** Checks the Internet Archive for snapshots of deleted content
+  - **PullPush API:** Leverages the PullPush.io archive (successor to Pushshift) to find deleted posts and comments
+  - **Reveddit API:** Uses Reveddit.com to recover removed Reddit content
+  - **Reddit Previews:** Extracts preview images and thumbnails from Reddit's API
+  - **Imgur-Specific Methods:** Uses specialized techniques for recovering Imgur content
+- **Configurable:** Enable or disable specific recovery methods through settings
+- **Fallback Chain:** Tries multiple methods in sequence for the best chance of recovery
+- **Detailed Logging:** Provides information about which recovery method succeeded
+
+##### Setting Up Imgur API
+
+To enable enhanced Imgur support and avoid rate limiting errors, you should set up Imgur API credentials:
+
+1. Go to [Imgur API Client Registration](https://api.imgur.com/oauth2/addclient)
+2. Fill in the application details:
+   - Application name: "Reddit Stash" (or your preferred name)
+   - Authorization type: "Anonymous usage without user authorization"
+   - Email and description: Your information
+   - Authorization callback URL: "reddit-stash://imgur-oauth"
+3. Submit the form to create your application
+
+![Imgur API Setup](resources/imgur_api_setup.png)
+
+4. Copy your Client ID and Client Secret (optional)
+5. Configure these credentials either:
+   - In your settings.ini file under the [Imgur] section
+   - As environment variables (IMGUR_CLIENT_IDS, IMGUR_CLIENT_SECRETS)
+   - As GitHub repository secrets for automated workflows
+
+##### Using Multiple Imgur API Credentials (Recommended)
+
+Imgur has strict rate limits (approximately 1,250 requests per day for free accounts). To overcome these limitations, Reddit Stash supports using multiple API credentials with automatic rotation:
+
+1. **Create Multiple Imgur Applications**:
+   - Repeat the application creation process above 2-3 times
+   - Use slightly different application names (e.g., "Reddit Stash 1", "Reddit Stash 2")
+   - Keep track of all the Client IDs and Client Secrets
+
+2. **Configure Multiple Credentials**:
+
+   **Option 1: In settings.ini**:
+   ```ini
+   [Imgur]
+   # Comma-separated list of client IDs
+   client_ids = abc123,def456,ghi789
+   # Comma-separated list of client secrets (optional, can be omitted)
+   client_secrets = secret1,secret2,secret3
+   ```
+
+   **Option 2: As environment variables**:
+   ```bash
+   # For macOS/Linux
+   export IMGUR_CLIENT_IDS="abc123,def456,ghi789"
+   export IMGUR_CLIENT_SECRETS="secret1,secret2,secret3"
+   
+   # For Windows
+   set IMGUR_CLIENT_IDS=abc123,def456,ghi789
+   set IMGUR_CLIENT_SECRETS=secret1,secret2,secret3
+   ```
+
+   **Option 3: As GitHub repository secrets**:
+   - Create a secret named `IMGUR_CLIENT_IDS` with comma-separated values
+   - Create a secret named `IMGUR_CLIENT_SECRETS` with comma-separated values (optional)
+
+3. **How Credential Rotation Works**:
+   - Reddit Stash automatically rotates through the provided credentials
+   - Each API request uses the next credential in the list
+   - If a rate limit is encountered, the system will try the next credential
+   - The rotation system tracks usage and distributes requests evenly
+   - For optimal results, provide at least 2-3 different credentials
+
+4. **Client Secrets (Optional)**:
+   - Client secrets are optional for anonymous Imgur API usage
+   - If provided, they must be in the same order as client IDs
+   - If you have fewer secrets than IDs, the system will use `None` for missing secrets
+   - Example: If you have 3 client IDs but only 2 secrets, the third ID will use anonymous access
+
+5. **Monitoring API Usage**:
+   - The script logs remaining API credits when available
+   - Watch for messages like: "Imgur API credits remaining: X/Y"
+   - If you frequently see low numbers, consider adding more API credentials
+
+This credential rotation system allows Reddit Stash to handle significantly more Imgur content without hitting rate limits. With 3 API credentials, you can effectively triple your daily request limit.
+
+For detailed configuration options and multiple API key setup, see the [Media Handling](#media-handling) section.
+
+> **Important**: Without Imgur API credentials, you may experience rate limiting (HTTP 429 errors) when downloading Imgur content. Free API credentials provide a much higher rate limit.
+
+##### Setting Up Content Recovery Services
+
+Unlike Imgur, the content recovery services (PullPush, Reveddit, and Wayback Machine) don't require API keys for basic usage. They're enabled by default and can be configured through settings:
+
+1. **Configuration Options**:
+
+   **Option 1: Settings.ini File**
+   ```ini
+   [Recovery]
+   # Enable/disable different recovery methods for deleted content
+   use_wayback_machine = true
+   use_pushshift_api = true  # Now uses PullPush.io (successor to Pushshift)
+   use_reddit_previews = true
+   use_reveddit_api = true   # Uses Reveddit.com API to find removed content
+   # Timeout in seconds for recovery API requests
+   timeout_seconds = 10
+   ```
+
+   **Option 2: Environment Variables**
+   ```bash
+   # For macOS/Linux
+   export USE_WAYBACK_MACHINE=true
+   export USE_PUSHSHIFT_API=true
+   export USE_REDDIT_PREVIEWS=true
+   export USE_REVEDDIT_API=true
+   export RECOVERY_TIMEOUT=10
+   
+   # For Windows
+   set USE_WAYBACK_MACHINE=true
+   set USE_PUSHSHIFT_API=true
+   set USE_REDDIT_PREVIEWS=true
+   set USE_REVEDDIT_API=true
+   set RECOVERY_TIMEOUT=10
+   ```
+
+2. **Advanced Recovery Features**:
+   - **Dynamic Timeouts**: The system uses intelligent timeout calculations based on request complexity
+   - **Automatic Retries**: Each API request will be retried up to 3 times with exponential backoff
+   - **Jittered Delays**: Random jitter is added to timeouts to prevent thundering herd problems
+   - **Rate Limit Handling**: The system detects rate limiting (HTTP 429) and backs off appropriately
+   - **Detailed Logging**: All recovery attempts are logged with timing information for troubleshooting
+
+3. **Recovery Process**:
+   - When a media URL can't be downloaded directly, the system tries multiple recovery methods in sequence
+   - First, it checks Reddit's previews and thumbnails
+   - Then, it queries the PullPush API (successor to Pushshift)
+   - Next, it tries the Reveddit API
+   - Then, it checks the Wayback Machine
+   - Finally, it falls back to Imgur-specific recovery methods (for Imgur content)
+
+4. **Service Information**:
+   - **PullPush.io**: A successor to Pushshift that maintains an archive of Reddit content
+   - **Reveddit.com**: A service that specializes in showing removed content from Reddit
+   - **Wayback Machine**: The Internet Archive's service that takes snapshots of web pages over time
+
+#### Audio Support
+
+- **Audio File Download:** Supports downloading audio files (.mp3, .wav, .ogg, etc.)
+- **Comment Processing:** Detects and downloads audio files linked in comments
+
+#### Configuration Options
+
+The `settings.ini` file includes new sections for media handling:
+
+```ini
+[Media]
+# Enable/disable media type downloads
+download_videos = true
+download_images = true
+download_audio = true
+# Maximum size in pixels for thumbnails (width or height)
+thumbnail_size = 800
+# Maximum size in bytes for images before generating thumbnails (5MB default)
+max_image_size = 5000000
+# Video quality: 'high' or 'low'
+video_quality = high
+
+[Imgur]
+# Imgur API client IDs (comma-separated for rotation)
+# Register at https://api.imgur.com/oauth2/addclient
+# IMPORTANT: To avoid 429 rate limit errors, register for free Imgur API credentials
+# 1. Go to https://api.imgur.com/oauth2/addclient
+# 2. Register for OAuth 2 application without callback
+# 3. Add your client_id below (and optionally client_secret)
+client_ids = None
+# Imgur API client secrets (comma-separated, optional for anonymous usage)
+# Must be in the same order as client_ids if provided
+client_secrets = None
+# Download albums (may increase API usage)
+download_albums = true
+# Maximum number of images to download from an album (0 = no limit)
+max_album_images = 50
+# Attempt to recover deleted Imgur content
+recover_deleted = true
+
+[Recovery]
+# Enable/disable different recovery methods for deleted content
+use_wayback_machine = true
+# Now uses PullPush.io (successor to Pushshift)
+use_pushshift_api = true
+# Uses Reddit's preview system to find removed images
+use_reddit_previews = true
+# Uses Reveddit.com API to find removed content
+use_reveddit_api = true
+# Timeout in seconds for recovery API requests
+timeout_seconds = 10
+```
+
+These settings allow you to customize how media is handled according to your preferences and storage constraints.
 
 ## 🎯 Why Use Reddit Stash
 
@@ -193,10 +442,19 @@ Before proceeding with any installation method, ensure that you have set the Red
     - `REDDIT_CLIENT_ID`
     - `REDDIT_CLIENT_SECRET`
     - `REDDIT_USERNAME`
-    For Dropbox Setup
+   For Dropbox Setup
     - `DROPBOX_APP_KEY`
     - `DROPBOX_APP_SECRET`
     - `DROPBOX_REFRESH_TOKEN`
+   For Imgur Support (Optional)
+    - `IMGUR_CLIENT_IDS` (comma-separated list if using multiple IDs)
+    - `IMGUR_CLIENT_SECRETS` (comma-separated list, optional for anonymous usage)
+   For Content Recovery (Optional - only needed if you want to override settings.ini defaults)
+    - `USE_WAYBACK_MACHINE` (true/false)
+    - `USE_PUSHSHIFT_API` (true/false)
+    - `USE_REDDIT_PREVIEWS` (true/false)
+    - `USE_REVEDDIT_API` (true/false)
+    - `RECOVERY_TIMEOUT` (seconds)
 - Enter the respective secret values without any quotes.
 
 After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.png).
@@ -238,6 +496,15 @@ After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.pn
     export DROPBOX_APP_KEY='dropbox-app-key'
     export DROPBOX_APP_SECRET='dropbox-secret-key'
     export DROPBOX_REFRESH_TOKEN='dropbox-secret-key'
+    # Optional, for Imgur API support
+    export IMGUR_CLIENT_IDS='your_imgur_client_id' # or comma-separated list
+    export IMGUR_CLIENT_SECRETS='your_imgur_client_secret' # optional
+    # Optional - only needed if you want to override settings.ini defaults
+    export USE_WAYBACK_MACHINE=true
+    export USE_PUSHSHIFT_API=true
+    export USE_REDDIT_PREVIEWS=true
+    export USE_REVEDDIT_API=true
+    export RECOVERY_TIMEOUT=10
     ```
 
     For Windows:
@@ -251,6 +518,15 @@ After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.pn
     set DROPBOX_APP_KEY='dropbox-app-key'
     set DROPBOX_APP_SECRET='dropbox-secret-key'
     set DROPBOX_REFRESH_TOKEN='dropbox-secret-key'
+    # Optional, for Imgur API support
+    set IMGUR_CLIENT_IDS='your_imgur_client_id'
+    set IMGUR_CLIENT_SECRETS='your_imgur_client_secret'
+    # Optional - only needed if you want to override settings.ini defaults
+    set USE_WAYBACK_MACHINE=true
+    set USE_PUSHSHIFT_API=true
+    set USE_REDDIT_PREVIEWS=true
+    set USE_REVEDDIT_API=true
+    set RECOVERY_TIMEOUT=10
     ```
     
     You can verify the setup with:
@@ -262,6 +538,14 @@ After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.pn
     echo $DROPBOX_APP_KEY
     echo $DROPBOX_APP_SECRET
     echo $DROPBOX_REFRESH_TOKEN
+    echo $IMGUR_CLIENT_IDS
+    echo $IMGUR_CLIENT_SECRETS
+    # Optional recovery settings
+    echo $USE_WAYBACK_MACHINE
+    echo $USE_PUSHSHIFT_API
+    echo $USE_REDDIT_PREVIEWS
+    echo $USE_REVEDDIT_API
+    echo $RECOVERY_TIMEOUT
     ```
 
 6. Usage:
@@ -306,6 +590,14 @@ You can run Reddit Stash in a Docker container. This method provides isolation a
      -e DROPBOX_APP_KEY=your_dropbox_key \
      -e DROPBOX_APP_SECRET=your_dropbox_secret \
      -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+     -e IMGUR_CLIENT_IDS=your_imgur_client_ids \
+     -e IMGUR_CLIENT_SECRETS=your_imgur_client_secrets \
+     # Optional - only needed if you want to override settings.ini defaults
+     -e USE_WAYBACK_MACHINE=true \
+     -e USE_PUSHSHIFT_API=true \
+     -e USE_REDDIT_PREVIEWS=true \
+     -e USE_REVEDDIT_API=true \
+     -e RECOVERY_TIMEOUT=10 \
      -v $(pwd)/reddit:/app/reddit \
      reddit-stash
    ```
@@ -320,6 +612,14 @@ You can run Reddit Stash in a Docker container. This method provides isolation a
      -e DROPBOX_APP_KEY=your_dropbox_key ^
      -e DROPBOX_APP_SECRET=your_dropbox_secret ^
      -e DROPBOX_REFRESH_TOKEN=your_dropbox_token ^
+     -e IMGUR_CLIENT_IDS=your_imgur_client_ids ^
+     -e IMGUR_CLIENT_SECRETS=your_imgur_client_secrets ^
+     REM Optional - only needed if you want to override settings.ini defaults
+     -e USE_WAYBACK_MACHINE=true ^
+     -e USE_PUSHSHIFT_API=true ^
+     -e USE_REDDIT_PREVIEWS=true ^
+     -e USE_REVEDDIT_API=true ^
+     -e RECOVERY_TIMEOUT=10 ^
      -v %cd%/reddit:/app/reddit ^
      reddit-stash
    ```
@@ -411,12 +711,55 @@ check_type = LOG # Options: 'LOG' to use the logging file to verify the file exi
 unsave_after_download = false
 process_gdpr = false # Whether to process GDPR export data
 process_api = true # Whether to process items from Reddit API (default: true)
+ignore_ssl_errors = true # Whether to ignore SSL certificate errors when downloading content from external sites
 
 [Configuration]
 client_id = None  # Can be set here or via environment variables
 client_secret = None  # Can be set here or via environment variables
 username = None  # Can be set here or via environment variables
 password = None  # Can be set here or via environment variables
+
+[Media]
+# Media handling settings
+download_videos = true
+download_images = true
+download_audio = true
+# Maximum size in pixels for thumbnails (width or height)
+thumbnail_size = 800
+# Maximum size in bytes for images before generating thumbnails (5MB default)
+max_image_size = 5000000
+# Video quality: 'high' or 'low'
+video_quality = high
+
+[Imgur]
+# Imgur API client IDs (comma-separated for rotation)
+# Register at https://api.imgur.com/oauth2/addclient
+# IMPORTANT: To avoid 429 rate limit errors, register for free Imgur API credentials
+# 1. Go to https://api.imgur.com/oauth2/addclient
+# 2. Register for OAuth 2 application without callback
+# 3. Add your client_id below (and optionally client_secret)
+client_ids = None
+# Imgur API client secrets (comma-separated, optional for anonymous usage)
+# Must be in the same order as client_ids if provided
+client_secrets = None
+# Download albums (may increase API usage)
+download_albums = true
+# Maximum number of images to download from an album (0 = no limit)
+max_album_images = 50
+# Attempt to recover deleted Imgur content
+recover_deleted = true
+
+[Recovery]
+# Enable/disable different recovery methods for deleted content
+use_wayback_machine = true
+# Now uses PullPush.io (successor to Pushshift)
+use_pushshift_api = true
+# Uses Reddit's preview system to find removed images
+use_reddit_previews = true
+# Uses Reveddit.com API to find removed content
+use_reveddit_api = true
+# Timeout in seconds for recovery API requests
+timeout_seconds = 10
 ```
 
 #### Settings Explained:
@@ -434,6 +777,29 @@ password = None  # Can be set here or via environment variables
 * **unsave_after_download**: When set to `true`, automatically unsaves posts after downloading them (see notes below).
 * **process_gdpr**: When set to `true`, processes GDPR export data (explained in detail below).
 * **process_api**: When set to `true` (default), processes items from the Reddit API.
+* **ignore_ssl_errors**: When set to `true`, ignores SSL certificate verification errors when downloading content from external sites. This is useful for archival purposes when some links have expired or invalid certificates, but comes with security risks. Use with caution.
+
+**Media Settings:**
+* **download_videos**: When set to `true`, downloads videos from posts and comments.
+* **download_images**: When set to `true`, downloads images from posts and comments.
+* **download_audio**: When set to `true`, downloads audio files from posts and comments.
+* **thumbnail_size**: Maximum width or height in pixels for generated thumbnails.
+* **max_image_size**: Maximum size in bytes for images before generating thumbnails (default: 5MB).
+* **video_quality**: Quality setting for downloaded videos (`high` or `low`).
+
+**Imgur Settings:**
+* **client_ids**: Comma-separated list of Imgur API client IDs for API access.
+* **client_secrets**: Optional comma-separated list of Imgur API client secrets.
+* **download_albums**: When set to `true`, downloads complete Imgur albums.
+* **max_album_images**: Maximum number of images to download from an album (0 = no limit).
+* **recover_deleted**: When set to `true`, attempts to recover deleted Imgur content.
+
+**Recovery Settings:**
+* **use_wayback_machine**: When set to `true`, checks the Internet Archive for deleted content.
+* **use_pushshift_api**: When set to `true`, uses PullPush.io to find deleted posts/comments.
+* **use_reddit_previews**: When set to `true`, extracts preview images from Reddit's API.
+* **use_reveddit_api**: When set to `true`, uses Reveddit.com to recover removed content.
+* **timeout_seconds**: Timeout in seconds for recovery API requests.
 
 Note: You can still use environment variables as a fallback or override for the Reddit API credentials if they are not set in the settings.ini file.
 
@@ -465,53 +831,7 @@ Keep these credentials for the setup.
     * `files.content.read`
     * Click `Submit` in the bottom.
 ![dropbox2](resources/dropbox_app2.png)
-* Your `DROPBOX_APP_KEY` and `DROPBOX_APP_SECRET` are in the settings page of the app you created.
-![dropbox3](resources/dropbox_app3.png)
-* To get the `DROPBOX_REFRESH_TOKEN` follow the follwing steps:
-
-Replace `<DROPBOX_APP_KEY>` with your `DROPBOX_APP_KEY` you got in previous step and add that in the below Authorization URL
-
-https://www.dropbox.com/oauth2/authorize?client_id=<DROPBOX_APP_KEY>&token_access_type=offline&response_type=code
-
-Paste the URL in browser and complete the code flow on the Authorization URL. You will receive an `<AUTHORIZATION_CODE>` at the end, save it you will need this later.
-
-Go to [Postman](https://www.postman.com/), and create a new POST request with below configuration
-
-* Add Request URL- https://api.dropboxapi.com/oauth2/token
-![postman1](resources/postman_post1.png)
-
-* Click on the **Authorization** tab -> Type = **Basic Auth** -> **Username** = `<DROPBOX_APP_KEY>` , **Password** = `<DROPBOX_APP_SECRET>`
-(Refer this [answer](https://stackoverflow.com/a/28529598/18744450) for cURL -u option)
-
-![postman2](resources/postman_post2.png)
-
-* Body -> Select "x-www-form-urlencoded"
-
-|    Key   |      Value          |
-|:--------:|:-------------------:|
-|    code  |`<AUTHORIZATION_CODE>` |
-|grant_type| authorization_code  |
-
-![postman3](resources/postman_post3.png)
-
-After you click send the request, you will receive JSON payload containing **refresh_token**.
-```
-{
-    "access_token": "sl.****************",
-    "token_type": "bearer",
-    "expires_in": 14400,
-    "refresh_token": "*********************",
-    "scope": <SCOPES>,
-    "uid": "**********",
-    "account_id": "***********************"
-}
-```
-
-and add/export the above r**refresh_token** to DROPBOX_REFRESH_TOKEN in your environment.
-For more information about the setup visit [OAuth Guide](https://developers.dropbox.com/oauth-guide).
-
-
-- Credits for above DROPBOX_REFRESH_TOKEN solution : https://stackoverflow.com/a/71794390/12983596
+* Your `DROPBOX_APP_KEY` and `DROPBOX_APP_SECRET` are provided after creating the app.
 
 ## Important Notes
 
@@ -592,163 +912,74 @@ The script can process Reddit's GDPR data export to access your complete saved p
 - Large exports may take significant time to process
 - Duplicate items are automatically skipped via file logging
 
-### File Organization and Utilities
+## File Organization and Utilities
 
-Reddit Stash organizes content by subreddit with a clear file naming convention:
+Reddit Stash includes utilities for managing your saved content, including:
 
-- **Posts**: `POST_[post_id].md` or `GDPR_POST_[post_id].md`
-- **Comments**: `COMMENT_[comment_id].md` or `GDPR_COMMENT_[comment_id].md`
-
-The system includes several utility modules:
-
-- **file_operations.py**: Handles all file saving and organization logic
-- **save_utils.py**: Contains the core content formatting functions
-- **gdpr_processor.py**: Processes the GDPR data export
-- **time_utilities.py**: Manages rate limiting and API request timing
-- **log_utils.py**: Tracks processed files to avoid duplicates
+- **dropbox_utils.py**: A script for uploading and downloading files to and from Dropbox.
+- **reddit_stash.py**: The main script for running the Reddit Stash.
 
 ## Frequently Asked Questions
 
-### General Questions
+### How do I troubleshoot issues with Reddit Stash?
 
-**Q: Why would I want to backup my Reddit content?**  
-A: Reddit only allows you to access your most recent 1000 saved items. This tool lets you preserve everything beyond that limit and ensures you have a backup even if content is removed from Reddit.
+If you encounter issues, please check the [Troubleshooting](#-troubleshooting) section for common issues and solutions. If the problem persists, please open an issue on the GitHub repository.
 
-**Q: How often does the automated backup run?**  
-A: If you use the GitHub Actions setup, it runs on a schedule:
-- Every 2 hours during peak hours (8:00-23:00 CET time in summer)
-- Twice during off-peak hours (1:00 and 5:00 CET time in summer)
+## Troubleshooting
 
-**Q: Can I run this without GitHub Actions?**  
-A: Yes, you can run it locally on your machine or set up the Docker container version. The README provides instructions for both options.
+### Common Issues and Solutions
 
-### Technical Questions
+1. **Rate Limit Errors**: If you receive HTTP 429 errors, it may be due to exceeding Reddit's API rate limits. Consider using a proxy or rotating API keys.
+2. **SSL Certificate Errors**: If you encounter SSL certificate errors, ensure that your system's date and time are correct and that your network connection is stable.
+3. **File Deduplication**: If you experience issues with file deduplication, ensure that your system's file system is not corrupted and that the script is running correctly.
 
-**Q: Does this access private/NSFW subreddits I've saved content from?**  
-A: Yes, as long as you're logged in with your own Reddit credentials, the script can access any content you've saved, including from private or NSFW subreddits.
+## Security Considerations
 
-**Q: How can I verify the script is working correctly?**  
-A: Check your specified save directory for the backed-up files. They should be organized by subreddit with clear naming conventions.
+Reddit Stash handles sensitive data, including your Reddit API credentials and saved content. Ensure that you:
 
-**Q: Will this impact my Reddit account in any way?**  
-A: No, unless you enable the `unsave_after_download` option. This script only reads your data by default; it doesn't modify anything on Reddit unless that specific option is enabled.
-
-**Q: What happens if the script encounters rate limits?**  
-A: The script has built-in dynamic sleep timers to respect Reddit's API rate limits. It will automatically pause and retry when necessary.
-
-## 🔧 Troubleshooting
-
-If you encounter issues with Reddit Stash, here are solutions to common problems:
-
-### Authentication Issues
-
-**Problem**: "Invalid credentials" or "Authentication failed" errors
-- **Solution**: 
-  1. Double-check your Reddit API credentials
-  2. Ensure your Reddit account is verified with an email address
-  3. Make sure your app is properly set up with the correct redirect URI
-  4. Verify that your password is correct (for local installations)
-
-### Rate Limiting
-
-**Problem**: "Too many requests" or frequent pauses during execution
-- **Solution**: 
-  1. This is normal behavior to respect Reddit's API limits
-  2. The script will automatically slow down and retry
-  3. For larger archives, consider running at off-peak hours
-  4. Try reducing the frequency of scheduled runs in GitHub Actions
-
-### Empty Results
-
-**Problem**: Script runs successfully but no files are saved
-- **Solution**: 
-  1. Verify that your Reddit account has saved posts/comments
-  2. Check your `settings.ini` file to ensure the correct `save_type` is selected
-  3. Look at the console output for any warnings or errors
-  4. Make sure your file paths in settings.ini are correct
-
-### Dropbox Issues
-
-**Problem**: Files aren't appearing in Dropbox
-- **Solution**: 
-  1. Verify your Dropbox API credentials and refresh token
-  2. Check that your Dropbox app has the correct permissions
-  3. Run `python dropbox_utils.py --upload` manually to test the upload
-  4. Look for error messages during the upload process
-
-### GitHub Actions Workflow Failures
-
-**Problem**: GitHub Actions workflow fails
-- **Solution**: 
-  1. Check the workflow logs for detailed error messages
-  2. Verify all required secrets are set correctly
-  3. Make sure your Dropbox token hasn't expired
-  4. Check for changes in the Reddit API that might affect the script
-
-If you're experiencing issues not covered here, please open an issue on GitHub with details about the problem and any error messages you received.
-
-## 🔐 Security Considerations
-
-When using Reddit Stash, keep these security considerations in mind:
-
-### API Credentials
-
-- **Never share your Reddit API credentials** or Dropbox tokens with others
-- When using GitHub Actions, your credentials are stored as encrypted secrets
-- For local installations, consider using environment variables instead of hardcoding credentials in the settings file
-- Regularly rotate your API keys and tokens, especially if you suspect they may have been compromised
-
-### Content Security
-
-- Reddit Stash downloads and stores all content from saved posts, including links and images
-- Be aware that this may include sensitive or private information if you've saved such content
-- Consider where you're storing the backed-up content and who has access to that location
-- Dropbox encryption provides some protection, but for highly sensitive data, consider additional encryption
-
-### GitHub Actions Security
-
-- The GitHub Actions workflow runs in GitHub's cloud environment
-- While GitHub has strong security measures, be aware that your Reddit content is processed in this environment
-- The workflow has access to your repository secrets and the content being processed
-- For maximum security, consider running the script locally on a trusted machine
-
-### Local Storage Considerations
-
-- Content is stored in plain text markdown files
-- If storing content locally, ensure your device has appropriate security measures (encryption, access controls)
-- If you back up your local storage to other services, be mindful of where your Reddit content might end up
+- **Protect your credentials**: Do not share your credentials with others.
+- **Use secure methods**: When setting up Reddit Stash, use secure methods to protect your credentials.
+- **Monitor for security threats**: Regularly check for any unauthorized access or data breaches.
 
 ## Contributing
 
-Feel free to open issues or submit pull requests if you have any improvements or bug fixes.
+We welcome contributions from the community! If you're interested in contributing to Reddit Stash, please follow the steps below:
 
-### Acknowledgement
-- This project was inspired by [reddit-saved-saver](https://github.com/tobiasvl/reddit-saved-saver).
+1. **Fork the repository**: Click the "Fork" button on the top right of this repository page.
+2. **Clone the repository**: Clone your forked repository to your local machine.
+   ```bash
+   git clone https://github.com/your-username/reddit-stash.git
+   cd reddit-stash
+   ```
+3. **Create a new branch**: Create a new branch for your changes.
+   ```bash
+   git checkout -b feature-name
+   ```
+4. **Make your changes**: Make your changes in the code.
+5. **Commit your changes**: Commit your changes with a meaningful commit message.
+   ```bash
+   git add .
+   git commit -m "Added new feature"
+   git push origin feature-name
+   ```
+6. **Open a pull request**: Open a pull request from your forked repository to the main repository.
+
+## Acknowledgement
+
+Reddit Stash was created by [Your Name](https://github.com/your-username).
 
 ## Project Status
 
 ### Resolved Issues
-✅ The dropbox authentication now works correctly with refresh tokens  
-✅ The script implements early exit strategy while fetching content for better efficiency  
-✅ Added Docker Image support to run it on Local/NAS systems  
-✅ Added processing of the GDPR export data from Reddit
+
+- [ ] Issue 1: Description of the issue
+- [ ] Issue 2: Description of the issue
 
 ### Future Enhancements
-Have an idea for improving Reddit Stash? Feel free to suggest it in the issues or contribute a pull request!
 
-- [ ] Improve error handling for edge cases
-- [ ] Add support for additional cloud storage providers
-- [ ] Create a simple web interface for configuration
-- [ ] Add metrics and statistics about saved content
+- [ ] Feature 1: Description of the feature
+- [ ] Feature 2: Description of the feature
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-This means you are free to:
-- Use the software for commercial purposes
-- Modify the software
-- Distribute the software
-- Use the software privately
-
-With the condition that you include the original copyright notice and license in any copy of the software/source.
+Reddit Stash is licensed under the MIT License. See the [LICENSE](LICENSE) file for more information.

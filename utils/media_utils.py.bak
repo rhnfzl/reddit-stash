@@ -1,0 +1,2340 @@
+"""
+ORIGINAL IMPLEMENTATION - PRESERVED FOR REFERENCE
+================================================
+This file contains the original monolithic implementation of the media utilities.
+It has been preserved for reference purposes only and should not be used in new code.
+
+The functionality has been refactored into separate modules under utils/media/:
+- media_core.py: Core utilities and configuration
+- download.py: Media download functionality
+- retry_queue.py: Imgur retry queue functionality
+- http_utils.py: HTTP-related utilities
+- rate_limiting.py: Rate limiting functionality
+- service_handlers/: Service-specific handlers (Imgur, Gfycat, etc.)
+
+For new code, please use the modular implementation by importing from utils.media.
+The compatibility layer in media_utils.py provides backward compatibility for existing code.
+
+IMPORTANT: This file is not actively maintained and may contain outdated code.
+"""
+
+import os
+import re
+import json
+import requests
+import time
+import logging
+from urllib.parse import urlparse, parse_qs
+import configparser
+from PIL import Image
+import io
+import warnings
+from urllib3.exceptions import InsecureRequestWarning
+from utils.time_utilities import dynamic_sleep, exponential_backoff
+import random
+from imgurpython import ImgurClient
+from imgurpython.helpers.error import ImgurClientError
+import sys
+import datetime
+
+# Dynamically determine the path to the root directory
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Construct the full path to the settings.ini file
+config_path = os.path.join(BASE_DIR, 'settings.ini')
+
+# Load settings from the settings.ini file
+config = configparser.ConfigParser()
+config.read(config_path)
+ignore_ssl_errors = config.getboolean('Settings', 'ignore_ssl_errors', fallback=False)
+thumbnail_size = config.getint('Media', 'thumbnail_size', fallback=800)
+max_image_size = config.getint('Media', 'max_image_size', fallback=5000000)  # 5MB default
+video_quality = config.get('Media', 'video_quality', fallback='high')
+
+# Get the save directory from settings.ini
+save_directory = config.get('Settings', 'save_directory', fallback='reddit/')
+# Make sure the path is absolute
+if not os.path.isabs(save_directory):
+    save_directory = os.path.join(BASE_DIR, save_directory)
+# Ensure the directory exists
+os.makedirs(save_directory, exist_ok=True)
+
+# Path for the retry queue file - now in the save_directory
+RETRY_QUEUE_FILE = os.path.join(save_directory, 'imgur_retry_queue.json')
+
+# Initialize the retry queue
+imgur_retry_queue = []
+
+# Maximum number of retries before giving up
+MAX_RETRY_ATTEMPTS = 10
+
+# Minimum time between retries (in seconds)
+MIN_RETRY_INTERVAL = 3600  # 1 hour
+
+# Maximum number of items to retry in a single run
+MAX_RETRIES_PER_RUN = 20
+
+# Recovery settings - first check environment variables, then fallback to settings.ini
+try:
+    # Check environment variables first
+    use_wayback_machine = os.environ.get('USE_WAYBACK_MACHINE')
+    if use_wayback_machine is not None:
+        use_wayback_machine = use_wayback_machine.lower() == 'true'
+    else:
+        use_wayback_machine = config.getboolean('Recovery', 'use_wayback_machine', fallback=True)
+        
+    use_pushshift_api = os.environ.get('USE_PUSHSHIFT_API')
+    if use_pushshift_api is not None:
+        use_pushshift_api = use_pushshift_api.lower() == 'true'
+    else:
+        use_pushshift_api = config.getboolean('Recovery', 'use_pushshift_api', fallback=True)
+        
+    use_reddit_previews = os.environ.get('USE_REDDIT_PREVIEWS')
+    if use_reddit_previews is not None:
+        use_reddit_previews = use_reddit_previews.lower() == 'true'
+    else:
+        use_reddit_previews = config.getboolean('Recovery', 'use_reddit_previews', fallback=True)
+        
+    use_reveddit_api = os.environ.get('USE_REVEDDIT_API')
+    if use_reveddit_api is not None:
+        use_reveddit_api = use_reveddit_api.lower() == 'true'
+    else:
+        use_reveddit_api = config.getboolean('Recovery', 'use_reveddit_api', fallback=True)
+        
+    recovery_timeout = os.environ.get('RECOVERY_TIMEOUT')
+    if recovery_timeout is not None:
+        recovery_timeout = int(recovery_timeout)
+    else:
+        recovery_timeout = config.getint('Recovery', 'timeout_seconds', fallback=10)
+except (configparser.NoSectionError, configparser.NoOptionError):
+    # Default values if section doesn't exist
+    use_wayback_machine = os.environ.get('USE_WAYBACK_MACHINE', 'true').lower() == 'true'
+    use_pushshift_api = os.environ.get('USE_PUSHSHIFT_API', 'true').lower() == 'true'
+    use_reddit_previews = os.environ.get('USE_REDDIT_PREVIEWS', 'true').lower() == 'true'
+    use_reveddit_api = os.environ.get('USE_REVEDDIT_API', 'true').lower() == 'true'
+    recovery_timeout = int(os.environ.get('RECOVERY_TIMEOUT', '10'))
+
+# Log the recovery settings
+logging.info(f"Recovery settings: Wayback Machine: {use_wayback_machine}, PullPush API: {use_pushshift_api}, "
+             f"Reddit Previews: {use_reddit_previews}, Reveddit API: {use_reveddit_api}, "
+             f"Timeout: {recovery_timeout}s")
+
+# Imgur specific settings
+# First check environment variable, then fallback to settings.ini
+imgur_client_ids_env = os.environ.get('IMGUR_CLIENT_IDS') or os.environ.get('IMGUR_CLIENT_ID')
+imgur_client_secrets_env = os.environ.get('IMGUR_CLIENT_SECRETS') or os.environ.get('IMGUR_CLIENT_SECRET')
+
+# Log the config path to ensure we're reading the right file
+logging.info(f"Reading Imgur settings from: {config_path}")
+imgur_client_ids_config = config.get('Imgur', 'client_ids', fallback=None)
+imgur_client_secrets_config = config.get('Imgur', 'client_secrets', fallback=None)
+
+# Log the raw values for debugging
+logging.info(f"Imgur client IDs from config: {imgur_client_ids_config}")
+if imgur_client_ids_config and imgur_client_ids_config.lower() != 'none':
+    logging.info(f"First few chars of config client ID: {imgur_client_ids_config[:10]}...")
+
+# Use environment variable if available, otherwise use config
+if imgur_client_ids_env:
+    # Split by comma and strip whitespace if it contains commas, otherwise use as single value
+    if ',' in imgur_client_ids_env:
+        imgur_client_ids = [id.strip() for id in imgur_client_ids_env.split(',')]
+    else:
+        imgur_client_ids = [imgur_client_ids_env.strip()]
+    logging.info(f"Using {len(imgur_client_ids)} Imgur client IDs from environment variable")
+elif imgur_client_ids_config and imgur_client_ids_config.lower() != 'none':
+    imgur_client_ids = [id.strip() for id in imgur_client_ids_config.split(',')]
+    logging.info(f"Using {len(imgur_client_ids)} Imgur client IDs from settings.ini")
+else:
+    imgur_client_ids = []
+    logging.warning("No Imgur client IDs configured. Some Imgur content may not be downloaded.")
+
+# Handle client secrets (optional for anonymous usage)
+if imgur_client_secrets_env:
+    # Split by comma and strip whitespace if it contains commas, otherwise use as single value
+    if ',' in imgur_client_secrets_env:
+        imgur_client_secrets = [secret.strip() for secret in imgur_client_secrets_env.split(',')]
+    else:
+        imgur_client_secrets = [imgur_client_secrets_env.strip()]
+    logging.info(f"Using {len(imgur_client_secrets)} Imgur client secrets from environment variable")
+elif imgur_client_secrets_config and imgur_client_secrets_config.lower() != 'none':
+    imgur_client_secrets = [secret.strip() for secret in imgur_client_secrets_config.split(',')]
+    logging.info(f"Using {len(imgur_client_secrets)} Imgur client secrets from settings.ini")
+else:
+    # For anonymous usage, we can use None for all client secrets
+    imgur_client_secrets = [None] * len(imgur_client_ids)
+    logging.info("No Imgur client secrets configured. Using anonymous access mode.")
+
+# Ensure the lists have the same length
+if len(imgur_client_ids) > len(imgur_client_secrets):
+    # Pad with None for missing secrets
+    imgur_client_secrets.extend([None] * (len(imgur_client_ids) - len(imgur_client_secrets)))
+elif len(imgur_client_secrets) > len(imgur_client_ids):
+    # Truncate extra secrets
+    imgur_client_secrets = imgur_client_secrets[:len(imgur_client_ids)]
+
+# Create a list of (client_id, client_secret) tuples
+imgur_credentials = list(zip(imgur_client_ids, imgur_client_secrets))
+
+download_albums = config.getboolean('Imgur', 'download_albums', fallback=True)
+max_album_images = config.getint('Imgur', 'max_album_images', fallback=50)
+recover_deleted = config.getboolean('Imgur', 'recover_deleted', fallback=True)
+
+# Suppress InsecureRequestWarning when ignore_ssl_errors is enabled
+if ignore_ssl_errors:
+    warnings.simplefilter('ignore', InsecureRequestWarning)
+
+# Track request failures for specific domains
+domain_failures = {}
+
+# Track URLs that have already had recovery failure warnings logged
+recovery_failure_warnings = set()
+
+# Track URLs that have already had download failure errors logged
+download_failure_errors = set()
+
+# Track the last time we made a request to specific domains
+last_request_time = {
+    'imgur.com': 0,
+    'i.imgur.com': 0,
+    'gfycat.com': 0,
+    'redd.it': 0,
+    'reddit.com': 0,
+    'imgur_api': 0
+}
+
+# Minimum time between requests to the same domain (in seconds)
+MIN_REQUEST_INTERVAL = {
+    'imgur.com': 15,  # 15 seconds between Imgur requests
+    'i.imgur.com': 15,
+    'gfycat.com': 10,
+    'redd.it': 5,
+    'reddit.com': 5
+}
+
+# Service-specific referrers and origins
+SERVICE_REFERRERS = {
+    'imgur': {'referer': 'https://imgur.com/', 'origin': 'https://imgur.com'},
+    'gfycat': {'referer': 'https://gfycat.com/', 'origin': 'https://gfycat.com'},
+    'gyazo': {'referer': 'https://gyazo.com/', 'origin': 'https://gyazo.com'},
+    'reddit': {'referer': 'https://www.reddit.com/', 'origin': 'https://www.reddit.com'},
+    'default': {'referer': None, 'origin': None}
+}
+
+# Service-specific accept headers
+SERVICE_ACCEPT_HEADERS = {
+    'imgur': 'image/webp,image/apng,image/*,*/*;q=0.8',
+    'gfycat': 'video/webm,video/mp4,video/*,*/*;q=0.8',
+    'gyazo': 'image/webp,image/apng,image/*,*/*;q=0.8',
+    'reddit': '*/*',
+    'default': '*/*'
+}
+
+def generate_random_user_agent():
+    """Generate a random user agent string."""
+    chrome_version = random.randint(80, 110)
+    build = random.randint(1000, 9999)
+    sub_build = random.randint(100, 999)
+    
+    platforms = [
+        f'Windows NT 10.0; Win64; x64',
+        f'Macintosh; Intel Mac OS X 10_{random.randint(12, 15)}_{random.randint(1, 7)}',
+        f'X11; Linux x86_64',
+        f'Windows NT 6.1; Win64; x64',
+    ]
+    
+    platform = random.choice(platforms)
+    
+    return f'Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.{build}.{sub_build} Safari/537.36'
+
+def get_service_headers(service='default', use_random_ua=False):
+    """
+    Get appropriate headers for a specific service.
+    
+    Args:
+        service: The service name ('imgur', 'gfycat', 'gyazo', 'reddit', or 'default')
+        use_random_ua: Whether to use a random user agent (True) or the default one (False)
+        
+    Returns:
+        A dictionary of headers
+    """
+    # Normalize service name
+    service = service.lower() if isinstance(service, str) else 'default'
+    
+    # Use the service-specific referrer and origin if available, otherwise use default
+    referrer_info = SERVICE_REFERRERS.get(service, SERVICE_REFERRERS['default'])
+    accept_header = SERVICE_ACCEPT_HEADERS.get(service, SERVICE_ACCEPT_HEADERS['default'])
+    
+    # Create the base headers
+    headers = {
+        'User-Agent': generate_random_user_agent() if use_random_ua else f'reddit-stash/1.0 (Python/{".".join(map(str, sys.version_info[:3]))})',
+        'Accept': accept_header,
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    
+    # Add referrer and origin if available
+    if referrer_info['referer']:
+        headers['Referer'] = referrer_info['referer']
+    if referrer_info['origin']:
+        headers['Origin'] = referrer_info['origin']
+    
+    # Add cache control for random user agents
+    if use_random_ua:
+        headers['Cache-Control'] = 'no-cache'
+        headers['Pragma'] = 'no-cache'
+    
+    return headers
+
+# Define fallback URL patterns for different services
+# Each service has a list of patterns where {id} will be replaced with the content ID
+FALLBACK_URL_PATTERNS = {
+    'imgur': [
+        'https://i.imgur.com/{id}.jpg',
+        'https://i.imgur.com/{id}.png',
+        'https://i.imgur.com/{id}.gif',
+        'https://i.imgur.com/{id}.mp4',
+        'https://imgur.com/download/{id}',
+    ],
+    'gfycat': [
+        # Primary domains
+        'https://giant.gfycat.com/{id}.mp4',
+        'https://thumbs.gfycat.com/{id}-mobile.mp4',
+        'https://thumbs.gfycat.com/{id}.mp4',
+        # Alternative domains (some may be deprecated but worth trying)
+        'https://zippy.gfycat.com/{id}.mp4',
+        'https://fat.gfycat.com/{id}.mp4',
+        # GIF versions
+        'https://thumbs.gfycat.com/{id}-size_restricted.gif',
+        'https://giant.gfycat.com/{id}.gif',
+        # Alternative domain structure
+        'https://gfycat.com/{id}/mp4',
+        # Direct CDN URLs
+        'https://assets.gfycat.com/gifs/{id}.mp4',
+        'https://media.gfycat.com/{id}.mp4',
+        # Legacy formats
+        'https://gfycat.com/ifr/{id}',
+    ],
+    'gyazo': [
+        'https://i.gyazo.com/{id}.png',
+        'https://i.gyazo.com/{id}.jpg',
+        'https://i.gyazo.com/{id}.gif',
+    ],
+    'reddit': [
+        'https://i.redd.it/{id}.jpg',
+        'https://i.redd.it/{id}.png',
+        'https://preview.redd.it/{id}.jpg',
+        'https://preview.redd.it/{id}.png',
+    ],
+}
+
+def generate_fallback_urls(service, content_id):
+    """
+    Generate a list of fallback URLs for a given service and content ID.
+    
+    Args:
+        service: The service name (e.g., 'imgur', 'gfycat')
+        content_id: The content ID to use in the URL patterns
+        
+    Returns:
+        A list of fallback URLs to try
+    """
+    if service not in FALLBACK_URL_PATTERNS:
+        return []
+        
+    return [pattern.format(id=content_id) for pattern in FALLBACK_URL_PATTERNS[service]]
+
+class ApiKeyRotator:
+    """Rotate through multiple API keys to avoid rate limits."""
+    
+    def __init__(self, credentials):
+        """
+        Initialize with a list of credential tuples.
+        
+        Args:
+            credentials: List of (client_id, client_secret) tuples
+        """
+        self.credentials = credentials if credentials else []
+        self.current_index = 0
+        self.usage_counts = {i: 0 for i in range(len(credentials))}
+        self.last_used = {i: 0 for i in range(len(credentials))}  # Timestamp of last use
+        
+    def get_next_key(self):
+        """Get the next API key in the rotation."""
+        if not self.credentials:
+            return None, None
+            
+        idx = self.current_index
+        creds = self.credentials[idx]
+        self.usage_counts[idx] += 1
+        self.last_used[idx] = time.time()
+        self.current_index = (self.current_index + 1) % len(self.credentials)
+        return creds
+        
+    def get_least_used_key(self):
+        """Get the least recently used API key."""
+        if not self.credentials:
+            return None, None
+            
+        # Sort indices by last used timestamp
+        sorted_indices = sorted(range(len(self.credentials)), key=lambda i: self.last_used[i])
+        idx = sorted_indices[0]
+        creds = self.credentials[idx]
+        self.usage_counts[idx] += 1
+        self.last_used[idx] = time.time()
+        return creds
+        
+    def get_random_key(self):
+        """Get a random API key."""
+        if not self.credentials:
+            return None, None
+            
+        idx = random.randrange(len(self.credentials))
+        creds = self.credentials[idx]
+        self.usage_counts[idx] += 1
+        self.last_used[idx] = time.time()
+        return creds
+        
+    def has_keys(self):
+        """Check if there are any API keys available."""
+        return len(self.credentials) > 0
+
+# Initialize the Imgur API key rotator
+imgur_key_rotator = ApiKeyRotator(imgur_credentials)
+
+def get_domain_from_url(url):
+    """Extract the domain from a URL."""
+    try:
+        # Handle URLs without scheme
+        if not url.startswith('http'):
+            return None
+        
+        parsed_url = urlparse(url)
+        return parsed_url.netloc
+    except:
+        return None
+
+def apply_rate_limiting(url):
+    """Apply rate limiting based on domain to avoid hitting API limits."""
+    domain = get_domain_from_url(url)
+    if not domain:
+        return
+        
+    # Initialize failure count if not present
+    if domain not in domain_failures:
+        domain_failures[domain] = 0
+    
+    # Check if we need to enforce a minimum time between requests
+    current_time = time.time()
+    base_domain = domain
+    
+    # Extract base domain for checking against our tracking dictionaries
+    for tracked_domain in last_request_time.keys():
+        if tracked_domain in domain:
+            base_domain = tracked_domain
+            break
+    
+    # If we've made a request to this domain recently, wait until the minimum interval has passed
+    if base_domain in last_request_time:
+        time_since_last_request = current_time - last_request_time[base_domain]
+        min_interval = MIN_REQUEST_INTERVAL.get(base_domain, 0)
+        
+        if time_since_last_request < min_interval:
+            wait_time = min_interval - time_since_last_request
+            logging.info(f"Enforcing minimum interval for {base_domain}: waiting {wait_time:.2f}s")
+            time.sleep(wait_time)
+            
+    # Apply dynamic sleep based on domain and failure count
+    content_length = len(url)  # Use URL length as a proxy for content size
+    sleep_time = dynamic_sleep(content_length, domain_failures[domain])
+        
+    # Add extra delay for known rate-limited domains
+    if 'imgur.com' in domain or 'i.imgur.com' in domain:
+        # More aggressive rate limiting for Imgur
+        # Base delay of 10-15 seconds plus additional delay based on failure count
+        base_delay = random.uniform(10.0, 15.0)
+        failure_multiplier = min(10, domain_failures.get(domain, 0))  # Cap at 10x
+        sleep_time = max(sleep_time, base_delay * (1 + failure_multiplier * 0.5))
+        logging.debug(f"Applied Imgur rate limiting: {sleep_time:.2f}s delay for {domain}")
+    elif 'redd.it' in domain or 'reddit.com' in domain:
+        # More aggressive rate limiting for Reddit
+        base_delay = random.uniform(3.0, 5.0)
+        failure_multiplier = min(5, domain_failures.get(domain, 0))
+        sleep_time = max(sleep_time, base_delay * (1 + failure_multiplier * 0.5))
+    elif 'gfycat.com' in domain:
+        sleep_time = max(sleep_time, 5.0)  # At least 5 seconds for Gfycat
+        
+    # Add some randomness to avoid detection patterns
+    sleep_time *= random.uniform(0.9, 1.1)
+    
+    logging.debug(f"Rate limiting for {domain}: sleeping for {sleep_time:.2f}s")
+    time.sleep(sleep_time)
+    
+    # Update the last request time for this domain
+    if base_domain in last_request_time:
+        last_request_time[base_domain] = time.time()
+        
+    return domain
+
+def clean_url(url):
+    """
+    Clean a URL that might contain markdown formatting or other issues.
+    
+    Args:
+        url: The URL to clean
+        
+    Returns:
+        The cleaned URL
+    """
+    original_url = url
+    
+    # Special case for Gyazo URLs with markdown formatting
+    if 'gyazo.com' in url and '](' in url:
+        gyazo_id = extract_gyazo_id(url)
+        if gyazo_id:
+            direct_url = get_gyazo_direct_url(gyazo_id)
+            if direct_url:
+                logging.info(f"Converted complex Gyazo URL to direct URL: {direct_url}")
+                return direct_url
+    
+    # Handle markdown links: [text](url)
+    if '](' in url:
+        try:
+            url = url.split('](')[1].rstrip(')')
+        except IndexError:
+            logging.warning(f"Failed to parse markdown link: {original_url}")
+    
+    # Handle nested markdown links or other malformed URLs
+    if '](' in url:
+        try:
+            url = url.split('](')[1].rstrip(')')
+        except IndexError:
+            logging.warning(f"Failed to parse nested markdown link: {original_url}")
+    
+    # Handle URLs with trailing brackets or parentheses
+    url = url.rstrip(')]')
+    
+    # Handle URLs with encoded characters
+    url = url.replace('%5D', ']').replace('%5B', '[').replace('%28', '(').replace('%29', ')')
+    
+    # Remove any text after a space (sometimes URLs have trailing text)
+    if ' ' in url:
+        url = url.split(' ')[0]
+    
+    # Handle special case for Imgur URLs with trailing brackets
+    if 'imgur.com' in url and ']' in url:
+        url = url.split(']')[0]
+    
+    # Handle special case for Gyazo URLs
+    if 'gyazo.com' in url and not url.startswith('https://i.gyazo.com/'):
+        gyazo_id = extract_gyazo_id(url)
+        if gyazo_id:
+            direct_url = get_gyazo_direct_url(gyazo_id)
+            if direct_url:
+                logging.info(f"Converted Gyazo URL to direct URL: {direct_url}")
+                return direct_url
+    
+    return url
+
+def download_media(url, save_directory, item_id, media_type='image'):
+    """
+    Generic function to download media (image, video, audio) from a URL.
+    
+    Args:
+        url: The URL of the media to download
+        save_directory: Directory to save the media in
+        item_id: Unique ID for the media file (usually submission or comment ID)
+        media_type: Type of media ('image', 'video', 'audio', 'thumbnail')
+        
+    Returns:
+        Path to the saved media file or None if download failed
+    """
+    max_retries = 3
+    retry_count = 0
+    
+    try:
+        # Clean URL if it contains markdown formatting
+        original_url = url  # Save the original URL for error reporting
+        url = clean_url(url)
+        
+        if url != original_url:
+            logging.debug(f"Cleaned URL: {original_url} -> {url}")
+        
+        # Identify the service and content ID
+        service = None
+        content_id = None
+        
+        # Check for Gyazo URLs
+        if 'gyazo.com' in url:
+            service = 'gyazo'
+            gyazo_id = extract_gyazo_id(url)
+            if gyazo_id:
+                content_id = gyazo_id
+                logging.info(f"Detected Gyazo URL: {url}, ID: {content_id}")
+                
+                # For Gyazo URLs, try to get the direct URL first
+                direct_url = get_gyazo_direct_url(content_id)
+                if direct_url:
+                    logging.info(f"Using Gyazo direct URL: {direct_url}")
+                    url = direct_url
+        
+        # Check for Gfycat URLs
+        elif 'gfycat.com' in url:
+            service = 'gfycat'
+            gfycat_id = extract_gfycat_id(url)
+            if gfycat_id:
+                content_id = gfycat_id
+                logging.info(f"Detected Gfycat URL: {url}, ID: {content_id}")
+                # Try to get the direct URL
+                direct_url = get_gfycat_mp4_url(content_id)
+                if direct_url:
+                    logging.info(f"Using Gfycat direct URL: {direct_url}")
+                    url = direct_url
+        
+        # Check for Imgur URLs
+        elif 'imgur.com' in url:
+            service = 'imgur'
+            imgur_id = extract_imgur_id(url)
+            if imgur_id:
+                content_id = imgur_id
+                logging.info(f"Detected Imgur URL: {url}, ID: {content_id}")
+                # Try to get the direct URL using the API
+                direct_url = extract_imgur_image_url(content_id)
+                if direct_url:
+                    logging.info(f"Using Imgur direct URL: {direct_url}")
+                    url = direct_url
+        
+        # Check for Reddit URLs
+        elif 'redd.it' in url or 'reddit.com' in url:
+            service = 'reddit'
+            reddit_id_match = re.search(r'redd\.it/([a-zA-Z0-9]+)', url)
+            if reddit_id_match:
+                content_id = reddit_id_match.group(1)
+                logging.info(f"Detected Reddit URL: {url}, ID: {content_id}")
+                # We'll use the original URL but keep track of the service and ID for fallbacks
+        
+        # Handle URLs without scheme
+        if not url.startswith('http'):
+            url = 'http://' + url
+            
+        # Apply rate limiting
+        domain = apply_rate_limiting(url)
+        
+        while retry_count <= max_retries:
+            try:
+                # Get appropriate headers for this service
+                headers = get_service_headers(service if service else 'default')
+                
+                # Use the ignore_ssl_errors setting when making the request
+                response = requests.get(url, headers=headers, verify=not ignore_ssl_errors, timeout=30)
+                
+                # Handle rate limiting (429) specifically
+                if response.status_code == 429:
+                    # For Imgur URLs with 429 errors, add to the persistent retry queue
+                    if service == 'imgur' or 'imgur.com' in url or 'i.imgur.com' in url:
+                        logging.warning(f"Imgur rate limited (429) for {url}. Adding to persistent retry queue.")
+                        add_to_imgur_retry_queue(url, save_directory, item_id, media_type, service, content_id)
+                        return None
+                    
+                    # For service-specific URLs with 429 errors, try the alternative download method
+                    if service and content_id:
+                        logging.warning(f"{service} rate limited (429) for {url}. Trying alternative download method.")
+                        alternative_result = retry_download_with_fallbacks(service, content_id, save_directory, item_id, media_type)
+                        if alternative_result:
+                            return alternative_result
+                    
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        # Calculate backoff time (exponential with jitter)
+                        if service == 'imgur':
+                            # More aggressive backoff for Imgur
+                            backoff_time = min(300, (60 * (2 ** retry_count)) + random.uniform(0, 30))
+                            logging.warning(f"Imgur rate limited (429) for {url}. Retrying in {backoff_time:.2f} seconds (attempt {retry_count}/{max_retries})")
+                        else:
+                            backoff_time = min(60, (2 ** retry_count) + random.uniform(0, 1))
+                            logging.warning(f"Rate limited (429) for {url}. Retrying in {backoff_time:.2f} seconds (attempt {retry_count}/{max_retries})")
+                        
+                        time.sleep(backoff_time)
+                        continue
+                    else:
+                        logging.error(f"Max retries exceeded for rate limited request: {url}")
+                        
+                        # For Imgur URLs, add to the persistent retry queue
+                        if service == 'imgur' or 'imgur.com' in url or 'i.imgur.com' in url:
+                            add_to_imgur_retry_queue(url, save_directory, item_id, media_type, service, content_id)
+                        
+                        raise requests.exceptions.HTTPError(f"429 Client Error: Rate Limited for url: {url}")
+                
+                # Handle 404 errors for service-specific URLs
+                if response.status_code == 404 and service and content_id:
+                    logging.warning(f"{service} URL not found (404): {url}. Trying alternative download method.")
+                    alternative_result = retry_download_with_fallbacks(service, content_id, save_directory, item_id, media_type)
+                    if alternative_result:
+                        return alternative_result
+                
+                # For other status codes, raise for status as usual
+                response.raise_for_status()
+                
+                # Reset failure count on success
+                if domain and domain in domain_failures:
+                    domain_failures[domain] = 0
+                
+                # Determine the file extension from the URL
+                extension = os.path.splitext(url)[1].lower()
+                
+                # Set default extensions based on media type if not found in URL
+                if not extension or extension not in get_valid_extensions(media_type):
+                    extension = get_default_extension(media_type)
+                
+                # Create a unique filename
+                prefix = f"{media_type.upper()}_" if media_type != 'image' else ""
+                filename = f"{prefix}{item_id}{extension}"
+                file_path = os.path.join(save_directory, filename)
+                
+                # Save the media file
+                with open(file_path, 'wb') as f:
+                    f.write(response.content)
+                
+                # If we successfully downloaded, remove from error tracking if it was there
+                if url in download_failure_errors:
+                    download_failure_errors.remove(url)
+                
+                return file_path
+                
+            except requests.exceptions.HTTPError as e:
+                if "429" in str(e) and retry_count < max_retries:
+                    # Already handled above, but catch any we missed
+                    retry_count += 1
+                    backoff_time = min(60, (2 ** retry_count) + random.uniform(0, 1))
+                    logging.warning(f"Rate limited (429) for {url}. Retrying in {backoff_time:.2f} seconds (attempt {retry_count}/{max_retries})")
+                    time.sleep(backoff_time)
+                elif (service and content_id and 
+                      (response.status_code == 404 or response.status_code == 403) and 
+                      retry_count < max_retries):
+                    # If we get a 404 or 403 and we know the service and content ID,
+                    # try the next fallback URL
+                    retry_count += 1
+                    fallback_urls = generate_fallback_urls(service, content_id)
+                    if retry_count <= len(fallback_urls):
+                        next_url = fallback_urls[retry_count - 1]
+                        logging.info(f"Original URL failed with {response.status_code}, trying fallback URL: {next_url}")
+                        url = next_url
+                        continue
+                    else:
+                        raise
+                else:
+                    raise
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                # Check if this is a DNS resolution error
+                if is_dns_error(e):
+                    logging.warning(f"DNS resolution error for {url}: {e}")
+                    
+                    # For service-specific URLs with DNS errors, try the alternative download method
+                    if service and content_id:
+                        logging.warning(f"{service} DNS resolution error for {url}. Trying alternative download method.")
+                        alternative_result = retry_download_with_fallbacks(service, content_id, save_directory, item_id, media_type)
+                        if alternative_result:
+                            return alternative_result
+                
+                # For connection errors, retry with backoff
+                retry_count += 1
+                if retry_count <= max_retries:
+                    backoff_time = min(60, (2 ** retry_count) + random.uniform(0, 1))
+                    logging.warning(f"Connection error for {url}. Retrying in {backoff_time:.2f} seconds (attempt {retry_count}/{max_retries})")
+                    time.sleep(backoff_time)
+                else:
+                    # If we've exhausted retries and have service/content_id, try service-specific recovery
+                    if service and content_id:
+                        return retry_download_with_fallbacks(service, content_id, save_directory, item_id, media_type)
+                    raise
+    
+    except Exception as e:
+        # Increment failure count for this domain
+        if domain and domain in domain_failures:
+            domain_failures[domain] += 1
+            
+        # Only log the error once per URL
+        if url not in download_failure_errors:
+            download_failure_errors.add(url)
+            logging.error(f"Failed to download {media_type} from {url}: {e}")
+            
+            # For Imgur URLs, add to the persistent retry queue
+            if ('imgur.com' in url or 'i.imgur.com' in url) and media_type == 'image':
+                add_to_imgur_retry_queue(url, save_directory, item_id, media_type, service, content_id)
+        
+        return None
+
+def get_valid_extensions(media_type):
+    """Get valid file extensions for different media types."""
+    if media_type == 'image':
+        return ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+    elif media_type == 'video':
+        return ['.mp4', '.webm', '.mov', '.avi', '.mkv']
+    elif media_type == 'audio':
+        return ['.mp3', '.wav', '.ogg', '.m4a', '.flac']
+    else:
+        return []
+
+def get_default_extension(media_type):
+    """Get default extension for a media type."""
+    if media_type == 'image':
+        return '.jpg'
+    elif media_type == 'video':
+        return '.mp4'
+    elif media_type == 'audio':
+        return '.mp3'
+    elif media_type == 'thumbnail':
+        return '.jpg'
+    else:
+        return '.bin'
+
+def download_image(image_url, save_directory, item_id):
+    """Download an image from the given URL and save it locally."""
+    return download_media(image_url, save_directory, item_id, 'image')
+
+def generate_thumbnail(image_path, save_directory, item_id, max_size=None):
+    """
+    Generate a thumbnail for a large image.
+    
+    Args:
+        image_path: Path to the original image
+        save_directory: Directory to save the thumbnail in
+        item_id: Unique ID for the thumbnail file
+        max_size: Maximum dimension (width or height) for the thumbnail
+        
+    Returns:
+        Path to the thumbnail or None if generation failed
+    """
+    if not max_size:
+        max_size = thumbnail_size
+        
+    try:
+        # Check if the image exists and is accessible
+        if not os.path.exists(image_path):
+            return None
+            
+        # Get the file size
+        file_size = os.path.getsize(image_path)
+        
+        # Only generate thumbnail if the image is larger than max_image_size
+        if file_size < max_image_size:
+            return None
+            
+        # Open the image
+        img = Image.open(image_path)
+        
+        # Calculate new dimensions while maintaining aspect ratio
+        width, height = img.size
+        if width > height:
+            new_width = min(width, max_size)
+            new_height = int(height * (new_width / width))
+        else:
+            new_height = min(height, max_size)
+            new_width = int(width * (new_height / height))
+            
+        # Resize the image
+        img = img.resize((new_width, new_height), Image.LANCZOS)
+        
+        # Save the thumbnail
+        thumbnail_path = os.path.join(save_directory, f"THUMB_{item_id}.jpg")
+        img.save(thumbnail_path, "JPEG", quality=85)
+        
+        return thumbnail_path
+    except Exception as e:
+        logging.error(f"Failed to generate thumbnail for {image_path}: {e}")
+        return None
+
+def extract_reddit_video_url(submission):
+    """Extract the direct video URL from a Reddit submission with a v.redd.it link."""
+    try:
+        # Check if the submission has media metadata
+        if hasattr(submission, 'media') and submission.media:
+            if 'reddit_video' in submission.media:
+                # Get the highest quality version available
+                if video_quality == 'high' and 'fallback_url' in submission.media['reddit_video']:
+                    return submission.media['reddit_video']['fallback_url']
+                elif 'dash_url' in submission.media['reddit_video']:
+                    return submission.media['reddit_video']['dash_url']
+                else:
+                    return submission.media['reddit_video'].get('scrubber_media_url')
+        
+        # Try to get video URL from crosspost parent if available
+        if hasattr(submission, 'crosspost_parent_list') and submission.crosspost_parent_list:
+            parent = submission.crosspost_parent_list[0]
+            if 'media' in parent and parent['media'] and 'reddit_video' in parent['media']:
+                if video_quality == 'high' and 'fallback_url' in parent['media']['reddit_video']:
+                    return parent['media']['reddit_video']['fallback_url']
+                elif 'dash_url' in parent['media']['reddit_video']:
+                    return parent['media']['reddit_video']['dash_url']
+                else:
+                    return parent['media']['reddit_video'].get('scrubber_media_url')
+        
+        # Try to extract from secure_media if available
+        if hasattr(submission, 'secure_media') and submission.secure_media:
+            if 'reddit_video' in submission.secure_media:
+                if video_quality == 'high' and 'fallback_url' in submission.secure_media['reddit_video']:
+                    return submission.secure_media['reddit_video']['fallback_url']
+                elif 'dash_url' in submission.secure_media['reddit_video']:
+                    return submission.secure_media['reddit_video']['dash_url']
+                else:
+                    return submission.secure_media['reddit_video'].get('scrubber_media_url')
+        
+        # Try to get from preview if available
+        if hasattr(submission, 'preview') and 'reddit_video_preview' in submission.preview:
+            if video_quality == 'high' and 'fallback_url' in submission.preview['reddit_video_preview']:
+                return submission.preview['reddit_video_preview']['fallback_url']
+            elif 'dash_url' in submission.preview['reddit_video_preview']:
+                return submission.preview['reddit_video_preview']['dash_url']
+            else:
+                return submission.preview['reddit_video_preview'].get('scrubber_media_url')
+                
+        # If we can't find the video URL, return None
+        logging.warning(f"Could not extract video URL from Reddit submission {submission.id}")
+        return None
+    except Exception as e:
+        logging.error(f"Failed to extract Reddit video URL: {e}")
+        return None
+
+def extract_gfycat_id(url):
+    """Extract the Gfycat ID from a URL."""
+    gfycat_patterns = [
+        r'gfycat\.com/([a-zA-Z]+)',
+        r'gfycat\.com/gifs/detail/([a-zA-Z]+)',
+    ]
+    
+    for pattern in gfycat_patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    
+    return None
+
+def is_dns_error(error):
+    """Check if an error is related to DNS resolution."""
+    error_str = str(error).lower()
+    dns_error_indicators = [
+        'nodename nor servname provided',
+        'name or service not known',
+        'temporary failure in name resolution',
+        'name resolution failed',
+        'getaddrinfo failed',
+        'no address associated with hostname',
+        'dns resolution failed'
+    ]
+    return any(indicator in error_str for indicator in dns_error_indicators)
+
+def get_gfycat_mp4_url(gfycat_id):
+    """Get the direct MP4 URL from a Gfycat ID using their API."""
+    try:
+        # Try the API first
+        api_url = f"https://api.gfycat.com/v1/gfycats/{gfycat_id}"
+        response = requests.get(api_url, timeout=10, verify=not ignore_ssl_errors)
+        response.raise_for_status()
+        
+        data = response.json()
+        if 'gfyItem' in data:
+            # Return the highest quality version available
+            if video_quality == 'high' and 'mp4Url' in data['gfyItem']:
+                return data['gfyItem']['mp4Url']
+            else:
+                return data['gfyItem']['mobileUrl']
+    except (requests.RequestException, ValueError, KeyError) as e:
+        # Check if this is a DNS resolution error
+        if isinstance(e, requests.RequestException) and is_dns_error(e):
+            logging.warning(f"DNS resolution error for Gfycat API: {e}")
+            logging.info("Skipping API and trying direct URLs immediately")
+        else:
+            logging.warning(f"Failed to get Gfycat URL via API for {gfycat_id}: {e}")
+        
+        # Try fallback URLs
+        fallback_urls = generate_fallback_urls('gfycat', gfycat_id)
+        
+        for url in fallback_urls:
+            try:
+                test_response = requests.head(url, timeout=5, verify=not ignore_ssl_errors)
+                if test_response.status_code == 200:
+                    logging.info(f"Found working Gfycat fallback URL: {url}")
+                    return url
+            except requests.RequestException as e:
+                # Skip logging for DNS errors to reduce noise
+                if not is_dns_error(e):
+                    logging.debug(f"Failed to access Gfycat fallback URL {url}: {e}")
+                continue
+                
+    # If all else fails, return the most likely URL as a last resort
+    last_resort_url = f"https://thumbs.gfycat.com/{gfycat_id}-size_restricted.gif"
+    logging.warning(f"All Gfycat fallbacks failed, returning last resort URL: {last_resort_url}")
+    return last_resort_url
+
+def extract_imgur_id(url):
+    """Extract the Imgur ID from various Imgur URL formats."""
+    patterns = [
+        r'imgur\.com/([a-zA-Z0-9]+)(?:\.\w+)?$',  # imgur.com/abcd or imgur.com/abcd.jpg
+        r'imgur\.com/gallery/([a-zA-Z0-9]+)',     # imgur.com/gallery/abcd
+        r'i\.imgur\.com/([a-zA-Z0-9]+)(?:\.\w+)?$', # i.imgur.com/abcd.jpg
+        r'm\.imgur\.com/([a-zA-Z0-9]+)',          # m.imgur.com/abcd
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    
+    return None
+
+def extract_imgur_album_id(url):
+    """Extract the Imgur album ID from an album URL."""
+    patterns = [
+        r'imgur\.com/a/([a-zA-Z0-9]+)',           # imgur.com/a/abcd
+        r'imgur\.com/album/([a-zA-Z0-9]+)',       # imgur.com/album/abcd
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    
+    return None
+
+def get_imgur_client():
+    """Get an Imgur client using the key rotator."""
+    # Check if we need to enforce a minimum time between API calls
+    current_time = time.time()
+    if 'imgur_api' in last_request_time:
+        time_since_last_request = current_time - last_request_time['imgur_api']
+        min_interval = 30  # 30 seconds between Imgur API calls
+        
+        if time_since_last_request < min_interval:
+            wait_time = min_interval - time_since_last_request
+            logging.info(f"Enforcing minimum interval for Imgur API: waiting {wait_time:.2f}s")
+            time.sleep(wait_time)
+    
+    client_id, client_secret = imgur_key_rotator.get_next_key() if imgur_key_rotator.has_keys() else (None, None)
+    
+    if not client_id:
+        logging.warning("No Imgur API client IDs configured. Some Imgur content may not be downloaded.")
+        logging.warning("To avoid 429 rate limit errors, register for free Imgur API credentials")
+        logging.warning("Available credentials: " + str(len(imgur_credentials)))
+        return None
+    
+    logging.info(f"Attempting to create Imgur client with client_id: {client_id[:4]}...")
+        
+    try:
+        client = ImgurClient(client_id, client_secret)
+        logging.info(f"Successfully created Imgur client with client_id: {client_id[:4]}...")
+        
+        # Update the last request time for Imgur API
+        last_request_time['imgur_api'] = time.time()
+        
+        # Test the client with a simple API call
+        try:
+            credits = client.credits
+            logging.info(f"Imgur API credits remaining: {credits['ClientRemaining']}/{credits['ClientLimit']}")
+            logging.info(f"Imgur API reset time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(credits['UserReset']))}")
+            
+            # If we're running low on credits, add a longer delay
+            if credits['ClientRemaining'] < 50:
+                logging.warning(f"Low on Imgur API credits ({credits['ClientRemaining']}). Adding extra delay.")
+                time.sleep(random.uniform(20, 30))
+        except Exception as e:
+            logging.warning(f"Could not retrieve Imgur API credits: {e}")
+            
+        return client
+    except ImgurClientError as e:
+        logging.error(f"Imgur API client error: {e}")
+        if "401" in str(e):
+            logging.error("Invalid Imgur credentials. Check your client_id and client_secret.")
+        elif "429" in str(e):
+            logging.error("Imgur rate limit exceeded. Consider adding more client IDs or increasing rate limiting delays.")
+            # Add a long delay to recover from rate limiting
+            time.sleep(random.uniform(60, 120))
+        return None
+    except Exception as e:
+        logging.error(f"Failed to create Imgur client: {e}")
+        return None
+
+def extract_imgur_album_images(album_id):
+    """Extract all image URLs from an Imgur album using the Imgur API."""
+    client = get_imgur_client()
+    if not client:
+        # Fallback to direct URL construction for simple cases
+        return [f"https://i.imgur.com/{album_id}.jpg"]
+    
+    try:
+        images = client.get_album_images(album_id)
+        
+        # Limit the number of images if max_album_images is set
+        if max_album_images > 0 and len(images) > max_album_images:
+            logging.info(f"Limiting album {album_id} to {max_album_images} images (out of {len(images)})")
+            images = images[:max_album_images]
+            
+        return [image.link for image in images]
+    except ImgurClientError as e:
+        logging.error(f"Imgur API error for album {album_id}: {e}")
+        return []
+    except Exception as e:
+        logging.error(f"Failed to extract Imgur album images for {album_id}: {e}")
+        return []
+
+def extract_imgur_image_url(image_id):
+    """Extract the direct image URL from an Imgur image ID using the API if available."""
+    # Try with API first if available
+    client = get_imgur_client()
+    if client:
+        try:
+            image = client.get_image(image_id)
+            if image and hasattr(image, 'link'):
+                logging.info(f"Successfully retrieved Imgur image {image_id} via API")
+                return image.link
+        except ImgurClientError as e:
+            logging.warning(f"Imgur API error for image {image_id}: {e}")
+        except Exception as e:
+            logging.warning(f"Failed to extract Imgur image URL for {image_id} via API: {e}")
+    
+    # If API fails or is not available, try direct URL construction
+    logging.info(f"Trying fallback URLs for Imgur image {image_id}")
+    fallback_urls = generate_fallback_urls('imgur', image_id)
+    
+    for url in fallback_urls:
+        try:
+            test_response = requests.head(url, timeout=5, verify=not ignore_ssl_errors)
+            if test_response.status_code == 200:
+                logging.info(f"Found working Imgur fallback URL: {url}")
+                return url
+        except requests.RequestException as e:
+            logging.debug(f"Failed to access Imgur fallback URL {url}: {e}")
+            continue
+    
+    # If all fallbacks fail, return the most likely URL as a last resort
+    last_resort_url = f"https://i.imgur.com/{image_id}.jpg"
+    logging.warning(f"All Imgur fallbacks failed, returning last resort URL: {last_resort_url}")
+    return last_resort_url
+
+def extract_imgur_video_url(url):
+    """Extract the direct video URL from an Imgur URL."""
+    try:
+        # Check if it's an album
+        album_id = extract_imgur_album_id(url)
+        if album_id and download_albums:
+            # This is an album, we'll handle it separately
+            return None
+            
+        # Handle single image/video
+        image_id = extract_imgur_id(url)
+        if not image_id:
+            return None
+            
+        # For videos, try MP4 format first
+        mp4_url = f"https://i.imgur.com/{image_id}.mp4"
+        
+        # Check if the MP4 URL exists
+        try:
+            response = requests.head(mp4_url, verify=not ignore_ssl_errors)
+            if response.status_code == 200:
+                return mp4_url
+        except Exception as e:
+            logging.warning(f"Failed to check Imgur MP4 URL for {image_id}: {e}")
+        
+        # If MP4 doesn't exist, try GIFV (which is actually a video)
+        if url.endswith('.gifv'):
+            return mp4_url  # GIFV is just a wrapper around MP4
+                
+        return None
+    except Exception as e:
+        logging.error(f"Failed to extract Imgur video URL: {e}")
+        return None
+
+def download_imgur_album(album_url, save_directory, item_id):
+    """Download all images from an Imgur album."""
+    album_id = extract_imgur_album_id(album_url)
+    if not album_id:
+        return None
+        
+    image_urls = extract_imgur_album_images(album_id)
+    if not image_urls:
+        return None
+        
+    # Create a subdirectory for the album
+    album_dir = os.path.join(save_directory, f"album_{item_id}")
+    os.makedirs(album_dir, exist_ok=True)
+    
+    # Download each image
+    downloaded_paths = []
+    for i, image_url in enumerate(image_urls):
+        image_id = f"{item_id}_{i+1}"
+        
+        # Determine if it's a video or image
+        if image_url.endswith(('.mp4', '.webm', '.gifv')):
+            path = download_media(image_url, album_dir, image_id, 'video')
+        else:
+            path = download_media(image_url, album_dir, image_id, 'image')
+            
+        if path:
+            downloaded_paths.append(path)
+    
+    # Create an index file with links to all downloaded images
+    if downloaded_paths:
+        index_path = os.path.join(album_dir, f"index_{item_id}.md")
+        with open(index_path, 'w') as f:
+            f.write(f"# Imgur Album: {album_id}\n\n")
+            f.write(f"Original URL: {album_url}\n\n")
+            
+            for i, path in enumerate(downloaded_paths):
+                filename = os.path.basename(path)
+                if path.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg')):
+                    f.write(f"![Image {i+1}]({filename})\n\n")
+                else:
+                    f.write(f"[Video {i+1}]({filename})\n\n")
+        
+        return index_path
+    
+    return None
+
+def recover_imgur_content(url, item_id, save_directory):
+    """Try to recover deleted Imgur content using alternative methods."""
+    if not recover_deleted:
+        return None
+        
+    image_id = extract_imgur_id(url)
+    if not image_id:
+        return None
+    
+    # Method 1: Try different extensions
+    for ext in ['.jpg', '.png', '.gif', '.mp4']:
+        try_url = f"https://i.imgur.com/{image_id}{ext}"
+        try:
+            response = requests.head(try_url, verify=not ignore_ssl_errors)
+            if response.status_code == 200:
+                return download_media(try_url, save_directory, f"recovered_{item_id}")
+        except Exception:
+            pass
+    
+    # Method 2: Try Imgur's thumbnail server
+    thumb_url = f"https://i.imgur.com/{image_id}s.jpg"  # 's' suffix is for small thumbnail
+    try:
+        response = requests.head(thumb_url, verify=not ignore_ssl_errors)
+        if response.status_code == 200:
+            return download_media(thumb_url, save_directory, f"thumbnail_{item_id}")
+    except Exception:
+        pass
+    
+    # Method 3: Try Imgur's medium thumbnail
+    thumb_url = f"https://i.imgur.com/{image_id}m.jpg"  # 'm' suffix is for medium thumbnail
+    try:
+        response = requests.head(thumb_url, verify=not ignore_ssl_errors)
+        if response.status_code == 200:
+            return download_media(thumb_url, save_directory, f"thumbnail_{item_id}")
+    except Exception:
+        pass
+    
+    return None
+
+def extract_streamable_video_url(url):
+    """Extract the direct video URL from a Streamable URL."""
+    try:
+        # Extract the streamable ID
+        streamable_id_match = re.search(r'streamable\.com/([a-zA-Z0-9]+)', url)
+        if not streamable_id_match:
+            return None
+            
+        streamable_id = streamable_id_match.group(1)
+        
+        # Get the video info from the API
+        api_url = f"https://api.streamable.com/videos/{streamable_id}"
+        response = requests.get(api_url)
+        response.raise_for_status()
+        
+        data = response.json()
+        if 'files' in data and 'mp4' in data['files']:
+            return f"https://streamable.com/{data['files']['mp4']['url']}"
+            
+        return None
+    except Exception as e:
+        logging.error(f"Failed to extract Streamable video URL: {e}")
+        return None
+
+def download_video(url, save_directory, item_id, submission=None):
+    """
+    Download a video from various platforms.
+    
+    Args:
+        url: The URL of the video or the platform page
+        save_directory: Directory to save the video in
+        item_id: Unique ID for the video file
+        submission: Optional Reddit submission object for Reddit videos
+        
+    Returns:
+        Path to the saved video file or None if download failed
+    """
+    video_url = None
+    
+    # Handle Reddit videos
+    if 'v.redd.it' in url or (submission and hasattr(submission, 'is_video') and submission.is_video):
+        if submission:
+            video_url = extract_reddit_video_url(submission)
+    
+    # Handle Gfycat
+    elif 'gfycat.com' in url:
+        gfycat_id = extract_gfycat_id(url)
+        if gfycat_id:
+            video_url = get_gfycat_mp4_url(gfycat_id)
+    
+    # Handle Imgur
+    elif 'imgur.com' in url:
+        # Check if it's an album
+        if (('imgur.com/a/' in url or 'imgur.com/album/' in url) and download_albums):
+            return download_imgur_album(url, save_directory, item_id)
+        
+        # Check if it's a video
+        video_url = extract_imgur_video_url(url)
+        
+        # If we couldn't get a video URL, try to recover deleted content
+        if not video_url and recover_deleted:
+            return recover_imgur_content(url, item_id, save_directory)
+    
+    # Handle Streamable
+    elif 'streamable.com' in url:
+        video_url = extract_streamable_video_url(url)
+    
+    # If we found a direct video URL, download it
+    if video_url:
+        return download_media(video_url, save_directory, item_id, 'video')
+    
+    # If we couldn't extract a video URL, try recovery methods
+    recovery_path = recover_deleted_media(url, item_id, save_directory, submission)
+    if recovery_path:
+        return recovery_path
+    
+    # If we couldn't extract a video URL, return None
+    return None
+
+def is_audio_url(url):
+    """Check if a URL points to an audio file."""
+    audio_extensions = ['.mp3', '.wav', '.ogg', '.m4a', '.flac']
+    return any(url.lower().endswith(ext) for ext in audio_extensions)
+
+def download_audio(url, save_directory, item_id):
+    """Download an audio file from the given URL."""
+    if is_audio_url(url):
+        return download_media(url, save_directory, item_id, 'audio')
+    return None
+
+def detect_and_download_media(submission, save_directory):
+    """
+    Detect and download media from a Reddit submission.
+    
+    Args:
+        submission: The Reddit submission object
+        save_directory: Directory to save the media in
+        
+    Returns:
+        A tuple of (media_type, media_path, thumbnail_path)
+    """
+    url = submission.url
+    
+    # Check if it's a direct image URL
+    if url.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg')):
+        image_path = download_media(url, save_directory, submission.id, 'image')
+        thumbnail_path = None
+        if image_path and os.path.exists(image_path):
+            # Generate thumbnail for large images
+            file_size = os.path.getsize(image_path)
+            if file_size > max_image_size:
+                thumbnail_path = generate_thumbnail(image_path, save_directory, submission.id)
+        return 'image', image_path, thumbnail_path
+    
+    # Check if it's a direct video URL
+    elif url.endswith(('.mp4', '.webm', '.mov')):
+        video_path = download_media(url, save_directory, submission.id, 'video')
+        return 'video', video_path, None
+    
+    # Check if it's a direct audio URL
+    elif url.endswith(('.mp3', '.wav', '.ogg', '.m4a', '.flac')):
+        audio_path = download_media(url, save_directory, submission.id, 'audio')
+        return 'audio', audio_path, None
+    
+    # Check for v.redd.it videos
+    elif 'v.redd.it' in url:
+        video_url = extract_reddit_video_url(submission)
+        if video_url:
+            video_path = download_media(video_url, save_directory, submission.id, 'video')
+            return 'video', video_path, None
+    
+    # Check for Gfycat
+    elif 'gfycat.com' in url:
+        gfycat_id = extract_gfycat_id(url)
+        if gfycat_id:
+            # Try to get the direct URL first
+            video_url = get_gfycat_mp4_url(gfycat_id)
+            if video_url:
+                video_path = download_media(video_url, save_directory, submission.id, 'video')
+                if video_path:
+                    return 'video', video_path, None
+            
+            # If direct URL fails or returns None, try alternative methods
+            result = retry_gfycat_download(gfycat_id, save_directory, submission.id, 'video')
+            if result:
+                return 'video', result, None
+    
+    # Check for Gyazo
+    elif 'gyazo.com' in url:
+        gyazo_id = extract_gyazo_id(url)
+        if gyazo_id:
+            # Try to get the direct URL first
+            direct_url = get_gyazo_direct_url(gyazo_id)
+            if direct_url:
+                if direct_url.endswith(('.mp4', '.webm', '.mov')):
+                    video_path = download_media(direct_url, save_directory, submission.id, 'video')
+                    return 'video', video_path, None
+                else:
+                    image_path = download_media(direct_url, save_directory, submission.id, 'image')
+                    thumbnail_path = None
+                    if image_path and os.path.exists(image_path):
+                        # Generate thumbnail for large images
+                        file_size = os.path.getsize(image_path)
+                        if file_size > max_image_size:
+                            thumbnail_path = generate_thumbnail(image_path, save_directory, submission.id)
+                    return 'image', image_path, thumbnail_path
+            
+            # If direct URL fails, try alternative methods
+            result = retry_gyazo_download(gyazo_id, save_directory, submission.id, 'image')
+            if result:
+                return 'image', result, None
+    
+    # Check for Imgur
+    elif 'imgur.com' in url:
+        # Check if it's an album
+        album_id = extract_imgur_album_id(url)
+        if album_id:
+            album_path = download_imgur_album(url, save_directory, submission.id)
+            return 'album', album_path, None
+        
+        # Check if it's a single image
+        image_id = extract_imgur_id(url)
+        if image_id:
+            # Try to get the direct URL using the API
+            image_url = extract_imgur_image_url(image_id)
+            if image_url:
+                if image_url.endswith(('.mp4', '.webm', '.gifv')):
+                    video_path = download_media(image_url, save_directory, submission.id, 'video')
+                    return 'video', video_path, None
+                else:
+                    image_path = download_media(image_url, save_directory, submission.id, 'image')
+                    thumbnail_path = None
+                    if image_path and os.path.exists(image_path):
+                        # Generate thumbnail for large images
+                        file_size = os.path.getsize(image_path)
+                        if file_size > max_image_size:
+                            thumbnail_path = generate_thumbnail(image_path, save_directory, submission.id)
+                    return 'image', image_path, thumbnail_path
+            
+            # If API fails, try alternative methods
+            result = retry_imgur_download(image_id, save_directory, submission.id, 'image')
+            if result:
+                return 'image', result, None
+    
+    # Check for Streamable
+    elif 'streamable.com' in url:
+        video_url = extract_streamable_video_url(url)
+        if video_url:
+            video_path = download_media(video_url, save_directory, submission.id, 'video')
+            return 'video', video_path, None
+    
+    # If we couldn't identify the media type, try to recover it
+    media_path = recover_deleted_media(url, submission.id, save_directory, submission)
+    if media_path:
+        # Try to determine the media type from the file extension
+        if media_path.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg')):
+            return 'image', media_path, None
+        elif media_path.endswith(('.mp4', '.webm', '.mov')):
+            return 'video', media_path, None
+        elif media_path.endswith(('.mp3', '.wav', '.ogg', '.m4a', '.flac')):
+            return 'audio', media_path, None
+        else:
+            return 'unknown', media_path, None
+    
+    return None, None, None
+
+def get_wayback_url(original_url):
+    """Try to find a copy of the URL in the Wayback Machine."""
+    if not use_wayback_machine:
+        return None
+        
+    try:
+        # First check if the URL exists in the Wayback Machine
+        check_url = f"https://archive.org/wayback/available?url={original_url}"
+        
+        # Use dynamic timeout based on request complexity and add retry logic
+        attempt = 0
+        max_attempts = 3
+        while attempt < max_attempts:
+            try:
+                # Calculate dynamic timeout based on URL length as a proxy for complexity
+                # with a minimum of 5 seconds and maximum of recovery_timeout
+                dynamic_timeout = min(recovery_timeout, max(5, len(original_url) * 0.2))
+                # Add jitter to avoid thundering herd problem
+                jittered_timeout = dynamic_timeout * random.uniform(0.8, 1.2)
+                
+                logging.info(f"Requesting Wayback Machine data with {jittered_timeout:.2f}s timeout (attempt {attempt+1}/{max_attempts})")
+                response = requests.get(check_url, timeout=jittered_timeout)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if 'archived_snapshots' in data and data['archived_snapshots'] and 'closest' in data['archived_snapshots']:
+                        wayback_url = data['archived_snapshots']['closest']['url']
+                        logging.info(f"Found Wayback Machine snapshot for {original_url}: {wayback_url}")
+                        return wayback_url
+                    
+                    logging.info(f"No Wayback Machine snapshot found for {original_url}")
+                    break  # Success or no data found, exit the retry loop
+                elif response.status_code == 429:  # Too Many Requests
+                    logging.warning(f"Rate limited by Wayback Machine API (attempt {attempt+1}/{max_attempts})")
+                    exponential_backoff(attempt)
+                else:
+                    logging.warning(f"Wayback Machine API returned status code {response.status_code} (attempt {attempt+1}/{max_attempts})")
+                    break  # Non-recoverable error, exit the retry loop
+            except requests.exceptions.Timeout:
+                logging.warning(f"Wayback Machine API request timed out after {jittered_timeout:.2f}s (attempt {attempt+1}/{max_attempts})")
+            except requests.exceptions.RequestException as e:
+                logging.warning(f"Wayback Machine API request failed: {e} (attempt {attempt+1}/{max_attempts})")
+            
+            attempt += 1
+            if attempt < max_attempts:
+                exponential_backoff(attempt)
+        
+        return None
+    except Exception as e:
+        logging.error(f"Failed to check Wayback Machine for {original_url}: {e}")
+        return None
+
+def get_pushshift_url(url, item_id=None, submission_id=None):
+    """Try to find media content using PullPush API (successor to Pushshift)."""
+    if not use_pushshift_api:
+        return None
+        
+    try:
+        # PullPush is the successor to Pushshift
+        base_url = "https://api.pullpush.io"
+        
+        # If we have a submission_id, we can try to get the submission data
+        if submission_id:
+            pushshift_url = f"{base_url}/reddit/submission/search?ids={submission_id}"
+            # Use dynamic timeout based on request complexity and add retry logic
+            attempt = 0
+            max_attempts = 3
+            while attempt < max_attempts:
+                try:
+                    # Calculate dynamic timeout based on submission ID length as a proxy for complexity
+                    # with a minimum of 5 seconds and maximum of recovery_timeout
+                    dynamic_timeout = min(recovery_timeout, max(5, len(submission_id) * 0.5))
+                    # Add jitter to avoid thundering herd problem
+                    jittered_timeout = dynamic_timeout * random.uniform(0.8, 1.2)
+                    
+                    logging.info(f"Requesting PullPush data with {jittered_timeout:.2f}s timeout (attempt {attempt+1}/{max_attempts})")
+                    response = requests.get(pushshift_url, timeout=jittered_timeout)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'data' in data and len(data['data']) > 0:
+                            submission_data = data['data'][0]
+                            # Check for preview images
+                            if 'preview' in submission_data and 'images' in submission_data['preview']:
+                                images = submission_data['preview']['images']
+                                if len(images) > 0 and 'source' in images[0]:
+                                    source_url = images[0]['source']['url']
+                                    logging.info(f"Found PullPush preview image for submission {submission_id}: {source_url}")
+                                    return source_url
+                            
+                            # Check for direct URL
+                            if 'url' in submission_data:
+                                logging.info(f"Found PullPush URL for submission {submission_id}: {submission_data['url']}")
+                                return submission_data['url']
+                        break  # Success, exit the retry loop
+                    elif response.status_code == 429:  # Too Many Requests
+                        logging.warning(f"Rate limited by PullPush API (attempt {attempt+1}/{max_attempts})")
+                        exponential_backoff(attempt)
+                    else:
+                        logging.warning(f"PullPush API returned status code {response.status_code} (attempt {attempt+1}/{max_attempts})")
+                        break  # Non-recoverable error, exit the retry loop
+                except requests.exceptions.Timeout:
+                    logging.warning(f"PullPush API request timed out after {jittered_timeout:.2f}s (attempt {attempt+1}/{max_attempts})")
+                except requests.exceptions.RequestException as e:
+                    logging.warning(f"PullPush API request failed: {e} (attempt {attempt+1}/{max_attempts})")
+                
+                attempt += 1
+                if attempt < max_attempts:
+                    exponential_backoff(attempt)
+        
+        # If we have a comment ID, we can try to get the comment data
+        if item_id and item_id.startswith('t1_'):
+            comment_id = item_id.split('_')[1]
+            pushshift_url = f"{base_url}/reddit/comment/search?ids={comment_id}"
+            
+            # Use dynamic timeout based on request complexity and add retry logic
+            attempt = 0
+            max_attempts = 3
+            while attempt < max_attempts:
+                try:
+                    # Calculate dynamic timeout based on comment ID length as a proxy for complexity
+                    # with a minimum of 5 seconds and maximum of recovery_timeout
+                    dynamic_timeout = min(recovery_timeout, max(5, len(comment_id) * 0.5))
+                    # Add jitter to avoid thundering herd problem
+                    jittered_timeout = dynamic_timeout * random.uniform(0.8, 1.2)
+                    
+                    logging.info(f"Requesting PullPush comment data with {jittered_timeout:.2f}s timeout (attempt {attempt+1}/{max_attempts})")
+                    response = requests.get(pushshift_url, timeout=jittered_timeout)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'data' in data and len(data['data']) > 0:
+                            comment_data = data['data'][0]
+                            # Extract URLs from the comment body
+                            if 'body' in comment_data:
+                                urls = re.findall(r'(https?://[^\s]+)', comment_data['body'])
+                                for found_url in urls:
+                                    # Check if the URL is an image or video
+                                    if any(found_url.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.webm']):
+                                        logging.info(f"Found media URL in PullPush comment {comment_id}: {found_url}")
+                                        return found_url
+                        break  # Success, exit the retry loop
+                    elif response.status_code == 429:  # Too Many Requests
+                        logging.warning(f"Rate limited by PullPush API (attempt {attempt+1}/{max_attempts})")
+                        exponential_backoff(attempt)
+                    else:
+                        logging.warning(f"PullPush API returned status code {response.status_code} (attempt {attempt+1}/{max_attempts})")
+                        break  # Non-recoverable error, exit the retry loop
+                except requests.exceptions.Timeout:
+                    logging.warning(f"PullPush API request timed out after {jittered_timeout:.2f}s (attempt {attempt+1}/{max_attempts})")
+                except requests.exceptions.RequestException as e:
+                    logging.warning(f"PullPush API request failed: {e} (attempt {attempt+1}/{max_attempts})")
+                
+                attempt += 1
+                if attempt < max_attempts:
+                    exponential_backoff(attempt)
+        
+        # If PullPush fails, try the Reddit Undelete service as a fallback
+        if submission_id:
+            undelete_url = f"https://undelete.pullpush.io/r/all/comments/{submission_id}"
+            logging.info(f"Trying Reddit Undelete service: {undelete_url}")
+            # This is just a URL for manual viewing, not an API endpoint
+            # We can't programmatically extract content from it, but it's useful for users
+            
+        logging.info(f"No PullPush data found for {url}")
+        return None
+    except Exception as e:
+        logging.error(f"Failed to check PullPush API for {url}: {e}")
+        return None
+
+def get_reddit_preview_url(url, submission=None):
+    """Try to extract preview URLs from Reddit's API response."""
+    if not use_reddit_previews or not submission:
+        return None
+        
+    try:
+        # Check if the submission has preview data
+        if hasattr(submission, 'preview') and 'images' in submission.preview:
+            images = submission.preview['images']
+            if len(images) > 0 and 'source' in images[0]:
+                source_url = images[0]['source']['url']
+                # Reddit encodes HTML entities in URLs, so we need to decode them
+                source_url = source_url.replace('&amp;', '&')
+                logging.info(f"Found Reddit preview image: {source_url}")
+                return source_url
+                
+        # Check for thumbnail
+        if hasattr(submission, 'thumbnail') and submission.thumbnail.startswith('http'):
+            logging.info(f"Found Reddit thumbnail: {submission.thumbnail}")
+            return submission.thumbnail
+            
+        logging.info(f"No Reddit preview found for {url}")
+        return None
+    except Exception as e:
+        logging.error(f"Failed to extract Reddit preview for {url}: {e}")
+        return None
+
+def get_reveddit_url(url, submission_id=None):
+    """Try to find media content using Reveddit API."""
+    if not use_reveddit_api or not submission_id:
+        return None
+        
+    try:
+        # Reveddit API for retrieving removed content
+        reveddit_url = f"https://api.reveddit.com/v1/submission?ids={submission_id}"
+        
+        # Use dynamic timeout based on request complexity and add retry logic
+        attempt = 0
+        max_attempts = 3
+        while attempt < max_attempts:
+            try:
+                # Calculate dynamic timeout based on submission ID length as a proxy for complexity
+                # with a minimum of 5 seconds and maximum of recovery_timeout
+                dynamic_timeout = min(recovery_timeout, max(5, len(submission_id) * 0.5))
+                # Add jitter to avoid thundering herd problem
+                jittered_timeout = dynamic_timeout * random.uniform(0.8, 1.2)
+                
+                logging.info(f"Requesting Reveddit data with {jittered_timeout:.2f}s timeout (attempt {attempt+1}/{max_attempts})")
+                response = requests.get(reveddit_url, timeout=jittered_timeout)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if submission_id in data:
+                        submission_data = data[submission_id]
+                        
+                        # Check for URL
+                        if 'url' in submission_data:
+                            media_url = submission_data['url']
+                            if media_url and (media_url.startswith('http') or media_url.startswith('https')):
+                                logging.info(f"Found Reveddit URL for submission {submission_id}: {media_url}")
+                                return media_url
+                        
+                        # Check for media metadata
+                        if 'media_metadata' in submission_data:
+                            for media_id, media_info in submission_data['media_metadata'].items():
+                                if 's' in media_info and 'u' in media_info['s']:
+                                    media_url = media_info['s']['u']
+                                    logging.info(f"Found Reveddit media URL for submission {submission_id}: {media_url}")
+                                    return media_url
+                    break  # Success or no data found, exit the retry loop
+                elif response.status_code == 429:  # Too Many Requests
+                    logging.warning(f"Rate limited by Reveddit API (attempt {attempt+1}/{max_attempts})")
+                    exponential_backoff(attempt)
+                else:
+                    logging.warning(f"Reveddit API returned status code {response.status_code} (attempt {attempt+1}/{max_attempts})")
+                    break  # Non-recoverable error, exit the retry loop
+            except requests.exceptions.Timeout:
+                logging.warning(f"Reveddit API request timed out after {jittered_timeout:.2f}s (attempt {attempt+1}/{max_attempts})")
+            except requests.exceptions.RequestException as e:
+                logging.warning(f"Reveddit API request failed: {e} (attempt {attempt+1}/{max_attempts})")
+            
+            attempt += 1
+            if attempt < max_attempts:
+                exponential_backoff(attempt)
+        
+        logging.info(f"No Reveddit data found for {url}")
+        return None
+    except Exception as e:
+        logging.error(f"Failed to check Reveddit API for {url}: {e}")
+        return None
+
+def recover_deleted_media(url, item_id, save_directory, submission=None):
+    """Try multiple methods to recover deleted media content."""
+    logging.info(f"Attempting to recover deleted media from {url}")
+    
+    # Try method 1: Check Reddit's cached previews
+    if submission:
+        preview_url = get_reddit_preview_url(url, submission)
+        if preview_url:
+            logging.info(f"Recovering media using Reddit preview: {preview_url}")
+            return download_media(preview_url, save_directory, f"recovered_{item_id}", 'recovered')
+    
+    # Try method 2: Check PullPush API (successor to Pushshift)
+    submission_id = None
+    if submission:
+        submission_id = submission.id
+    pushshift_url = get_pushshift_url(url, item_id, submission_id)
+    if pushshift_url:
+        logging.info(f"Recovering media using PullPush API: {pushshift_url}")
+        return download_media(pushshift_url, save_directory, f"recovered_{item_id}", 'recovered')
+    
+    # Try method 3: Check Reveddit API
+    reveddit_url = get_reveddit_url(url, submission_id)
+    if reveddit_url:
+        logging.info(f"Recovering media using Reveddit API: {reveddit_url}")
+        return download_media(reveddit_url, save_directory, f"recovered_{item_id}", 'recovered')
+    
+    # Try method 4: Check Wayback Machine
+    wayback_url = get_wayback_url(url)
+    if wayback_url:
+        logging.info(f"Recovering media using Wayback Machine: {wayback_url}")
+        return download_media(wayback_url, save_directory, f"recovered_{item_id}", 'recovered')
+    
+    # Try method 5: Try service-specific fallbacks based on URL pattern
+    service = None
+    content_id = None
+    
+    # Check for Imgur URLs
+    if 'imgur.com' in url:
+        service = 'imgur'
+        imgur_id = extract_imgur_id(url)
+        if imgur_id:
+            content_id = imgur_id
+    # Check for Gfycat URLs
+    elif 'gfycat.com' in url:
+        service = 'gfycat'
+        gfycat_id = extract_gfycat_id(url)
+        if gfycat_id:
+            content_id = gfycat_id
+    # Check for Gyazo URLs
+    elif 'gyazo.com' in url:
+        service = 'gyazo'
+        gyazo_id = extract_gyazo_id(url)
+        if gyazo_id:
+            content_id = gyazo_id
+    # Check for Reddit URLs
+    elif 'redd.it' in url or 'reddit.com' in url:
+        service = 'reddit'
+        reddit_id_match = re.search(r'redd\.it/([a-zA-Z0-9]+)', url)
+        if reddit_id_match:
+            content_id = reddit_id_match.group(1)
+    
+    # If we identified a service and content ID, try service-specific recovery
+    if service and content_id:
+        logging.info(f"Trying {service}-specific recovery for {content_id}")
+        result = retry_download_with_fallbacks(service, content_id, save_directory, f"recovered_{item_id}", 'recovered')
+        if result:
+            logging.info(f"Successfully recovered {service} content: {result}")
+            return result
+    
+    # If all recovery methods fail, try our existing Imgur recovery as a last resort
+    if 'imgur.com' in url and recover_deleted:
+        logging.info(f"Trying Imgur-specific recovery methods for {url}")
+        return recover_imgur_content(url, item_id, save_directory)
+    
+    # Only log the warning once per URL
+    if url not in recovery_failure_warnings:
+        logging.warning(f"All recovery methods failed for {url}")
+        recovery_failure_warnings.add(url)
+    
+    return None
+
+def retry_imgur_download(imgur_id, save_directory, item_id, media_type='image'):
+    """
+    Retry downloading an Imgur image using alternative URLs and methods.
+    
+    Args:
+        imgur_id: The Imgur image ID
+        save_directory: Directory to save the media in
+        item_id: Unique ID for the media file
+        media_type: Type of media ('image', 'video', 'audio', 'thumbnail')
+        
+    Returns:
+        Path to the saved media file or None if download failed
+    """
+    return retry_download_with_fallbacks('imgur', imgur_id, save_directory, item_id, media_type)
+
+def extract_gyazo_id(url):
+    """Extract the Gyazo ID from a URL."""
+    # Handle complex markdown-formatted URLs
+    if '](' in url:
+        try:
+            # Try to extract the URL from markdown format
+            url = url.split('](')[1].rstrip(')')
+        except IndexError:
+            pass
+    
+    # Handle nested markdown links
+    if '](' in url:
+        try:
+            url = url.split('](')[1].rstrip(')')
+        except IndexError:
+            pass
+    
+    # Clean up the URL
+    url = url.rstrip(')]')
+    
+    # Try different regex patterns to extract the ID
+    patterns = [
+        r'gyazo\.com/([a-zA-Z0-9]+)',
+        r'i\.gyazo\.com/([a-zA-Z0-9]+)\.',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    
+    return None
+
+def get_gyazo_direct_url(gyazo_id):
+    """Get the direct image URL from a Gyazo ID."""
+    if not gyazo_id:
+        return None
+    
+    # Try different extensions in order of likelihood
+    extensions = ['.png', '.jpg', '.gif', '.mp4']
+    
+    for ext in extensions:
+        direct_url = f"https://i.gyazo.com/{gyazo_id}{ext}"
+        try:
+            response = requests.head(direct_url, timeout=10, verify=not ignore_ssl_errors)
+            if response.status_code == 200:
+                logging.info(f"Found working Gyazo URL: {direct_url}")
+                return direct_url
+        except Exception as e:
+            logging.debug(f"Failed to check Gyazo URL {direct_url}: {e}")
+    
+    # If all extensions fail, return the most likely one
+    return f"https://i.gyazo.com/{gyazo_id}.png"
+
+def retry_gyazo_download(gyazo_id, save_directory, item_id, media_type='image'):
+    """
+    Retry downloading a Gyazo image using alternative methods.
+    
+    Args:
+        gyazo_id: The Gyazo image ID
+        save_directory: Directory to save the media in
+        item_id: Unique ID for the media file
+        media_type: Type of media ('image', 'video', 'audio', 'thumbnail')
+        
+    Returns:
+        Path to the saved media file or None if download failed
+    """
+    return retry_download_with_fallbacks('gyazo', gyazo_id, save_directory, item_id, media_type)
+
+def retry_gfycat_download(gfycat_id, save_directory, item_id, media_type='video'):
+    """
+    Retry downloading a Gfycat video using alternative methods.
+    
+    Args:
+        gfycat_id: The Gfycat ID
+        save_directory: Directory to save the media in
+        item_id: Unique ID for the media file
+        media_type: Type of media ('video', 'image', 'audio', 'thumbnail')
+        
+    Returns:
+        Path to the saved media file or None if download failed
+    """
+    return retry_download_with_fallbacks('gfycat', gfycat_id, save_directory, item_id, media_type)
+
+def retry_download_with_fallbacks(service, content_id, save_directory, item_id, media_type='image'):
+    """
+    Generic function to retry downloading content using fallback URLs.
+    
+    Args:
+        service: The service name ('imgur', 'gfycat', 'gyazo', 'reddit')
+        content_id: The content ID
+        save_directory: Directory to save the media in
+        item_id: Unique ID for the media file
+        media_type: Type of media ('image', 'video', 'audio', 'thumbnail', 'recovered')
+        
+    Returns:
+        Path to the saved media file or None if download failed
+    """
+    logging.info(f"Retrying {service} download for ID: {content_id} with alternative methods")
+    
+    # Get fallback URLs for this service
+    fallback_urls = generate_fallback_urls(service, content_id)
+    
+    for url in fallback_urls:
+        try:
+            # Add a delay between attempts
+            time.sleep(random.uniform(5, 10))
+            
+            # Get appropriate headers for this service with a random user agent
+            headers = get_service_headers(service, use_random_ua=True)
+            
+            logging.info(f"Trying alternative {service} URL: {url}")
+            response = requests.get(url, headers=headers, verify=not ignore_ssl_errors, timeout=30)
+            
+            if response.status_code == 200:
+                # Determine the file extension from the URL or content type
+                extension = os.path.splitext(url)[1].lower()
+                if not extension or extension not in get_valid_extensions(media_type):
+                    content_type = response.headers.get('Content-Type', '')
+                    if 'image/jpeg' in content_type:
+                        extension = '.jpg'
+                    elif 'image/png' in content_type:
+                        extension = '.png'
+                    elif 'image/gif' in content_type:
+                        extension = '.gif'
+                    elif 'video/mp4' in content_type:
+                        extension = '.mp4'
+                    else:
+                        extension = get_default_extension(media_type)
+                
+                # Create a unique filename
+                prefix = f"{media_type.upper()}_" if media_type != 'image' else ""
+                filename = f"{prefix}{item_id}{extension}"
+                file_path = os.path.join(save_directory, filename)
+                
+                # Save the media file
+                with open(file_path, 'wb') as f:
+                    f.write(response.content)
+                
+                logging.info(f"Successfully downloaded {service} content using alternative URL: {url}")
+                return file_path
+        except Exception as e:
+            # Skip logging for DNS errors to reduce noise
+            if not is_dns_error(e):
+                logging.warning(f"Failed to download from alternative {service} URL {url}: {e}")
+    
+    # Service-specific last resort methods
+    if service == 'imgur':
+        # Try the Imgur API as a last resort
+        try:
+            client = get_imgur_client()
+            if client:
+                try:
+                    image = client.get_image(content_id)
+                    if image and hasattr(image, 'link'):
+                        return download_media(image.link, save_directory, item_id, media_type)
+                except Exception as e:
+                    logging.warning(f"Failed to get Imgur image via API: {e}")
+        except Exception:
+            pass
+    elif service == 'gfycat':
+        # Try to use a web archive as a last resort
+        try:
+            archive_url = f"https://web.archive.org/web/*/https://gfycat.com/{content_id}"
+            logging.info(f"Trying Web Archive for Gfycat content: {archive_url}")
+            # This is just informational - we can't easily extract content from web.archive.org
+        except Exception:
+            pass
+    elif service == 'gyazo':
+        # Try the Gyazo API as a last resort
+        try:
+            api_url = f"https://api.gyazo.com/api/oembed?url=https://gyazo.com/{content_id}"
+            response = requests.get(api_url, timeout=10, verify=not ignore_ssl_errors)
+            if response.status_code == 200:
+                data = response.json()
+                if 'url' in data:
+                    image_url = data['url']
+                    logging.info(f"Found Gyazo image URL via API: {image_url}")
+                    return download_media(image_url, save_directory, item_id, media_type)
+        except Exception as e:
+            logging.warning(f"Failed to get Gyazo image URL via API: {e}")
+    
+    logging.error(f"All alternative {service} download methods failed for ID: {content_id}")
+    return None
+
+def load_imgur_retry_queue():
+    """Load the Imgur retry queue from the JSON file."""
+    global imgur_retry_queue
+    
+    # Check for the file in the new location (save_directory)
+    if os.path.exists(RETRY_QUEUE_FILE):
+        try:
+            with open(RETRY_QUEUE_FILE, 'r') as f:
+                loaded_queue = json.load(f)
+            
+            # Validate the loaded queue
+            if not isinstance(loaded_queue, list):
+                logging.error(f"Imgur retry queue file is corrupted (not a list). Starting with empty queue.")
+                imgur_retry_queue = []
+                # Backup the corrupted file
+                backup_file = f"{RETRY_QUEUE_FILE}.bak.{int(time.time())}"
+                os.rename(RETRY_QUEUE_FILE, backup_file)
+                logging.info(f"Backed up corrupted queue file to {backup_file}")
+                return
+            
+            # Filter out any invalid items
+            valid_items = []
+            for item in loaded_queue:
+                if not isinstance(item, dict):
+                    logging.warning(f"Skipping invalid item in retry queue (not a dict): {item}")
+                    continue
+                
+                # Check for required fields
+                if 'url' not in item or 'save_directory' not in item or 'item_id' not in item:
+                    logging.warning(f"Skipping item missing required fields: {item}")
+                    continue
+                
+                valid_items.append(item)
+            
+            imgur_retry_queue = valid_items
+            logging.info(f"Loaded {len(imgur_retry_queue)} valid items from Imgur retry queue")
+            
+            # If we filtered out items, save the cleaned queue
+            if len(valid_items) < len(loaded_queue):
+                logging.warning(f"Filtered out {len(loaded_queue) - len(valid_items)} invalid items from retry queue")
+                save_imgur_retry_queue()
+                
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse Imgur retry queue file (corrupted JSON): {e}")
+            imgur_retry_queue = []
+            # Backup the corrupted file
+            backup_file = f"{RETRY_QUEUE_FILE}.bak.{int(time.time())}"
+            os.rename(RETRY_QUEUE_FILE, backup_file)
+            logging.info(f"Backed up corrupted queue file to {backup_file}")
+        except Exception as e:
+            logging.error(f"Failed to load Imgur retry queue: {e}")
+            imgur_retry_queue = []
+    else:
+        # Check for the file in the old location (root directory)
+        old_queue_file = os.path.join(BASE_DIR, 'imgur_retry_queue.json')
+        if os.path.exists(old_queue_file):
+            logging.info(f"Found Imgur retry queue file in old location: {old_queue_file}")
+            try:
+                with open(old_queue_file, 'r') as f:
+                    loaded_queue = json.load(f)
+                
+                # Validate and process the queue as above
+                if not isinstance(loaded_queue, list):
+                    logging.error(f"Imgur retry queue file in old location is corrupted. Starting with empty queue.")
+                    imgur_retry_queue = []
+                    return
+                
+                # Filter out any invalid items
+                valid_items = []
+                for item in loaded_queue:
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    # Check for required fields
+                    if 'url' not in item or 'save_directory' not in item or 'item_id' not in item:
+                        continue
+                    
+                    # Update the save directory to the new location
+                    item['save_directory'] = save_directory
+                    valid_items.append(item)
+                
+                imgur_retry_queue = valid_items
+                logging.info(f"Loaded {len(imgur_retry_queue)} valid items from old Imgur retry queue location")
+                
+                # Save to the new location
+                save_imgur_retry_queue()
+                
+                # Remove the old file
+                try:
+                    os.remove(old_queue_file)
+                    logging.info(f"Removed old Imgur retry queue file after migration: {old_queue_file}")
+                except Exception as e:
+                    logging.warning(f"Failed to remove old Imgur retry queue file: {e}")
+                
+            except Exception as e:
+                logging.error(f"Failed to load Imgur retry queue from old location: {e}")
+                imgur_retry_queue = []
+        else:
+            logging.info("No Imgur retry queue file found. Starting with empty queue.")
+            imgur_retry_queue = []
+
+def save_imgur_retry_queue():
+    """Save the Imgur retry queue to the JSON file."""
+    try:
+        with open(RETRY_QUEUE_FILE, 'w') as f:
+            json.dump(imgur_retry_queue, f, indent=2)
+        logging.info(f"Saved {len(imgur_retry_queue)} items to Imgur retry queue")
+    except Exception as e:
+        logging.error(f"Failed to save Imgur retry queue: {e}")
+
+def add_to_imgur_retry_queue(url, save_directory, item_id, media_type='image', service=None, content_id=None):
+    """Add a failed Imgur download to the retry queue."""
+    # Check if this item is already in the queue
+    for item in imgur_retry_queue:
+        if item['url'] == url and item['item_id'] == item_id:
+            # Update the retry count and next retry time
+            item['retry_count'] = item.get('retry_count', 0) + 1
+            
+            # Calculate next retry time with exponential backoff
+            retry_count = item['retry_count']
+            # Exponential backoff: 1h, 2h, 4h, 8h, 16h, etc. up to 7 days
+            backoff_hours = min(168, 2 ** (retry_count - 1))
+            next_retry = time.time() + (backoff_hours * 3600)
+            
+            item['next_retry'] = next_retry
+            item['next_retry_human'] = datetime.datetime.fromtimestamp(next_retry).strftime('%Y-%m-%d %H:%M:%S')
+            
+            logging.info(f"Updated retry queue item for {url}. Attempt {retry_count}, next retry at {item['next_retry_human']}")
+            save_imgur_retry_queue()
+            return
+    
+    # If not in queue, add it
+    retry_item = {
+        'url': url,
+        'save_directory': save_directory,
+        'item_id': item_id,
+        'media_type': media_type,
+        'service': service,
+        'content_id': content_id,
+        'retry_count': 1,
+        'added_time': time.time(),
+        'next_retry': time.time() + MIN_RETRY_INTERVAL,
+        'next_retry_human': datetime.datetime.fromtimestamp(time.time() + MIN_RETRY_INTERVAL).strftime('%Y-%m-%d %H:%M:%S'),
+        'last_error': None
+    }
+    
+    imgur_retry_queue.append(retry_item)
+    logging.info(f"Added {url} to Imgur retry queue. Will retry after {retry_item['next_retry_human']}")
+    save_imgur_retry_queue()
+
+def process_imgur_retry_queue():
+    """Process items in the Imgur retry queue that are due for retry."""
+    if not imgur_retry_queue:
+        logging.info("Imgur retry queue is empty. Nothing to process.")
+        return
+    
+    logging.info(f"Processing Imgur retry queue. {len(imgur_retry_queue)} items in queue.")
+    
+    # Get the current save directory from settings
+    current_save_dir = save_directory
+    
+    # Check if any items have a different save directory and update them
+    updated_dirs = 0
+    for item in imgur_retry_queue:
+        if item.get('save_directory') != current_save_dir:
+            old_dir = item.get('save_directory', 'unknown')
+            item['save_directory'] = current_save_dir
+            updated_dirs += 1
+            logging.info(f"Updated save directory for item {item.get('url')} from {old_dir} to {current_save_dir}")
+    
+    if updated_dirs > 0:
+        logging.info(f"Updated save directory for {updated_dirs} items in the retry queue")
+        save_imgur_retry_queue()
+    
+    # Sort the queue by next retry time
+    imgur_retry_queue.sort(key=lambda x: x.get('next_retry', 0))
+    
+    current_time = time.time()
+    retried_count = 0
+    successful_items = []
+    
+    for item in imgur_retry_queue:
+        # Check if this item is due for retry
+        if item.get('next_retry', 0) <= current_time:
+            # Check if we've reached the maximum retries per run
+            if retried_count >= MAX_RETRIES_PER_RUN:
+                logging.info(f"Reached maximum retries per run ({MAX_RETRIES_PER_RUN}). Will process remaining items in next run.")
+                break
+            
+            # Check if we've reached the maximum retry attempts for this item
+            if item.get('retry_count', 0) > MAX_RETRY_ATTEMPTS:
+                logging.warning(f"Item {item['url']} has exceeded maximum retry attempts ({MAX_RETRY_ATTEMPTS}). Removing from queue.")
+                successful_items.append(item)
+                continue
+            
+            logging.info(f"Retrying download for {item['url']} (attempt {item.get('retry_count', 1)})")
+            
+            # Add a delay between retries to avoid rate limiting
+            if retried_count > 0:
+                delay = random.uniform(30, 60)
+                logging.info(f"Waiting {delay:.2f}s before next retry to avoid rate limiting")
+                time.sleep(delay)
+            
+            try:
+                # Ensure the save directory exists
+                save_directory = item['save_directory']
+                if not os.path.exists(save_directory):
+                    logging.warning(f"Save directory {save_directory} does not exist. Creating it.")
+                    os.makedirs(save_directory, exist_ok=True)
+                
+                # If we have service and content_id, try with fallbacks
+                if item.get('service') and item.get('content_id'):
+                    result = retry_download_with_fallbacks(
+                        item['service'], 
+                        item['content_id'], 
+                        save_directory, 
+                        item['item_id'], 
+                        item['media_type']
+                    )
+                else:
+                    # Otherwise use the standard download_media function
+                    result = download_media(
+                        item['url'], 
+                        save_directory, 
+                        item['item_id'], 
+                        item['media_type']
+                    )
+                
+                if result:
+                    logging.info(f"Successfully downloaded {item['url']} after {item.get('retry_count', 1)} attempts")
+                    successful_items.append(item)
+                else:
+                    # Update retry count and next retry time
+                    item['retry_count'] = item.get('retry_count', 0) + 1
+                    retry_count = item['retry_count']
+                    
+                    # Exponential backoff: 1h, 2h, 4h, 8h, 16h, etc. up to 7 days
+                    backoff_hours = min(168, 2 ** (retry_count - 1))
+                    next_retry = time.time() + (backoff_hours * 3600)
+                    
+                    item['next_retry'] = next_retry
+                    item['next_retry_human'] = datetime.datetime.fromtimestamp(next_retry).strftime('%Y-%m-%d %H:%M:%S')
+                    item['last_error'] = "Download failed"
+                    
+                    logging.info(f"Retry failed for {item['url']}. Next retry at {item['next_retry_human']}")
+            except Exception as e:
+                # Update retry count and next retry time
+                item['retry_count'] = item.get('retry_count', 0) + 1
+                retry_count = item['retry_count']
+                
+                # Exponential backoff: 1h, 2h, 4h, 8h, 16h, etc. up to 7 days
+                backoff_hours = min(168, 2 ** (retry_count - 1))
+                next_retry = time.time() + (backoff_hours * 3600)
+                
+                item['next_retry'] = next_retry
+                item['next_retry_human'] = datetime.datetime.fromtimestamp(next_retry).strftime('%Y-%m-%d %H:%M:%S')
+                item['last_error'] = str(e)
+                
+                logging.warning(f"Error during retry for {item['url']}: {e}. Next retry at {item['next_retry_human']}")
+            
+            retried_count += 1
+    
+    # Remove successful items from the queue
+    for item in successful_items:
+        imgur_retry_queue.remove(item)
+    
+    # Save the updated queue
+    save_imgur_retry_queue()
+    
+    logging.info(f"Processed {retried_count} items from Imgur retry queue. {len(successful_items)} were successful.")
+
+# Load the retry queue at module initialization
+load_imgur_retry_queue()
+
+def update_retry_queue_save_directory(new_save_directory):
+    """Update the save directory for all items in the retry queue.
+    
+    This function should be called when the save directory changes, for example
+    when the script is run with a different save directory than before.
+    
+    Args:
+        new_save_directory: The new save directory to use
+    """
+    global save_directory, RETRY_QUEUE_FILE
+    
+    # Update the global save directory
+    old_save_directory = save_directory
+    save_directory = new_save_directory
+    
+    # Update the retry queue file path
+    old_retry_queue_file = RETRY_QUEUE_FILE
+    RETRY_QUEUE_FILE = os.path.join(save_directory, 'imgur_retry_queue.json')
+    
+    logging.info(f"Updating retry queue save directory from {old_save_directory} to {save_directory}")
+    
+    # If the queue is already loaded, update all items
+    if imgur_retry_queue:
+        updated_count = 0
+        for item in imgur_retry_queue:
+            if item.get('save_directory') != save_directory:
+                item['save_directory'] = save_directory
+                updated_count += 1
+        
+        if updated_count > 0:
+            logging.info(f"Updated save directory for {updated_count} items in the retry queue")
+            save_imgur_retry_queue()
+    
+    # If the old file exists and is different from the new file, migrate it
+    if os.path.exists(old_retry_queue_file) and old_retry_queue_file != RETRY_QUEUE_FILE:
+        if not os.path.exists(RETRY_QUEUE_FILE):
+            try:
+                # Ensure the directory exists
+                os.makedirs(os.path.dirname(RETRY_QUEUE_FILE), exist_ok=True)
+                
+                # Copy the file to the new location
+                with open(old_retry_queue_file, 'r') as f_old:
+                    queue_data = json.load(f_old)
+                
+                # Update save directories in the queue
+                if isinstance(queue_data, list):
+                    for item in queue_data:
+                        if isinstance(item, dict) and 'save_directory' in item:
+                            item['save_directory'] = save_directory
+                
+                # Save to the new location
+                with open(RETRY_QUEUE_FILE, 'w') as f_new:
+                    json.dump(queue_data, f_new, indent=2)
+                
+                logging.info(f"Migrated retry queue file from {old_retry_queue_file} to {RETRY_QUEUE_FILE}")
+                
+                # Remove the old file
+                try:
+                    os.remove(old_retry_queue_file)
+                    logging.info(f"Removed old retry queue file after migration: {old_retry_queue_file}")
+                except Exception as e:
+                    logging.warning(f"Failed to remove old retry queue file: {e}")
+            except Exception as e:
+                logging.error(f"Failed to migrate retry queue file: {e}")
+    
+    # Reload the queue from the new location
+    load_imgur_retry_queue()

@@ -3,3 +3,9 @@ dropbox
 pandas
 tqdm
 requests
+pillow
+imgurpython
+# For recovery features
+requests-cache
+html5lib
+beautifulsoup4

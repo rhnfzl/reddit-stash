@@ -233,18 +233,28 @@ def download_directory_from_dropbox(dbx, dropbox_folder, local_directory):
     print(f"{skipped_count} files were skipped (already existed or unchanged).")
 
 def download_log_file_from_dropbox(dbx, dropbox_folder, local_directory):
-    """Download only the log file from Dropbox."""
-    log_file_path = os.path.join(local_directory, 'file_log.json')
-
+    """Download only the log files from Dropbox."""
     try:
-        # Download the log file
-        metadata, res = dbx.files_download(f"{dropbox_folder}/file_log.json")
-        os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
-        with open(log_file_path, "wb") as f:
-            f.write(res.content)
-        print(f"Log file downloaded successfully to {log_file_path}.")
-    except ApiError as err:
-        print(f"Failed to download the log file from Dropbox: {err}")
+        # Define the files to download
+        files = [
+            {"dropbox_path": f"{dropbox_folder}/file_log.json", 
+             "local_path": os.path.join(local_directory, 'file_log.json')},
+            {"dropbox_path": f"{dropbox_folder}/imgur_retry_queue.json", 
+             "local_path": os.path.join(local_directory, 'imgur_retry_queue.json')}
+        ]
+        
+        for file_info in files:
+            try:
+                metadata, res = dbx.files_download(file_info["dropbox_path"])
+                os.makedirs(os.path.dirname(file_info["local_path"]), exist_ok=True)
+                with open(file_info["local_path"], "wb") as f:
+                    f.write(res.content)
+                print(f"Log file downloaded successfully to {file_info['local_path']}.")
+            except ApiError as file_err:
+                print(f"Failed to download {file_info['dropbox_path']}: {file_err}")
+                # Continue with other files even if one fails
+    except Exception as err:
+        print(f"Failed to download log files from Dropbox: {err}")
 
 if __name__ == "__main__":
     # Refresh the access token because it expires

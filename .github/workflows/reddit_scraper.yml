@@ -85,6 +85,16 @@ jobs:
         REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
         REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
         REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+        # Imgur API support
+        IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
+        IMGUR_CLIENT_SECRETS: ${{ secrets.IMGUR_CLIENT_SECRETS }}
+        # Content recovery features (optional - will use settings.ini defaults if not set)
+        # Note: These secrets don't need to be defined in your repository unless you want to override the defaults
+        USE_WAYBACK_MACHINE: ${{ secrets.USE_WAYBACK_MACHINE }}
+        USE_PUSHSHIFT_API: ${{ secrets.USE_PUSHSHIFT_API }}
+        USE_REDDIT_PREVIEWS: ${{ secrets.USE_REDDIT_PREVIEWS }}
+        USE_REVEDDIT_API: ${{ secrets.USE_REVEDDIT_API }}
+        RECOVERY_TIMEOUT: ${{ secrets.RECOVERY_TIMEOUT }}
       run: |
         python reddit_stash.py  # process the files
 

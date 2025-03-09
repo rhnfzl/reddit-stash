@@ -41,7 +41,14 @@ ENV REDDIT_CLIENT_ID=None \
     REDDIT_PASSWORD=None \
     DROPBOX_APP_KEY=None \
     DROPBOX_APP_SECRET=None \
-    DROPBOX_REFRESH_TOKEN=None
+    DROPBOX_REFRESH_TOKEN=None \
+    IMGUR_CLIENT_IDS=None \
+    IMGUR_CLIENT_SECRETS=None \
+    USE_WAYBACK_MACHINE=true \
+    USE_PUSHSHIFT_API=true \
+    USE_REDDIT_PREVIEWS=true \
+    USE_REVEDDIT_API=true \
+    RECOVERY_TIMEOUT=10
 
 # Create a volume mount point for persisting data
 VOLUME ["/app/reddit"]
@@ -62,6 +69,13 @@ CMD ["reddit_stash.py"]
 #   -e DROPBOX_APP_KEY=your_dropbox_key \
 #   -e DROPBOX_APP_SECRET=your_dropbox_secret \
 #   -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+#   -e IMGUR_CLIENT_IDS=your_imgur_client_ids \
+#   -e IMGUR_CLIENT_SECRETS=your_imgur_client_secrets \
+#   -e USE_WAYBACK_MACHINE=true \
+#   -e USE_PUSHSHIFT_API=true \
+#   -e USE_REDDIT_PREVIEWS=true \
+#   -e USE_REVEDDIT_API=true \
+#   -e RECOVERY_TIMEOUT=10 \
 #   -v /path/on/host/reddit:/app/reddit \
 #   reddit-stash
 #

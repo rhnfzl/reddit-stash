@@ -1,5 +1,47 @@
 import os
 import json
+import logging
+
+class DuplicateFilter(logging.Filter):
+    """Filter to deduplicate log messages."""
+    
+    def __init__(self):
+        super().__init__()
+        self.seen = set()
+        
+    def filter(self, record):
+        # Get the message after formatting
+        message = record.getMessage()
+        
+        # For warnings and errors about recovery and download failures,
+        # check if we've seen this message before
+        if (record.levelno >= logging.WARNING and 
+            ("failed for" in message or "All recovery methods failed" in message)):
+            
+            # Create a key from the level and message
+            key = f"{record.levelno}:{message}"
+            
+            # If we've seen this message before, filter it out
+            if key in self.seen:
+                return False
+                
+            # Otherwise, add it to the seen set
+            self.seen.add(key)
+            
+        # Allow all other messages
+        return True
+
+def setup_logging():
+    """Set up logging with the duplicate filter."""
+    # Get the root logger
+    root_logger = logging.getLogger()
+    
+    # Add the duplicate filter
+    duplicate_filter = DuplicateFilter()
+    root_logger.addFilter(duplicate_filter)
+    
+    # Return the filter in case it needs to be removed later
+    return duplicate_filter
 
 def get_log_file_path(save_directory):
     """Return the path to the log file inside the save_directory."""
