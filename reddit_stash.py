@@ -32,6 +32,12 @@ def main():
 
     # Load the log file
     file_log = load_file_log(save_directory)
+
+    # Initialize counters for processed statistics
+    total_processed = 0
+    total_skipped = 0
+    total_size = 0
+
     # Process API accessible items
     if process_api:
         print("Processing items from Reddit API...")
