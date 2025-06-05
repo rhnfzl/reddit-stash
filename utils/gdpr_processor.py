@@ -7,7 +7,10 @@ from utils.save_utils import save_submission, save_comment_and_context
 from utils.time_utilities import dynamic_sleep
 
 def get_gdpr_directory(save_directory):
-    """Create and return the path to the GDPR data directory."""
+    """Return the path to the GDPR data directory."""
+    # This function only checks for the directory's existence and
+    # prints a message if it's missing. Creation should be handled
+    # by the caller.
     gdpr_dir = os.path.join(save_directory, 'gdpr_data')
     if not os.path.exists(gdpr_dir):
         print(f"GDPR data directory not found at: {gdpr_dir}")
