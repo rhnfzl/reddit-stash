@@ -99,11 +99,11 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
 def handle_dynamic_sleep(item):
     """Handle dynamic sleep based on the type of Reddit item."""
     if isinstance(item, Submission) and item.is_self and item.selftext:
-        time.sleep(dynamic_sleep(len(item.selftext)))
+        dynamic_sleep(len(item.selftext))
     elif isinstance(item, Comment) and item.body:
-        time.sleep(dynamic_sleep(len(item.body)))
+        dynamic_sleep(len(item.body))
     else:
-        time.sleep(dynamic_sleep(0))  # Minimal or no sleep for other types of posts
+        dynamic_sleep(0)  # Minimal or no sleep for other types of posts
 
 
 def save_user_activity(reddit, save_directory, file_log, unsave=False):
