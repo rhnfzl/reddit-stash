@@ -29,7 +29,7 @@ concurrency:
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # Increased timeout to account for retries
+    timeout-minutes: 10  # Kill job if it runs longer than 10 minutes
       
     steps:
     - name: Checkout repository
@@ -55,59 +55,45 @@ jobs:
         cache: 'pip'
         cache-dependency-path: requirements.txt
 
-    # Install dependencies with pip (with retry)
-    - name: Install dependencies with retry
-      uses: nick-fields/retry@v3
-      with:
-        timeout_minutes: 3
-        max_attempts: 3
-        retry_wait_seconds: 30
-        command: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+    # Install dependencies with pip
+    - name: Install dependencies
       env:
         PIP_DISABLE_PIP_VERSION_CHECK: 1
         PIP_NO_WARN_SCRIPT_LOCATION: 1
         PIP_ROOT_USER_ACTION: ignore
         # This forces cache invalidation every 6 months
         SEMI_ANNUAL_REFRESH: ${{ steps.cache-key.outputs.date }}
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-    # Download only the log file from Dropbox (with retry)
-    - name: Download log file from Dropbox with retry
-      uses: nick-fields/retry@v3
-      with:
-        timeout_minutes: 2
-        max_attempts: 3
-        retry_wait_seconds: 60
-        command: python dropbox_utils.py --download
+    # Download only the log file from Dropbox
+    - name: Download log file from Dropbox
+      timeout-minutes: 2
       env:
         DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
         DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      run: |
+        python dropbox_utils.py --download  # downloads only the log file
 
-    # Process Reddit data (with retry)
-    - name: Run Reddit Stash Script with retry
-      uses: nick-fields/retry@v3
-      with:
-        timeout_minutes: 4
-        max_attempts: 3
-        retry_wait_seconds: 120  # 2 minutes wait as requested
-        command: python reddit_stash.py
+    # Process Reddit data
+    - name: Run Reddit Stash Script
+      timeout-minutes: 3
       env:
         REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
         REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
         REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
         REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+      run: |
+        python reddit_stash.py  # process the files
 
-    # Upload any changed files to Dropbox (with retry)
-    - name: Upload updated data to Dropbox with retry
-      uses: nick-fields/retry@v3
-      with:
-        timeout_minutes: 2
-        max_attempts: 3
-        retry_wait_seconds: 60
-        command: python dropbox_utils.py --upload
+    # Upload any changed files to Dropbox
+    - name: Upload updated data to Dropbox
+      timeout-minutes: 2
       env:
         DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
         DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      run: |
+        python dropbox_utils.py --upload  # uploads only changed files
