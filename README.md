@@ -199,7 +199,7 @@ Before proceeding with any installation method, ensure that you have set the Red
     - `DROPBOX_REFRESH_TOKEN`
 - Enter the respective secret values without any quotes.
 
-After adding all secrets: ![Repository Secrets](resources/repositiory_secrets.png).
+After adding all secrets: ![Repository Secrets](resources/repository_secrets.png).
 
 3. **Manually Trigger the Workflow**:
 - Go to the **Actions** tab > Select the **Reddit Stash Workflow** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
