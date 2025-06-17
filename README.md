@@ -1,4 +1,4 @@
-# Reddit Stash: Automatically Save Reddit Posts and Comments to Dropbox
+# Reddit Stash: Automatically Save Reddit Posts and Comments to Local or Dropbox
 
 [![Python](https://img.shields.io/badge/Python-3.10-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Workflow-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/features/actions)
