@@ -449,7 +449,15 @@ Note: You can still use environment variables as a fallback or override for the 
 ![Step 2](resources/reddit_create_app2.png)
 
 * `REDDIT_USERNAME` is your reddit username
-* `REDDIT_PASSWORD` is your reddit passowrd
+* `REDDIT_PASSWORD` is your reddit password
+
+**Important for Two-Factor Authentication (TFA):**
+If your Reddit account has TFA enabled, you must provide your password and TFA code together, separated by a colon (`:`), e.g.:
+```
+REDDIT_PASSWORD='your_password:123456'
+```
+where `123456` is your current TFA code. Alternatively, you can disable TFA for the account to use prawcore authentication.
+If neither is done, prawcore authentication will fail.
 Keep these credentials for the setup.
 
 #### Setting Up Dropbox app
