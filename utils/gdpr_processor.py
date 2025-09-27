@@ -4,6 +4,7 @@ from tqdm import tqdm
 from utils.file_operations import save_to_file
 from utils.save_utils import save_submission, save_comment_and_context
 from utils.time_utilities import dynamic_sleep
+from utils.env_config import get_ignore_tls_errors
 
 def get_gdpr_directory(save_directory):
     """Return the path to the GDPR data directory."""
@@ -20,6 +21,9 @@ def process_gdpr_export(reddit, save_directory, existing_files, created_dirs_cac
     processed_count = 0
     skipped_count = 0
     total_size = 0
+
+    # Load the ignore_tls_errors setting
+    ignore_tls_errors = get_ignore_tls_errors()
     
     gdpr_dir = get_gdpr_directory(save_directory)
     
@@ -38,8 +42,9 @@ def process_gdpr_export(reddit, save_directory, existing_files, created_dirs_cac
                                        f"GDPR_POST_{submission.id}.md")
                 
                 # Use existing save_to_file function
-                if save_to_file(submission, file_path, save_submission, 
-                              existing_files, file_log, save_directory, created_dirs_cache):
+                if save_to_file(submission, file_path, save_submission,
+                              existing_files, file_log, save_directory, created_dirs_cache,
+                              ignore_tls_errors=ignore_tls_errors):
                     skipped_count += 1
                     continue
 
@@ -66,8 +71,9 @@ def process_gdpr_export(reddit, save_directory, existing_files, created_dirs_cac
                                        f"GDPR_COMMENT_{comment.id}.md")
                 
                 # Use existing save_to_file function
-                if save_to_file(comment, file_path, save_comment_and_context, 
-                              existing_files, file_log, save_directory, created_dirs_cache):
+                if save_to_file(comment, file_path, save_comment_and_context,
+                              existing_files, file_log, save_directory, created_dirs_cache,
+                              ignore_tls_errors=ignore_tls_errors):
                     skipped_count += 1
                     continue
 
