@@ -21,6 +21,7 @@ reddit/
 │   └── SAVED_COMMENT_def012.md   # Comments you saved
 ├── r_ProgrammerHumor/
 │   ├── UPVOTE_POST_ghi345.md     # Posts you upvoted
+│   ├── UPVOTE_COMMENT_mno901.md  # Comments you upvoted
 │   └── GDPR_POST_jkl678.md       # From GDPR export (if enabled)
 ├── gdpr_data/                    # GDPR CSV files (if processing enabled)
 │   ├── saved_posts.csv
@@ -147,6 +148,9 @@ For those who want to get up and running quickly, here's a streamlined process:
      -e REDDIT_CLIENT_SECRET=your_client_secret \
      -e REDDIT_USERNAME=your_username \
      -e REDDIT_PASSWORD=your_password \
+     -e DROPBOX_APP_KEY=your_dropbox_key \
+     -e DROPBOX_APP_SECRET=your_dropbox_secret \
+     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
      -v $(pwd)/reddit:/app/reddit \
      reddit-stash
    ```
@@ -232,7 +236,7 @@ Before proceeding with any installation method, ensure that you have set the Red
 After adding all secrets: ![Repository Secrets](resources/repository_secrets.png).
 
 3. **Manually Trigger the Workflow**:
-- Go to the **Actions** tab > Select the **Reddit Stash Workflow** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
+- Go to the **Actions** tab > Select the **Reddit Stash Scraper** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
 
 4. The workflow runs automatically on a schedule:
    - Every 2 hours during *peak hours* (8:00-23:00 CET time in summer)
@@ -610,7 +614,7 @@ After you click send the request, you will receive JSON payload containing **ref
 }
 ```
 
-and add/export the above r**refresh_token** to DROPBOX_REFRESH_TOKEN in your environment.
+and add/export the above **refresh_token** to DROPBOX_REFRESH_TOKEN in your environment.
 For more information about the setup visit [OAuth Guide](https://developers.dropbox.com/oauth-guide).
 
 
@@ -699,8 +703,14 @@ The script can process Reddit's GDPR data export to access your complete saved p
 
 Reddit Stash organizes content by subreddit with a clear file naming convention:
 
-- **Posts**: `POST_[post_id].md` or `GDPR_POST_[post_id].md`
-- **Comments**: `COMMENT_[comment_id].md` or `GDPR_COMMENT_[comment_id].md`
+- **Your Posts**: `POST_[post_id].md`
+- **Your Comments**: `COMMENT_[comment_id].md`
+- **Saved Posts**: `SAVED_POST_[post_id].md`
+- **Saved Comments**: `SAVED_COMMENT_[comment_id].md`
+- **Upvoted Posts**: `UPVOTE_POST_[post_id].md`
+- **Upvoted Comments**: `UPVOTE_COMMENT_[comment_id].md`
+- **GDPR Posts**: `GDPR_POST_[post_id].md`
+- **GDPR Comments**: `GDPR_COMMENT_[comment_id].md`
 
 The system includes several utility modules:
 
