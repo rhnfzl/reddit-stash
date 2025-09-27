@@ -135,7 +135,7 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 | Feature | GitHub Actions | Local Installation | Docker |
 |---------|---------------|-------------------|--------|
 | **Ease of Setup** | ⭐⭐⭐ (Easiest) | ⭐⭐ | ⭐⭐ |
-| **Automation** | ✅ Runs on schedule | ❌ Manual or requires cron | ✅ Can be scheduled |
+| **Automation** | ✅ Runs on schedule | ✅ Manual control or cron | ✅ Can be scheduled |
 | **Requirements** | GitHub account | Python 3.10-3.12 | Docker |
 | **Data Storage** | Dropbox required | Local or Dropbox | Local or Dropbox |
 | **Maintenance** | Minimal | More hands-on | Medium |
