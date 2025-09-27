@@ -45,6 +45,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code
 COPY . .
 
+# Copy and set up the entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Create necessary directories and set permissions
 RUN mkdir -p reddit && \
     chown -R appuser:appuser /app
@@ -59,7 +63,9 @@ ENV REDDIT_CLIENT_ID=None \
     REDDIT_PASSWORD=None \
     DROPBOX_APP_KEY=None \
     DROPBOX_APP_SECRET=None \
-    DROPBOX_REFRESH_TOKEN=None
+    DROPBOX_REFRESH_TOKEN=None \
+    SCHEDULE_MODE=once \
+    SCHEDULE_INTERVAL=7200
 
 # Create a volume mount point for persisting data
 VOLUME ["/app/reddit"]
@@ -68,14 +74,14 @@ VOLUME ["/app/reddit"]
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import sys; sys.exit(0)"
 
-# Provide options to run different scripts
-ENTRYPOINT ["python"]
+# Use the wrapper script as entrypoint for scheduling support
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["reddit_stash.py"]
 
 # Usage instructions as comments
 # To build: docker build -t reddit-stash .
 #
-# To run with environment variables:
+# Single execution (default behavior):
 # docker run -it \
 #   -e REDDIT_CLIENT_ID=your_client_id \
 #   -e REDDIT_CLIENT_SECRET=your_client_secret \
@@ -87,7 +93,31 @@ CMD ["reddit_stash.py"]
 #   -v /path/on/host/reddit:/app/reddit \
 #   reddit-stash
 #
-# To run dropbox upload:
+# Periodic execution (every 2 hours by default):
+# docker run -it \
+#   -e REDDIT_CLIENT_ID=your_client_id \
+#   -e REDDIT_CLIENT_SECRET=your_client_secret \
+#   -e REDDIT_USERNAME=your_username \
+#   -e REDDIT_PASSWORD=your_password \
+#   -e DROPBOX_APP_KEY=your_dropbox_key \
+#   -e DROPBOX_APP_SECRET=your_dropbox_secret \
+#   -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+#   -e SCHEDULE_MODE=periodic \
+#   -v /path/on/host/reddit:/app/reddit \
+#   reddit-stash
+#
+# Periodic execution with custom interval (1 hour = 3600 seconds):
+# docker run -it \
+#   -e REDDIT_CLIENT_ID=your_client_id \
+#   -e REDDIT_CLIENT_SECRET=your_client_secret \
+#   -e REDDIT_USERNAME=your_username \
+#   -e REDDIT_PASSWORD=your_password \
+#   -e SCHEDULE_MODE=periodic \
+#   -e SCHEDULE_INTERVAL=3600 \
+#   -v /path/on/host/reddit:/app/reddit \
+#   reddit-stash
+#
+# To run dropbox upload once:
 # docker run -it \
 #   -e DROPBOX_APP_KEY=your_dropbox_key \
 #   -e DROPBOX_APP_SECRET=your_dropbox_secret \
@@ -95,10 +125,12 @@ CMD ["reddit_stash.py"]
 #   -v /path/on/host/reddit:/app/reddit \
 #   reddit-stash dropbox_utils.py --upload
 #
-# To run dropbox download:
+# To run dropbox upload periodically:
 # docker run -it \
 #   -e DROPBOX_APP_KEY=your_dropbox_key \
 #   -e DROPBOX_APP_SECRET=your_dropbox_secret \
 #   -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+#   -e SCHEDULE_MODE=periodic \
+#   -e SCHEDULE_INTERVAL=3600 \
 #   -v /path/on/host/reddit:/app/reddit \
-#   reddit-stash dropbox_utils.py --download
+#   reddit-stash dropbox_utils.py --upload
