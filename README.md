@@ -846,7 +846,21 @@ Have an idea for improving Reddit Stash? Feel free to suggest it in the issues o
 - [ ] Improve error handling for edge cases
 - [ ] Add support for additional cloud storage providers
 - [ ] Create a simple web interface for configuration
-- [ ] Add metrics and statistics about saved content
+- [ ] **Media Download System** - Download images, videos, and audio from Reddit posts (available in develop branch)
+  - Support for Reddit-hosted media (i.redd.it, v.redd.it), Imgur albums, Gfycat, Gyazo, Streamable
+  - Intelligent thumbnail generation for large images
+  - Retry queue system with exponential backoff for failed downloads
+  - Per-domain rate limiting to prevent API throttling
+- [ ] **Deleted Content Recovery** - Recover deleted posts and comments using multiple services
+  - Wayback Machine integration for archived content
+  - PullPush.io API (Pushshift successor) for Reddit content recovery
+  - Reveddit API support for removed content
+  - Reddit preview fallback system
+- [ ] **Advanced Media Processing**
+  - Video compression and format conversion options
+  - Parallel downloads with queue management
+  - Selective downloads by file size/type with user-defined rules
+  - Download progress tracking and statistics
 
 ## License
 
