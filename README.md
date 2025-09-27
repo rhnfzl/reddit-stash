@@ -840,12 +840,6 @@ Feel free to open issues or submit pull requests if you have any improvements or
 
 ## Project Status
 
-### Resolved Issues
-✅ The dropbox authentication now works correctly with refresh tokens  
-✅ The script implements early exit strategy while fetching content for better efficiency  
-✅ Added Docker support for local containerization  
-✅ Added processing of the GDPR export data from Reddit
-
 ### Future Enhancements
 Have an idea for improving Reddit Stash? Feel free to suggest it in the issues or contribute a pull request!
 
