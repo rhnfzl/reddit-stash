@@ -1,8 +1,10 @@
 import os
 import requests
+import urllib3
 from datetime import datetime
 from praw.models import Submission, Comment
 from utils.time_utilities import lazy_load_comments
+from utils.env_config import get_ignore_tls_errors
 
 def format_date(timestamp):
     """Format a UTC timestamp into a human-readable date."""
@@ -16,10 +18,21 @@ def extract_video_id(url):
         return url.split("/")[-1]
     return None
 
-def download_image(image_url, save_directory, submission_id):
+def download_image(image_url, save_directory, submission_id, ignore_tls_errors=None):
     """Download an image from the given URL and save it locally."""
     try:
-        response = requests.get(image_url)
+        # Load ignore_tls_errors setting if not provided
+        if ignore_tls_errors is None:
+            ignore_tls_errors = get_ignore_tls_errors()
+
+        # Configure request parameters
+        request_kwargs = {}
+        if ignore_tls_errors:
+            # Disable SSL warnings if ignoring TLS errors
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            request_kwargs['verify'] = False
+
+        response = requests.get(image_url, **request_kwargs)
         response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
         
         # Determine the image extension from the URL
@@ -39,7 +52,7 @@ def download_image(image_url, save_directory, submission_id):
         print(f"Failed to download image from {image_url}: {e}")
         return None
 
-def save_submission(submission, f, unsave=False):
+def save_submission(submission, f, unsave=False, ignore_tls_errors=None):
     """Save a submission and its metadata, optionally unsaving it after."""
     try:
         f.write('---\n')  # Start of frontmatter
@@ -62,7 +75,7 @@ def save_submission(submission, f, unsave=False):
         else:
             if submission.url.endswith(('.jpg', '.jpeg', '.png', '.gif')):
                 # Download and save the image locally
-                image_path = download_image(submission.url, os.path.dirname(f.name), submission.id)
+                image_path = download_image(submission.url, os.path.dirname(f.name), submission.id, ignore_tls_errors)
                 if image_path:
                     f.write(f"![Image]({image_path})\n")
                     f.write(f"**Original Image URL:** [Link]({submission.url})\n")
@@ -89,7 +102,7 @@ def save_submission(submission, f, unsave=False):
     except Exception as e:
         print(f"Error saving submission {submission.id}: {e}")
 
-def save_comment_and_context(comment, f, unsave=False):
+def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None):
     """Save a comment, its context, and any child comments."""
     try:
         # Save the comment itself
@@ -112,7 +125,7 @@ def save_comment_and_context(comment, f, unsave=False):
 
             # Save the full submission context, including all comments
             f.write('\n\n## Full Post Context:\n\n')
-            save_submission(parent, f)  # Save the parent post context
+            save_submission(parent, f, ignore_tls_errors=ignore_tls_errors)  # Save the parent post context
 
         elif isinstance(parent, Comment):
             f.write(f'## Context: Parent Comment by /u/{parent.author.name if parent.author else "[deleted]"}\n')
@@ -120,12 +133,12 @@ def save_comment_and_context(comment, f, unsave=False):
             f.write(f'{parent.body}\n\n')
 
             # Recursively save the parent comment's context
-            save_comment_and_context(parent, f)
+            save_comment_and_context(parent, f, ignore_tls_errors=ignore_tls_errors)
 
         # Save child comments if any exist
         if comment.replies:
             f.write('\n\n## Child Comments:\n\n')
-            process_comments(comment.replies, f)
+            process_comments(comment.replies, f, ignore_tls_errors=ignore_tls_errors)
 
         # Unsave the comment if requested
         if unsave:
@@ -138,7 +151,7 @@ def save_comment_and_context(comment, f, unsave=False):
     except Exception as e:
         print(f"Error saving comment {comment.id}: {e}")
 
-def process_comments(comments, f, depth=0, simple_format=False):
+def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None):
     """Process all comments with tree-like visual hierarchy without triggering markdown code blocks."""
     for i, comment in enumerate(comments):
         if isinstance(comment, Comment):
@@ -165,7 +178,7 @@ def process_comments(comments, f, depth=0, simple_format=False):
             # Check for image URLs in the comment body
             if any(comment.body.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
                 image_url = comment.body.split()[-1]  # Assuming the URL is the last word in the comment
-                image_path = download_image(image_url, os.path.dirname(f.name), comment.id)
+                image_path = download_image(image_url, os.path.dirname(f.name), comment.id, ignore_tls_errors)
                 if image_path:
                     # Apply blockquote formatting for nested images
                     blockquote_prefix = "> " * max(1, depth) if depth > 0 else ""
@@ -188,7 +201,7 @@ def process_comments(comments, f, depth=0, simple_format=False):
 
             # Recursively process child comments
             if not simple_format and comment.replies:
-                process_comments(comment.replies, f, depth + 1, simple_format)
+                process_comments(comment.replies, f, depth + 1, simple_format, ignore_tls_errors)
 
             # Add separator only for top-level comments to reduce clutter
             if depth == 0:
