@@ -65,7 +65,6 @@ Each post and comment is formatted with:
 - [Contributing](#contributing)
 - [Acknowledgement](#acknowledgement)
 - [Project Status](#project-status)
-  - [Resolved Issues](#resolved-issues)
   - [Future Enhancements](#future-enhancements)
 - [License](#license)
 
@@ -216,7 +215,7 @@ Before proceeding with any installation method, ensure that you have set the Red
 
 #### GitHub Action Installation (Recommended)
 
-**Note:** The following process requires the [Dropbox App setup](#setting-up-dropbox-app). The GitHub Actions workflow runs the script every 2 hours during peak hours (8:00-23:00 CET) and twice during off-peak hours (1:00 and 5:00 CET), uploading the files to Dropbox. The workflow is defined in `.github/workflows/reddit_scraper.yml`.
+**Note:** The following process requires the [Dropbox App setup](#setting-up-dropbox-app). The GitHub Actions workflow runs the script every 2 hours during peak hours (6:00-21:00 UTC) and twice during off-peak hours (23:00 and 3:00 UTC), uploading the files to Dropbox. The workflow is defined in `.github/workflows/reddit_scraper.yml`.
 
 1. **Fork this repository**.
 
@@ -243,9 +242,8 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
    - Twice during *off-peak hours* (23:00 and 3:00 UTC)
    - You can adjust these times in the workflow file to match your timezone if needed.
 
-5. **Additional Workflows**: The repository includes additional automated workflows for maintenance:
+5. **Additional Workflows**: The repository includes automated workflows for maintenance and testing:
    - `python-compatibility.yml`: Tests compatibility across Python versions 3.10-3.12
-   - `claude.yml` and `claude-code-review.yml`: AI-assisted code review workflows
 
 #### Local Installation
 
