@@ -5,6 +5,7 @@ from praw.models import Submission, Comment  # Import Submission and Comment
 from utils.log_utils import log_file, save_file_log
 from utils.save_utils import save_submission, save_comment_and_context  # Import common functions
 from utils.time_utilities import dynamic_sleep
+from utils.env_config import get_ignore_tls_errors
 
 # Dynamically determine the path to the root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -60,7 +61,7 @@ def get_existing_files_from_dir(save_directory):
             existing_files.add(unique_key)
     return existing_files
 
-def save_to_file(content, file_path, save_function, existing_files, file_log, save_directory, created_dirs_cache, unsave=False):
+def save_to_file(content, file_path, save_function, existing_files, file_log, save_directory, created_dirs_cache, unsave=False, ignore_tls_errors=None):
     """Save content to a file using the specified save function."""
     file_id = content.id  # Assuming `id` is unique for each Reddit content
     subreddit_name = content.subreddit.display_name  # Get the subreddit name
@@ -81,7 +82,7 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
     # Proceed with saving the file
     try:
         with open(file_path, 'w', encoding="utf-8") as f:
-            save_function(content, f, unsave=unsave)
+            save_function(content, f, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
         
         # Log the file after saving successfully with the unique key
         log_file(file_log, unique_key, {  # Use the unique_key constructed in save_to_file
@@ -109,6 +110,9 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
     """Save user's posts, comments, saved items, and upvoted content."""
     user = reddit.user.me()
 
+    # Load the ignore_tls_errors setting
+    ignore_tls_errors = get_ignore_tls_errors()
+
     # Determine how to check for existing files based on check_type
     if check_type == 'LOG':
         print("Check type is LOG. Using JSON log to find existing files.")
@@ -128,44 +132,44 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
     if save_type == 'ALL':
         # Save all user submissions and comments
         processed_count, skipped_count, total_size = save_self_user_activity(
-            list(user.submissions.new(limit=1000)), 
+            list(user.submissions.new(limit=1000)),
             list(user.comments.new(limit=1000)),
-            save_directory, existing_files, created_dirs_cache, 
-            processed_count, skipped_count, total_size, file_log
+            save_directory, existing_files, created_dirs_cache,
+            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
         )
         
         # Save all saved items (posts and comments)
         processed_count, skipped_count, total_size = save_saved_user_activity(
-            list(user.saved(limit=1000)), save_directory, existing_files, 
+            list(user.saved(limit=1000)), save_directory, existing_files,
             created_dirs_cache, processed_count, skipped_count, total_size, file_log,
-            unsave=unsave
+            unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
         
         # Save all upvoted posts and comments
         processed_count, skipped_count, total_size = save_upvoted_posts_and_comments(
-            list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache, 
-            processed_count, skipped_count, total_size, file_log
+            list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache,
+            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
         )
     
     elif save_type == 'SAVED':
         processed_count, skipped_count, total_size = save_saved_user_activity(
-            list(user.saved(limit=1000)), save_directory, existing_files, 
+            list(user.saved(limit=1000)), save_directory, existing_files,
             created_dirs_cache, processed_count, skipped_count, total_size, file_log,
-            unsave=unsave
+            unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
     
     elif save_type == 'ACTIVITY':
         processed_count, skipped_count, total_size = save_self_user_activity(
-            list(user.submissions.new(limit=1000)), 
+            list(user.submissions.new(limit=1000)),
             list(user.comments.new(limit=1000)),
-            save_directory, existing_files, created_dirs_cache, 
-            processed_count, skipped_count, total_size, file_log
+            save_directory, existing_files, created_dirs_cache,
+            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
         )
         
     elif save_type == 'UPVOTED':
         processed_count, skipped_count, total_size = save_upvoted_posts_and_comments(
-            list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache, 
-            processed_count, skipped_count, total_size, file_log
+            list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache,
+            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
         )
 
     # Save the updated file log
@@ -174,11 +178,11 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
     return processed_count, skipped_count, total_size
 
 
-def save_self_user_activity(submissions, comments, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log):
+def save_self_user_activity(submissions, comments, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, ignore_tls_errors=None):
     """Save all user posts and comments."""
     for submission in tqdm(submissions, desc="Processing Users Submissions"):
         file_path = os.path.join(save_directory, submission.subreddit.display_name, f"POST_{submission.id}.md")
-        if save_to_file(submission, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache):
+        if save_to_file(submission, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
             skipped_count += 1
             continue
 
@@ -188,7 +192,7 @@ def save_self_user_activity(submissions, comments, save_directory, existing_file
 
     for comment in tqdm(comments, desc="Processing Users Comments"):
         file_path = os.path.join(save_directory, comment.subreddit.display_name, f"COMMENT_{comment.id}.md")
-        if save_to_file(comment, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache):
+        if save_to_file(comment, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
             skipped_count += 1
             continue
 
@@ -198,17 +202,17 @@ def save_self_user_activity(submissions, comments, save_directory, existing_file
 
     return processed_count, skipped_count, total_size
 
-def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, unsave=False):
+def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, unsave=False, ignore_tls_errors=None):
     """Save only saved user posts and comments."""
     for item in tqdm(saved_items, desc="Processing Saved Items"):
         if isinstance(item, Submission):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_POST_{item.id}.md")
-            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave):
+            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors):
                 skipped_count += 1
                 continue
         elif isinstance(item, Comment):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_COMMENT_{item.id}.md")
-            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave):
+            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors):
                 skipped_count += 1
                 continue
 
@@ -218,17 +222,17 @@ def save_saved_user_activity(saved_items, save_directory, existing_files, create
 
     return processed_count, skipped_count, total_size
 
-def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log):
+def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, ignore_tls_errors=None):
     """Save only upvoted user posts and comments."""
     for item in tqdm(upvoted_items, desc="Processing Upvoted Items"):
         if isinstance(item, Submission):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_POST_{item.id}.md")
-            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache):
+            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
                 skipped_count += 1
                 continue
         elif isinstance(item, Comment):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_COMMENT_{item.id}.md")
-            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache):
+            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
                 skipped_count += 1
                 continue
 
