@@ -162,12 +162,12 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 | Feature | GitHub Actions | Local Installation | Docker |
 |---------|---------------|-------------------|--------|
 | **Ease of Setup** | ⭐⭐⭐ (Easiest) | ⭐⭐ | ⭐⭐ |
-| **Automation** | ✅ Runs on schedule | ✅ Manual control or cron | ✅ Can be scheduled |
+| **Automation** | ✅ Runs on schedule | ✅ Manual control or cron | ✅ Built-in scheduling support |
 | **Requirements** | GitHub account | Python 3.10-3.12 | Docker |
 | **Data Storage** | Dropbox required | Local or Dropbox | Local or Dropbox |
-| **Maintenance** | Minimal | More hands-on | Medium |
+| **Maintenance** | Minimal | More hands-on | Low to Medium |
 | **Privacy** | Credentials in GitHub secrets | Credentials on local machine | Credentials in container |
-| **Best For** | Set & forget users | Power users with customization needs | Users with existing Docker infrastructure |
+| **Best For** | Set & forget users | Power users with customization needs | Containerized environments & flexible scheduling |
 
 ## Key Features
 
@@ -349,9 +349,8 @@ If your Reddit password contains special characters like `!`, `&`, `$`, etc., us
 ```
 
 **Option A: Local-only mode (no Dropbox sync)**
-For periodic local downloads without cloud backup:
 
-**Linux/macOS:**
+**Single execution** (runs once and exits):
 ```bash
 docker run -it \
   -e REDDIT_CLIENT_ID='your_client_id' \
@@ -362,10 +361,34 @@ docker run -it \
   reddit-stash
 ```
 
-**Option B: Dropbox sync mode (full cloud backup)**
-For automatic Dropbox synchronization:
+**Periodic execution** (runs every 2 hours automatically):
+```bash
+docker run -it \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e SCHEDULE_MODE='periodic' \
+  -v $(pwd)/reddit:/app/reddit \
+  reddit-stash
+```
 
-**Linux/macOS:**
+**Custom interval** (runs every hour):
+```bash
+docker run -it \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e SCHEDULE_MODE='periodic' \
+  -e SCHEDULE_INTERVAL='3600' \
+  -v $(pwd)/reddit:/app/reddit \
+  reddit-stash
+```
+
+**Option B: Dropbox sync mode (full cloud backup)**
+
+**Single execution** (runs once and exits):
 ```bash
 docker run -it \
   -e REDDIT_CLIENT_ID='your_client_id' \
@@ -379,7 +402,24 @@ docker run -it \
   reddit-stash
 ```
 
-**Windows Command Prompt (Local-only):**
+**Periodic execution** (runs every 2 hours with automatic Dropbox sync):
+```bash
+docker run -it \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e DROPBOX_APP_KEY='your_dropbox_key' \
+  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
+  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
+  -e SCHEDULE_MODE='periodic' \
+  -v $(pwd)/reddit:/app/reddit \
+  reddit-stash
+```
+
+**Windows Command Prompt:**
+
+**Local-only (single execution):**
 ```cmd
 docker run -it ^
   -e REDDIT_CLIENT_ID=your_client_id ^
@@ -390,7 +430,19 @@ docker run -it ^
   reddit-stash
 ```
 
-**Windows Command Prompt (Dropbox sync):**
+**Local-only (periodic execution):**
+```cmd
+docker run -it ^
+  -e REDDIT_CLIENT_ID=your_client_id ^
+  -e REDDIT_CLIENT_SECRET=your_client_secret ^
+  -e REDDIT_USERNAME=your_username ^
+  -e REDDIT_PASSWORD=your_password ^
+  -e SCHEDULE_MODE=periodic ^
+  -v %cd%/reddit:/app/reddit ^
+  reddit-stash
+```
+
+**Dropbox sync (periodic execution):**
 ```cmd
 docker run -it ^
   -e REDDIT_CLIENT_ID=your_client_id ^
@@ -400,6 +452,7 @@ docker run -it ^
   -e DROPBOX_APP_KEY=your_dropbox_key ^
   -e DROPBOX_APP_SECRET=your_dropbox_secret ^
   -e DROPBOX_REFRESH_TOKEN=your_dropbox_token ^
+  -e SCHEDULE_MODE=periodic ^
   -v %cd%/reddit:/app/reddit ^
   reddit-stash
 ```
@@ -456,7 +509,14 @@ docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_ut
 - **Flexibility**: The container supports running different scripts (main script, dropbox operations)
 - **Interactive Mode**: Use `-it` flags for interactive operation with output visible in your terminal
 - **Shell Special Characters**: Always use single quotes around environment variable values to prevent shell interpretation of special characters (!, &, $, etc.)
-- **Two Main Modes**:
+- **Execution Modes**:
+  - **Single execution** (`SCHEDULE_MODE=once`, default): Runs once and exits
+  - **Periodic execution** (`SCHEDULE_MODE=periodic`): Runs continuously on schedule
+- **Scheduling Options**:
+  - **Default interval**: 2 hours (7200 seconds)
+  - **Custom interval**: Set `SCHEDULE_INTERVAL` to any value ≥ 60 seconds
+  - **Graceful shutdown**: Responds to SIGTERM/SIGINT for clean container stops
+- **Two Main Storage Modes**:
   - **Local-only**: Just Reddit credentials, saves to mounted volume
   - **Dropbox sync**: Full credentials for automatic cloud backup
 - **Detached Mode**: You can also run in detached mode with `-d` if you prefer:
@@ -657,6 +717,262 @@ For more information about the setup visit [OAuth Guide](https://developers.drop
 
 
 - Credits for above DROPBOX_REFRESH_TOKEN solution : https://stackoverflow.com/a/71794390/12983596
+
+## Docker Environment Variables
+
+When using Docker, you can control the scheduling behavior using these additional environment variables:
+
+### Scheduling Variables
+
+- **`SCHEDULE_MODE`**: Controls execution mode
+  - `once` (default): Run the script once and exit
+  - `periodic`: Run the script continuously on a schedule
+
+- **`SCHEDULE_INTERVAL`**: Time between executions in periodic mode
+  - Default: `7200` (2 hours)
+  - Minimum: `60` (1 minute)
+  - Units: seconds
+  - Examples:
+    - `3600` = 1 hour
+    - `1800` = 30 minutes
+    - `14400` = 4 hours
+
+### Usage Examples
+
+**Run once (default behavior):**
+```bash
+docker run -it [...other env vars...] reddit-stash
+```
+
+**Run every 2 hours:**
+```bash
+docker run -it -e SCHEDULE_MODE=periodic [...other env vars...] reddit-stash
+```
+
+**Run every 30 minutes:**
+```bash
+docker run -it -e SCHEDULE_MODE=periodic -e SCHEDULE_INTERVAL=1800 [...other env vars...] reddit-stash
+```
+
+**Stopping periodic execution:**
+Use `Ctrl+C` or send SIGTERM to the container for graceful shutdown.
+
+## Alternative Scheduling: External Cron Setup
+
+While Docker's built-in scheduling (`SCHEDULE_MODE=periodic`) is convenient, some users prefer external scheduling for more control. Here's how to set up cron jobs to run Docker containers on a schedule.
+
+### When to Use External Cron vs Built-in Scheduling
+
+**Use External Cron when:**
+- You want system-level control over scheduling
+- You need complex scheduling patterns (weekdays only, multiple times per day, etc.)
+- You prefer containers to start/stop rather than run continuously
+- You want to integrate with existing cron workflows
+- You need different schedules for different operations (main script vs Dropbox uploads)
+
+**Use Built-in Scheduling when:**
+- You want simple, consistent intervals
+- You prefer minimal setup
+- You want the container to run continuously
+- You don't need complex scheduling patterns
+
+### Linux/macOS Cron Setup
+
+**1. Edit your crontab:**
+```bash
+crontab -e
+```
+
+**2. Add cron jobs for different schedules:**
+
+**Every 2 hours (Reddit data fetch):**
+```bash
+0 */2 * * * docker run --rm -e REDDIT_CLIENT_ID='your_client_id' -e REDDIT_CLIENT_SECRET='your_client_secret' -e REDDIT_USERNAME='your_username' -e REDDIT_PASSWORD='your_password' -e DROPBOX_APP_KEY='your_dropbox_key' -e DROPBOX_APP_SECRET='your_dropbox_secret' -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' -v /home/user/reddit-data:/app/reddit reddit-stash >> /var/log/reddit-stash.log 2>&1
+```
+
+**Daily at 9 AM:**
+```bash
+0 9 * * * docker run --rm -e REDDIT_CLIENT_ID='your_client_id' -e REDDIT_CLIENT_SECRET='your_client_secret' -e REDDIT_USERNAME='your_username' -e REDDIT_PASSWORD='your_password' -v /home/user/reddit-data:/app/reddit reddit-stash >> /var/log/reddit-stash.log 2>&1
+```
+
+**Weekdays only, every 3 hours during work hours (9 AM - 6 PM):**
+```bash
+0 9,12,15,18 * * 1-5 docker run --rm -e REDDIT_CLIENT_ID='your_client_id' -e REDDIT_CLIENT_SECRET='your_client_secret' -e REDDIT_USERNAME='your_username' -e REDDIT_PASSWORD='your_password' -v /home/user/reddit-data:/app/reddit reddit-stash >> /var/log/reddit-stash.log 2>&1
+```
+
+**Separate Dropbox upload job (runs 30 minutes after main job):**
+```bash
+30 */2 * * * docker run --rm -e DROPBOX_APP_KEY='your_dropbox_key' -e DROPBOX_APP_SECRET='your_dropbox_secret' -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' -v /home/user/reddit-data:/app/reddit reddit-stash dropbox_utils.py --upload >> /var/log/reddit-stash-upload.log 2>&1
+```
+
+### Windows Task Scheduler Setup
+
+**1. Open Task Scheduler** (search "Task Scheduler" in Start menu)
+
+**2. Create Basic Task:**
+- Name: "Reddit Stash"
+- Trigger: Daily/Weekly/Custom
+- Action: "Start a program"
+- Program: `docker`
+- Arguments:
+  ```
+  run --rm -e REDDIT_CLIENT_ID=your_client_id -e REDDIT_CLIENT_SECRET=your_client_secret -e REDDIT_USERNAME=your_username -e REDDIT_PASSWORD=your_password -v C:\reddit-data:/app/reddit reddit-stash
+  ```
+
+**3. Advanced Options:**
+- Run whether user is logged on or not
+- Run with highest privileges
+- Configure for your Windows version
+
+### Environment Variables in Cron
+
+**Option 1: Create an environment file**
+
+Create `/home/user/.reddit-stash.env`:
+```bash
+REDDIT_CLIENT_ID=your_client_id
+REDDIT_CLIENT_SECRET=your_client_secret
+REDDIT_USERNAME=your_username
+REDDIT_PASSWORD=your_password
+DROPBOX_APP_KEY=your_dropbox_key
+DROPBOX_APP_SECRET=your_dropbox_secret
+DROPBOX_REFRESH_TOKEN=your_dropbox_token
+```
+
+Then use in cron:
+```bash
+0 */2 * * * docker run --rm --env-file /home/user/.reddit-stash.env -v /home/user/reddit-data:/app/reddit reddit-stash >> /var/log/reddit-stash.log 2>&1
+```
+
+**Option 2: Create a shell script**
+
+Create `/home/user/run-reddit-stash.sh`:
+```bash
+#!/bin/bash
+docker run --rm \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e DROPBOX_APP_KEY='your_dropbox_key' \
+  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
+  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
+  -v /home/user/reddit-data:/app/reddit \
+  reddit-stash
+```
+
+Make it executable and add to cron:
+```bash
+chmod +x /home/user/run-reddit-stash.sh
+```
+
+Cron entry:
+```bash
+0 */2 * * * /home/user/run-reddit-stash.sh >> /var/log/reddit-stash.log 2>&1
+```
+
+### Docker Compose with Cron-like Scheduling
+
+Create `docker-compose.yml`:
+```yaml
+version: '3.8'
+services:
+  reddit-stash:
+    image: reddit-stash
+    environment:
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - DROPBOX_APP_KEY=${DROPBOX_APP_KEY}
+      - DROPBOX_APP_SECRET=${DROPBOX_APP_SECRET}
+      - DROPBOX_REFRESH_TOKEN=${DROPBOX_REFRESH_TOKEN}
+    volumes:
+      - ./reddit:/app/reddit
+    profiles:
+      - manual
+```
+
+Run via cron:
+```bash
+0 */2 * * * cd /path/to/reddit-stash && docker-compose --profile manual run --rm reddit-stash >> /var/log/reddit-stash.log 2>&1
+```
+
+### Logging and Monitoring
+
+**View cron logs:**
+```bash
+# Ubuntu/Debian
+tail -f /var/log/syslog | grep CRON
+
+# CentOS/RHEL
+tail -f /var/log/cron
+
+# Your application logs
+tail -f /var/log/reddit-stash.log
+```
+
+**Monitor container execution:**
+```bash
+# Check if containers are running
+docker ps
+
+# View recent container logs
+docker logs $(docker ps -lq)
+
+# Monitor Docker events
+docker events --filter container=reddit-stash
+```
+
+### Troubleshooting Cron Jobs
+
+**Common Issues:**
+
+1. **Path issues**: Cron has limited PATH. Use full paths:
+   ```bash
+   0 */2 * * * /usr/bin/docker run --rm [...] reddit-stash
+   ```
+
+2. **Environment variables**: Cron doesn't inherit your shell environment. Use `--env-file` or set in crontab:
+   ```bash
+   PATH=/usr/local/bin:/usr/bin:/bin
+   0 */2 * * * docker run --rm [...] reddit-stash
+   ```
+
+3. **Permissions**: Ensure your user can run Docker without sudo:
+   ```bash
+   sudo usermod -aG docker $USER
+   # Log out and back in
+   ```
+
+4. **Testing cron jobs**: Test your command manually first:
+   ```bash
+   # Run the exact command from your crontab
+   docker run --rm -e REDDIT_CLIENT_ID='...' [...] reddit-stash
+   ```
+
+### Resource Management Tips
+
+**Using `--rm` flag:**
+- Automatically removes containers after execution
+- Prevents accumulation of stopped containers
+- Essential for cron-based scheduling
+
+**Memory limits:**
+```bash
+docker run --rm --memory=512m -e [...] reddit-stash
+```
+
+**CPU limits:**
+```bash
+docker run --rm --cpus=0.5 -e [...] reddit-stash
+```
+
+**Cleanup old images periodically:**
+```bash
+# Add to weekly cron
+0 0 * * 0 docker image prune -f >> /var/log/docker-cleanup.log 2>&1
+```
 
 ## Important Notes
 
