@@ -127,58 +127,59 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
 
     processed_count = 0  # Counter for processed items
     skipped_count = 0  # Counter for skipped items
-    total_size = 0  # Total size of processed data in bytes
+    total_size = 0  # Total size of processed markdown data in bytes
+    total_media_size = 0  # Total size of downloaded media files in bytes
 
     if save_type == 'ALL':
         # Save all user submissions and comments
-        processed_count, skipped_count, total_size = save_self_user_activity(
+        processed_count, skipped_count, total_size, total_media_size = save_self_user_activity(
             list(user.submissions.new(limit=1000)),
             list(user.comments.new(limit=1000)),
             save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
+            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
-        
+
         # Save all saved items (posts and comments)
-        processed_count, skipped_count, total_size = save_saved_user_activity(
+        processed_count, skipped_count, total_size, total_media_size = save_saved_user_activity(
             list(user.saved(limit=1000)), save_directory, existing_files,
-            created_dirs_cache, processed_count, skipped_count, total_size, file_log,
+            created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log,
             unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
-        
+
         # Save all upvoted posts and comments
-        processed_count, skipped_count, total_size = save_upvoted_posts_and_comments(
+        processed_count, skipped_count, total_size, total_media_size = save_upvoted_posts_and_comments(
             list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache,
             processed_count, skipped_count, total_size, file_log, ignore_tls_errors
         )
     
     elif save_type == 'SAVED':
-        processed_count, skipped_count, total_size = save_saved_user_activity(
+        processed_count, skipped_count, total_size, total_media_size = save_saved_user_activity(
             list(user.saved(limit=1000)), save_directory, existing_files,
-            created_dirs_cache, processed_count, skipped_count, total_size, file_log,
+            created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log,
             unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
     
     elif save_type == 'ACTIVITY':
-        processed_count, skipped_count, total_size = save_self_user_activity(
+        processed_count, skipped_count, total_size, total_media_size = save_self_user_activity(
             list(user.submissions.new(limit=1000)),
             list(user.comments.new(limit=1000)),
             save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
+            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
         
     elif save_type == 'UPVOTED':
-        processed_count, skipped_count, total_size = save_upvoted_posts_and_comments(
+        processed_count, skipped_count, total_size, total_media_size = save_upvoted_posts_and_comments(
             list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
+            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
 
     # Save the updated file log
     save_file_log(file_log, save_directory)
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, total_media_size
 
 
-def save_self_user_activity(submissions, comments, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, ignore_tls_errors=None):
+def save_self_user_activity(submissions, comments, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors=None):
     """Save all user posts and comments."""
     for submission in tqdm(submissions, desc="Processing Users Submissions"):
         file_path = os.path.join(save_directory, submission.subreddit.display_name, f"POST_{submission.id}.md")
@@ -200,9 +201,9 @@ def save_self_user_activity(submissions, comments, save_directory, existing_file
         total_size += os.path.getsize(file_path)
         handle_dynamic_sleep(comment)  # Call the refactored sleep function
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, total_media_size
 
-def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, unsave=False, ignore_tls_errors=None):
+def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log, unsave=False, ignore_tls_errors=None):
     """Save only saved user posts and comments."""
     for item in tqdm(saved_items, desc="Processing Saved Items"):
         if isinstance(item, Submission):
@@ -220,9 +221,9 @@ def save_saved_user_activity(saved_items, save_directory, existing_files, create
         total_size += os.path.getsize(file_path)
         handle_dynamic_sleep(item)
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, total_media_size
 
-def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, ignore_tls_errors=None):
+def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors=None):
     """Save only upvoted user posts and comments."""
     for item in tqdm(upvoted_items, desc="Processing Upvoted Items"):
         if isinstance(item, Submission):
@@ -240,4 +241,4 @@ def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_file
         total_size += os.path.getsize(file_path)
         handle_dynamic_sleep(item)
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, total_media_size
