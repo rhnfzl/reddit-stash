@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  reddit-stash:
+    build: .
+    container_name: reddit-stash
+    environment:
+      # Reddit API credentials (required)
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET}
+      REDDIT_USERNAME: ${REDDIT_USERNAME}
+      REDDIT_PASSWORD: ${REDDIT_PASSWORD}
+
+      # Dropbox credentials (optional)
+      DROPBOX_APP_KEY: ${DROPBOX_APP_KEY:-}
+      DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET:-}
+      DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN:-}
+    volumes:
+      # Mount local reddit directory for persistent data
+      - ./reddit:/app/reddit
+      # Mount settings.ini for easy configuration changes
+      - ./settings.ini:/app/settings.ini:ro
+    restart: unless-stopped
+    profiles:
+      - main
+
+  # Service for one-time operations
+  reddit-stash-oneshot:
+    build: .
+    container_name: reddit-stash-oneshot
+    environment:
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET}
+      REDDIT_USERNAME: ${REDDIT_USERNAME}
+      REDDIT_PASSWORD: ${REDDIT_PASSWORD}
+      DROPBOX_APP_KEY: ${DROPBOX_APP_KEY:-}
+      DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET:-}
+      DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN:-}
+    volumes:
+      - ./reddit:/app/reddit
+      - ./settings.ini:/app/settings.ini:ro
+    profiles:
+      - oneshot
+
+  # Service for Dropbox operations only
+  reddit-stash-dropbox:
+    build: .
+    container_name: reddit-stash-dropbox
+    environment:
+      DROPBOX_APP_KEY: ${DROPBOX_APP_KEY}
+      DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET}
+      DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN}
+    volumes:
+      - ./reddit:/app/reddit
+    profiles:
+      - dropbox
+
+# Example usage:
+# 1. Copy .env.example to .env and fill in your credentials
+# 2. Run main service: docker-compose --profile main up
+# 3. Run one-shot: docker-compose --profile oneshot run --rm reddit-stash-oneshot
+# 4. Dropbox upload: docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --upload
+# 5. Dropbox download: docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --download
