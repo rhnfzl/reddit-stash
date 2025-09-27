@@ -1,0 +1,134 @@
+name: Python Compatibility Testing
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+  schedule:
+    # Test weekly on Sundays at 02:00 UTC
+    - cron: "0 2 * * 0"
+
+# Prevent multiple workflow runs executing simultaneously
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        timeout-minutes: 2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: 1
+          PIP_NO_WARN_SCRIPT_LOCATION: 1
+          PIP_ROOT_USER_ACTION: ignore
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate Python environment
+        run: |
+          python --version
+          python -c "import sys; print(f'Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"
+          pip list
+
+      - name: Test imports and basic functionality
+        run: |
+          # Test that all core modules can be imported
+          python -c "import praw; print(f'PRAW version: {praw.__version__}')"
+          python -c "import dropbox; print('Dropbox SDK imported successfully')"
+          python -c "import pandas; print(f'Pandas version: {pandas.__version__}')"
+          python -c "import tqdm; print(f'tqdm version: {tqdm.__version__}')"
+          python -c "import requests; print(f'Requests version: {requests.__version__}')"
+
+      - name: Test application modules
+        run: |
+          # Test that our utility modules can be imported
+          python -c "from utils.file_path_validate import validate_and_set_directory; print('file_path_validate imported')"
+          python -c "from utils.env_config import load_config_and_env; print('env_config imported')"
+          python -c "from utils.log_utils import load_file_log; print('log_utils imported')"
+          python -c "from utils.gdpr_processor import process_gdpr_export; print('gdpr_processor imported')"
+
+      - name: Test configuration parsing
+        run: |
+          # Test that settings.ini can be parsed
+          python -c "
+          import configparser
+          config = configparser.ConfigParser()
+          config.read('settings.ini')
+          print('Configuration file parsed successfully')
+          print(f'Save type: {config.get(\"Settings\", \"save_type\", fallback=\"ALL\")}')
+          "
+
+      - name: Validate code syntax
+        run: |
+          # Check for syntax errors in main files
+          python -m py_compile reddit_stash.py
+          python -m py_compile dropbox_utils.py
+          find utils/ -name "*.py" -exec python -m py_compile {} \;
+          echo "All Python files compile successfully"
+
+  docker-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image with Python ${{ matrix.python-version }}
+        run: |
+          docker build \
+            --build-arg PYTHON_VERSION=${{ matrix.python-version }} \
+            --tag reddit-stash:py${{ matrix.python-version }} \
+            .
+
+      - name: Test Docker image
+        run: |
+          # Test that the image was built successfully and Python version is correct
+          docker run --rm reddit-stash:py${{ matrix.python-version }} --version
+
+          # Test that dependencies are installed
+          docker run --rm reddit-stash:py${{ matrix.python-version }} -c "
+          import praw, dropbox, pandas, tqdm, requests
+          print('All dependencies imported successfully')
+          "
+
+      - name: Test application imports in Docker
+        run: |
+          # Test that our modules can be imported in the container
+          docker run --rm reddit-stash:py${{ matrix.python-version }} -c "
+          from utils.file_path_validate import validate_and_set_directory
+          from utils.env_config import load_config_and_env
+          from utils.log_utils import load_file_log
+          print('Application modules imported successfully in Docker')
+          "

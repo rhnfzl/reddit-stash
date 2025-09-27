@@ -1,5 +1,4 @@
 import time
-import math
 import random
 import logging
 import prawcore

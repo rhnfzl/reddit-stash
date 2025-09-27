@@ -1,5 +1,23 @@
 # Use a slim Python base image for smaller size
-FROM python:3.10-slim
+# Supports Python 3.10, 3.11, and 3.12 (default: 3.12)
+ARG PYTHON_VERSION=3.12
+FROM python:${PYTHON_VERSION}-slim
+
+# Build arguments for metadata
+ARG BUILD_DATE
+ARG VCS_REF
+ARG VERSION=latest
+
+# Add metadata labels
+LABEL org.opencontainers.image.title="Reddit Stash" \
+      org.opencontainers.image.description="Automatically save Reddit posts and comments to local or Dropbox storage" \
+      org.opencontainers.image.url="https://github.com/rhnfzl/reddit-stash" \
+      org.opencontainers.image.source="https://github.com/rhnfzl/reddit-stash" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.authors="rhnfzl"
 
 # Set environment variables to prevent Python from writing bytecode and buffering stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -45,6 +63,10 @@ ENV REDDIT_CLIENT_ID=None \
 
 # Create a volume mount point for persisting data
 VOLUME ["/app/reddit"]
+
+# Add health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)"
 
 # Provide options to run different scripts
 ENTRYPOINT ["python"]
