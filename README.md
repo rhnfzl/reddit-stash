@@ -562,20 +562,20 @@ The `settings.ini` file in the root directory of the project allows you to confi
 
 ```ini
 [Settings]
-save_directory = reddit/
-dropbox_directory = /reddit
-save_type = ALL
-check_type = LOG
+save_directory = reddit/  # your system save directory
+dropbox_directory = /reddit  # your dropbox directory
+save_type = ALL  # Options: 'ALL' to save all activity, 'SAVED' to save only saved posts/comments, 'ACTIVITY' to save only the users posts and comments, 'UPVOTED' to save users upvoted post and comments
+check_type = LOG  # Options: 'LOG' to use the logging file to verify the file existence, 'DIR' to verify the file existence based on the downloaded directory.
 unsave_after_download = false
-process_gdpr = false
-process_api = true
-ignore_tls_errors = false
+process_gdpr = false  # Whether to process GDPR export data
+process_api = true  # Whether to process items from Reddit API (default: true)
+ignore_tls_errors = false  # Whether to ignore TLS certificate errors for third-party content (use with caution)
 
 [Configuration]
-client_id = None
-client_secret = None
-username = None
-password = None
+client_id = None  # Can be set here or via environment variables
+client_secret = None  # Can be set here or via environment variables
+username = None  # Can be set here or via environment variables
+password = None  # Can be set here or via environment variables
 ```
 
 #### Settings Explained:
