@@ -340,23 +340,57 @@ docker build --build-arg PYTHON_VERSION=3.11 -t reddit-stash .
 docker build --build-arg PYTHON_VERSION=3.10 -t reddit-stash .
 ```
 
-**2. Run the container for standard operation**:
+**2. Run the container**:
+
+**⚠️ Important: Use single quotes for passwords with special characters**
+If your Reddit password contains special characters like `!`, `&`, `$`, etc., use single quotes to prevent shell interpretation:
+```bash
+-e REDDIT_PASSWORD='your_password_with!special_chars'
+```
+
+**Option A: Local-only mode (no Dropbox sync)**
+For periodic local downloads without cloud backup:
 
 **Linux/macOS:**
 ```bash
 docker run -it \
-  -e REDDIT_CLIENT_ID=your_client_id \
-  -e REDDIT_CLIENT_SECRET=your_client_secret \
-  -e REDDIT_USERNAME=your_username \
-  -e REDDIT_PASSWORD=your_password \
-  -e DROPBOX_APP_KEY=your_dropbox_key \
-  -e DROPBOX_APP_SECRET=your_dropbox_secret \
-  -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
   -v $(pwd)/reddit:/app/reddit \
   reddit-stash
 ```
 
-**Windows Command Prompt:**
+**Option B: Dropbox sync mode (full cloud backup)**
+For automatic Dropbox synchronization:
+
+**Linux/macOS:**
+```bash
+docker run -it \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e DROPBOX_APP_KEY='your_dropbox_key' \
+  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
+  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
+  -v $(pwd)/reddit:/app/reddit \
+  reddit-stash
+```
+
+**Windows Command Prompt (Local-only):**
+```cmd
+docker run -it ^
+  -e REDDIT_CLIENT_ID=your_client_id ^
+  -e REDDIT_CLIENT_SECRET=your_client_secret ^
+  -e REDDIT_USERNAME=your_username ^
+  -e REDDIT_PASSWORD=your_password ^
+  -v %cd%/reddit:/app/reddit ^
+  reddit-stash
+```
+
+**Windows Command Prompt (Dropbox sync):**
 ```cmd
 docker run -it ^
   -e REDDIT_CLIENT_ID=your_client_id ^
@@ -421,10 +455,14 @@ docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_ut
 - **Runtime Configuration**: Environment variables must be provided at runtime
 - **Flexibility**: The container supports running different scripts (main script, dropbox operations)
 - **Interactive Mode**: Use `-it` flags for interactive operation with output visible in your terminal
+- **Shell Special Characters**: Always use single quotes around environment variable values to prevent shell interpretation of special characters (!, &, $, etc.)
+- **Two Main Modes**:
+  - **Local-only**: Just Reddit credentials, saves to mounted volume
+  - **Dropbox sync**: Full credentials for automatic cloud backup
 - **Detached Mode**: You can also run in detached mode with `-d` if you prefer:
   ```bash
   docker run -d \
-    -e REDDIT_CLIENT_ID=your_client_id \
+    -e REDDIT_CLIENT_ID='your_client_id' \
     [other environment variables] \
     -v $(pwd)/reddit:/app/reddit \
     reddit-stash
