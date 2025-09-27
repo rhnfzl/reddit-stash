@@ -33,3 +33,21 @@ def load_config_and_env():
         raise Exception("One or more required credentials for Reddit API are missing.")
 
     return client_id, client_secret, username, password
+
+def get_ignore_tls_errors():
+    """Load the ignore_tls_errors setting from settings.ini."""
+    config_parser = configparser.ConfigParser()
+
+    # Dynamically determine the path to the root directory of the repository
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # Construct the full path to the settings.ini file
+    config_file_path = os.path.join(BASE_DIR, 'settings.ini')
+
+    # Read the settings.ini file
+    config_parser.read(config_file_path)
+
+    # Get the ignore_tls_errors setting, default to False for security
+    ignore_tls_errors = config_parser.getboolean('Settings', 'ignore_tls_errors', fallback=False)
+
+    return ignore_tls_errors
