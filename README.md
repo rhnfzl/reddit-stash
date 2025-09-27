@@ -107,7 +107,7 @@ For those who want to get up and running quickly, here's a streamlined process:
 
 1. Fork this repository.
 2. Set up the required secrets in your GitHub repository:
-   - From Reddit: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`
+   - From Reddit: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`
    - From Dropbox: `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`
 3. Manually trigger the workflow from the Actions tab.
 
@@ -115,9 +115,10 @@ For those who want to get up and running quickly, here's a streamlined process:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/rhnfzl/reddit-stash.git
+   git clone https://github.com/YOUR_USERNAME/reddit-stash.git
    cd reddit-stash
    ```
+   Replace `YOUR_USERNAME` with your GitHub username (or use `rhnfzl` if using the original repository).
 2. Install dependencies:
    ```bash
    pip install -r requirements.txt
@@ -188,7 +189,7 @@ Before proceeding with any installation method, ensure that you have set the Red
 
 #### GitHub Action Installation (Recommended)
 
-**Note:** The following process requires the [Dropbox App setup](#setting-up-dropbox-app). The GitHub Actions workflow runs the script daily at midnight CET, uploading the files to Dropbox. The workflow is defined in `.github/workflows/reddit_scraper.yml`.
+**Note:** The following process requires the [Dropbox App setup](#setting-up-dropbox-app). The GitHub Actions workflow runs the script every 2 hours during peak hours (8:00-23:00 CET) and twice during off-peak hours (1:00 and 5:00 CET), uploading the files to Dropbox. The workflow is defined in `.github/workflows/reddit_scraper.yml`.
 
 1. **Fork this repository**.
 
@@ -214,13 +215,19 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
    - Twice during *off-peak hours* (1:00 and 5:00 CET time in summer)
    - You can adjust these times in the workflow file to match your timezone if needed.
 
+5. **Additional Workflows**: The repository includes additional automated workflows for maintenance:
+   - `docker-build.yml`: Automatically builds and publishes Docker images
+   - `python-compatibility.yml`: Tests compatibility across Python versions 3.10-3.12
+   - `claude.yml` and `claude-code-review.yml`: AI-assisted code review workflows
+
 #### Local Installation
 
 1. **Clone this repository**:
    ```
-   git clone https://github.com/rhnfzl/reddit-stash.git
+   git clone https://github.com/YOUR_USERNAME/reddit-stash.git
    cd reddit-stash
    ```
+   Replace `YOUR_USERNAME` with your GitHub username (or use `rhnfzl` if using the original repository).
 
 2. Install the required Python packages:
     ```
@@ -229,7 +236,7 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
 
 3. Setup the [Dropbox App setup](#setting-up-dropbox-app). Skip it if you don't want to setup the dropbox and only want to save the file locally in your system.
 
-4. Edit the settings.ini file, here is [how to](#`settings.ini`-file)
+4. Edit the settings.ini file, here is [how to](#settingsini-file)
 
 5. Set Environment Variables (Optional but preferred):
 
@@ -306,7 +313,7 @@ You can run Reddit Stash in a Docker container. This method provides isolation a
 
 **Option 1: Use Pre-built Images**
 
-**For Original Repository (Most Users):**
+**For Most Users (Original Repository):**
 ```bash
 # Using GitHub Container Registry (recommended)
 docker pull ghcr.io/rhnfzl/reddit-stash:latest
@@ -315,7 +322,7 @@ docker pull ghcr.io/rhnfzl/reddit-stash:latest
 docker pull rhnfzl/reddit-stash:latest
 ```
 
-**For Your Fork (If You've Modified the Code):**
+**For Fork Users (If You've Made Code Changes):**
 ```bash
 # Replace YOUR_USERNAME with your GitHub username
 docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
@@ -339,7 +346,7 @@ docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
 
 2. **Run the container for standard operation**:
 
-   **Using Original Images:**
+   **Using Original Repository Images:**
    ```bash
    docker run -it \
      -e REDDIT_CLIENT_ID=your_client_id \
@@ -353,7 +360,7 @@ docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
      ghcr.io/rhnfzl/reddit-stash:latest
    ```
 
-   **Using Your Fork's Images:**
+   **Using Your Fork's Images (if you made code changes):**
    ```bash
    # Replace YOUR_USERNAME with your GitHub username
    docker run -it \
@@ -384,7 +391,7 @@ docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
 
 3. **Run the container for Dropbox operations**:
 
-   **Upload to Dropbox** (replace image name as needed):
+   **Upload to Dropbox**:
    ```bash
    docker run -it \
      -e DROPBOX_APP_KEY=your_dropbox_key \
@@ -394,7 +401,7 @@ docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
      ghcr.io/rhnfzl/reddit-stash:latest dropbox_utils.py --upload
    ```
 
-   **Download from Dropbox** (replace image name as needed):
+   **Download from Dropbox**:
    ```bash
    docker run -it \
      -e DROPBOX_APP_KEY=your_dropbox_key \
@@ -450,7 +457,7 @@ docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
     -v $(pwd)/reddit:/app/reddit \
     ghcr.io/rhnfzl/reddit-stash:latest
   ```
-  Replace image name with your fork (`ghcr.io/YOUR_USERNAME/reddit-stash:latest`) if needed.
+  **Note**: Replace with `ghcr.io/YOUR_USERNAME/reddit-stash:latest` if using your fork's images.
 - **Logging**: Logs are available through Docker's logging system when running in detached mode:
   ```bash
   docker logs <container_id>
@@ -555,20 +562,20 @@ The `settings.ini` file in the root directory of the project allows you to confi
 
 ```ini
 [Settings]
-save_directory = reddit/ # your system save directory
-dropbox_directory = /reddit # your dropbox directory
-save_type = ALL  # Options: 'ALL' to save all activity, 'SAVED' to save only saved posts/comments, 'ACTIVITY' to save only the users posts and comments, 'UPVOTED' to save users upvoted post and comments
-check_type = LOG # Options: 'LOG' to use the logging file to verify the file exisitnece, 'DIR' to verify the file exisitence based on the downloaded directory.
+save_directory = reddit/
+dropbox_directory = /reddit
+save_type = ALL
+check_type = LOG
 unsave_after_download = false
-process_gdpr = false # Whether to process GDPR export data
-process_api = true # Whether to process items from Reddit API (default: true)
-ignore_tls_errors = false # Whether to ignore TLS certificate errors for third-party content (use with caution)
+process_gdpr = false
+process_api = true
+ignore_tls_errors = false
 
 [Configuration]
-client_id = None  # Can be set here or via environment variables
-client_secret = None  # Can be set here or via environment variables
-username = None  # Can be set here or via environment variables
-password = None  # Can be set here or via environment variables
+client_id = None
+client_secret = None
+username = None
+password = None
 ```
 
 #### Settings Explained:
