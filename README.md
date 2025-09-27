@@ -216,7 +216,6 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
    - You can adjust these times in the workflow file to match your timezone if needed.
 
 5. **Additional Workflows**: The repository includes additional automated workflows for maintenance:
-   - `docker-build.yml`: Automatically builds and publishes Docker images
    - `python-compatibility.yml`: Tests compatibility across Python versions 3.10-3.12
    - `claude.yml` and `claude-code-review.yml`: AI-assisted code review workflows
 
@@ -301,163 +300,107 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
 
 #### Docker Installation
 
-You can run Reddit Stash in a Docker container. This method provides isolation and ensures consistent environment across different systems.
+You can run Reddit Stash in a Docker container for isolation and consistent environment across different systems.
 
-**Important: Choosing the Right Image Source**
-
-> **📋 Which images should you use?**
->
-> - **Using the tool as-is**: Use the original pre-built images (`ghcr.io/rhnfzl/reddit-stash:latest`)
-> - **Made code modifications**: Use your fork's images (`ghcr.io/YOUR_USERNAME/reddit-stash:latest`)
-> - **Building locally**: Use `docker build` or `docker-compose` with the included files
-
-**Option 1: Use Pre-built Images**
-
-**For Most Users (Original Repository):**
+**1. Build the Docker image**:
 ```bash
-# Using GitHub Container Registry (recommended)
-docker pull ghcr.io/rhnfzl/reddit-stash:latest
+# Build with default Python 3.12
+docker build -t reddit-stash .
 
-# Or using Docker Hub
-docker pull rhnfzl/reddit-stash:latest
+# Build with specific Python version (optional)
+docker build --build-arg PYTHON_VERSION=3.11 -t reddit-stash .
+docker build --build-arg PYTHON_VERSION=3.10 -t reddit-stash .
 ```
 
-**For Fork Users (If You've Made Code Changes):**
-```bash
-# Replace YOUR_USERNAME with your GitHub username
-docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
+**2. Run the container for standard operation**:
 
-# Note: Docker Hub is only available for the original repository
+**Linux/macOS:**
+```bash
+docker run -it \
+  -e REDDIT_CLIENT_ID=your_client_id \
+  -e REDDIT_CLIENT_SECRET=your_client_secret \
+  -e REDDIT_USERNAME=your_username \
+  -e REDDIT_PASSWORD=your_password \
+  -e DROPBOX_APP_KEY=your_dropbox_key \
+  -e DROPBOX_APP_SECRET=your_dropbox_secret \
+  -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+  -v $(pwd)/reddit:/app/reddit \
+  reddit-stash
 ```
 
-**Option 2: Build from Source**
+**Windows Command Prompt:**
+```cmd
+docker run -it ^
+  -e REDDIT_CLIENT_ID=your_client_id ^
+  -e REDDIT_CLIENT_SECRET=your_client_secret ^
+  -e REDDIT_USERNAME=your_username ^
+  -e REDDIT_PASSWORD=your_password ^
+  -e DROPBOX_APP_KEY=your_dropbox_key ^
+  -e DROPBOX_APP_SECRET=your_dropbox_secret ^
+  -e DROPBOX_REFRESH_TOKEN=your_dropbox_token ^
+  -v %cd%/reddit:/app/reddit ^
+  reddit-stash
+```
 
-1. **Build the Docker image**:
-   ```bash
-   # Build with default Python 3.12
-   docker build -t reddit-stash .
+**3. Run the container for Dropbox operations**:
 
-   # Build with specific Python version
-   docker build --build-arg PYTHON_VERSION=3.11 -t reddit-stash .
-   docker build --build-arg PYTHON_VERSION=3.10 -t reddit-stash .
-   ```
+**Upload to Dropbox:**
+```bash
+docker run -it \
+  -e DROPBOX_APP_KEY=your_dropbox_key \
+  -e DROPBOX_APP_SECRET=your_dropbox_secret \
+  -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+  -v $(pwd)/reddit:/app/reddit \
+  reddit-stash dropbox_utils.py --upload
+```
 
-**Running the Container**
+**Download from Dropbox:**
+```bash
+docker run -it \
+  -e DROPBOX_APP_KEY=your_dropbox_key \
+  -e DROPBOX_APP_SECRET=your_dropbox_secret \
+  -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+  -v $(pwd)/reddit:/app/reddit \
+  reddit-stash dropbox_utils.py --download
+```
 
-2. **Run the container for standard operation**:
+**4. Docker Compose (Alternative Method)**
 
-   **Using Original Repository Images:**
-   ```bash
-   docker run -it \
-     -e REDDIT_CLIENT_ID=your_client_id \
-     -e REDDIT_CLIENT_SECRET=your_client_secret \
-     -e REDDIT_USERNAME=your_username \
-     -e REDDIT_PASSWORD=your_password \
-     -e DROPBOX_APP_KEY=your_dropbox_key \
-     -e DROPBOX_APP_SECRET=your_dropbox_secret \
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-     -v $(pwd)/reddit:/app/reddit \
-     ghcr.io/rhnfzl/reddit-stash:latest
-   ```
+For easier management, you can use docker-compose:
 
-   **Using Your Fork's Images (if you made code changes):**
-   ```bash
-   # Replace YOUR_USERNAME with your GitHub username
-   docker run -it \
-     -e REDDIT_CLIENT_ID=your_client_id \
-     -e REDDIT_CLIENT_SECRET=your_client_secret \
-     -e REDDIT_USERNAME=your_username \
-     -e REDDIT_PASSWORD=your_password \
-     -e DROPBOX_APP_KEY=your_dropbox_key \
-     -e DROPBOX_APP_SECRET=your_dropbox_secret \
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-     -v $(pwd)/reddit:/app/reddit \
-     ghcr.io/YOUR_USERNAME/reddit-stash:latest
-   ```
+```bash
+# Copy the example environment file
+cp .env.example .env
 
-   **Windows Command Prompt** (replace image name as needed):
-   ```cmd
-   docker run -it ^
-     -e REDDIT_CLIENT_ID=your_client_id ^
-     -e REDDIT_CLIENT_SECRET=your_client_secret ^
-     -e REDDIT_USERNAME=your_username ^
-     -e REDDIT_PASSWORD=your_password ^
-     -e DROPBOX_APP_KEY=your_dropbox_key ^
-     -e DROPBOX_APP_SECRET=your_dropbox_secret ^
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token ^
-     -v %cd%/reddit:/app/reddit ^
-     ghcr.io/rhnfzl/reddit-stash:latest
-   ```
+# Edit .env with your credentials
+nano .env  # or your preferred editor
 
-3. **Run the container for Dropbox operations**:
+# Run the service
+docker-compose --profile main up
 
-   **Upload to Dropbox**:
-   ```bash
-   docker run -it \
-     -e DROPBOX_APP_KEY=your_dropbox_key \
-     -e DROPBOX_APP_SECRET=your_dropbox_secret \
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-     -v $(pwd)/reddit:/app/reddit \
-     ghcr.io/rhnfzl/reddit-stash:latest dropbox_utils.py --upload
-   ```
+# For one-time execution
+docker-compose --profile oneshot run --rm reddit-stash-oneshot
 
-   **Download from Dropbox**:
-   ```bash
-   docker run -it \
-     -e DROPBOX_APP_KEY=your_dropbox_key \
-     -e DROPBOX_APP_SECRET=your_dropbox_secret \
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-     -v $(pwd)/reddit:/app/reddit \
-     ghcr.io/rhnfzl/reddit-stash:latest dropbox_utils.py --download
-   ```
-
-   **Note**: Replace `ghcr.io/rhnfzl/reddit-stash:latest` with `ghcr.io/YOUR_USERNAME/reddit-stash:latest` if using your fork's images. Windows Command Prompt versions follow the same pattern with `^` for line continuation.
-
-4. **Docker Compose (Alternative Method)**
-
-   For easier management, you can use docker-compose:
-
-   ```bash
-   # Copy the example environment file
-   cp .env.example .env
-
-   # Edit .env with your credentials
-   nano .env  # or your preferred editor
-
-   # Run the service
-   docker-compose --profile main up
-
-   # For one-time execution
-   docker-compose --profile oneshot run --rm reddit-stash-oneshot
-
-   # For Dropbox operations only
-   docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --upload
-   ```
+# For Dropbox operations only
+docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --upload
+```
 
 #### Docker Notes:
 
-- **Python Support**: Images use Python 3.12 by default, configurable via `PYTHON_VERSION` build arg (supports 3.10, 3.11, 3.12)
-- **Automated Images**: New Docker images are automatically built and published on every release and push to main branch
-- **Multi-Platform**: Images support both linux/amd64 and linux/arm64 architectures
-- **Registries**: Images are available on both GitHub Container Registry (recommended) and Docker Hub
-- **Tags**:
-  - `latest` for the most recent stable version
-  - `vX.Y.Z` for specific semantic versions
-  - `main-sha-<commit>` for specific commit builds
+- **Python Support**: Build supports Python 3.10, 3.11, and 3.12 (3.12 is default)
 - **Security**: The container runs as a non-root user for security
 - **Data Persistence**: Data is persisted through a volume mount (`-v $(pwd)/reddit:/app/reddit`) to your local machine
 - **Runtime Configuration**: Environment variables must be provided at runtime
-- **Flexibility**: The container uses an ENTRYPOINT/CMD configuration for running different scripts
-- **Interactive Mode**: We use `-it` flags for interactive operation with output visible in your terminal
+- **Flexibility**: The container supports running different scripts (main script, dropbox operations)
+- **Interactive Mode**: Use `-it` flags for interactive operation with output visible in your terminal
 - **Detached Mode**: You can also run in detached mode with `-d` if you prefer:
   ```bash
   docker run -d \
     -e REDDIT_CLIENT_ID=your_client_id \
     [other environment variables] \
     -v $(pwd)/reddit:/app/reddit \
-    ghcr.io/rhnfzl/reddit-stash:latest
+    reddit-stash
   ```
-  **Note**: Replace with `ghcr.io/YOUR_USERNAME/reddit-stash:latest` if using your fork's images.
 - **Logging**: Logs are available through Docker's logging system when running in detached mode:
   ```bash
   docker logs <container_id>
@@ -465,66 +408,34 @@ docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
 
 ### 🍴 Fork Setup Guide
 
-If you've forked this repository to make custom modifications, follow these additional setup steps:
+If you've forked this repository to make custom modifications, follow these setup steps:
 
-#### When to Use Your Fork's Images
-- ✅ **Use your fork's images if**: You've modified the source code, changed dependencies, or customized the application behavior
-- ❌ **Use original images if**: You just want to run the tool without modifications
+#### Using Docker with Your Fork
 
-#### Setting Up Your Fork for Docker Publishing
+Docker works the same way with your fork - just build locally:
 
-1. **GitHub Container Registry Setup (Automatic)**
-   - Your fork automatically publishes to `ghcr.io/YOUR_USERNAME/reddit-stash:latest`
-   - No additional secrets required - uses your GitHub token automatically
-   - Images build on every push to main branch
-
-2. **Using Docker with Your Fork**
-   - ✅ **Docker works perfectly with forks via GitHub Container Registry**
-   - Your fork publishes to `ghcr.io/YOUR_USERNAME/reddit-stash` automatically
-   - No setup required - uses your GitHub token automatically
-
-3. **Docker Usage Options for Fork Users**
-
-   **Option A: Use Your Fork's Images (Recommended if you made code changes)**
-   ```bash
-   # Pull and run your fork's image
-   docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
-   docker run -it [environment variables] -v $(pwd)/reddit:/app/reddit ghcr.io/YOUR_USERNAME/reddit-stash:latest
-   ```
-
-   **Option B: Use Original Images (If you haven't modified the code)**
-   ```bash
-   # Pull and run original images
-   docker pull ghcr.io/rhnfzl/reddit-stash:latest
-   # OR: docker pull rhnfzl/reddit-stash:latest
-   docker run -it [environment variables] -v $(pwd)/reddit:/app/reddit ghcr.io/rhnfzl/reddit-stash:latest
-   ```
-
-   **Option C: Build Locally**
-   ```bash
-   # Clone your fork and build
-   git clone https://github.com/YOUR_USERNAME/reddit-stash.git
-   cd reddit-stash
-   docker build -t reddit-stash .
-   docker run -it [environment variables] -v $(pwd)/reddit:/app/reddit reddit-stash
-   ```
-
-4. **Triggering Builds**
-   - Push to main branch: Automatically builds `latest` tag
-   - Create releases: Automatically builds version tags
-   - Manual trigger: Go to Actions tab → "Build and Publish Docker Images" → Run workflow
-
-#### Fork-Specific Docker Commands
 ```bash
-# Pull your fork's image
-docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
+# Clone your fork
+git clone https://github.com/YOUR_USERNAME/reddit-stash.git
+cd reddit-stash
 
-# Run with your fork's image
+# Build your customized version
+docker build -t reddit-stash .
+
+# Run your custom build
 docker run -it \
-  [environment variables] \
+  -e REDDIT_CLIENT_ID=your_client_id \
+  -e REDDIT_CLIENT_SECRET=your_client_secret \
+  -e REDDIT_USERNAME=your_username \
+  -e REDDIT_PASSWORD=your_password \
+  -e DROPBOX_APP_KEY=your_dropbox_key \
+  -e DROPBOX_APP_SECRET=your_dropbox_secret \
+  -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
   -v $(pwd)/reddit:/app/reddit \
-  ghcr.io/YOUR_USERNAME/reddit-stash:latest
+  reddit-stash
 ```
+
+Replace `YOUR_USERNAME` with your GitHub username.
 
 ### Setup Verification Checklist
 
