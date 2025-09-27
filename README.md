@@ -6,7 +6,7 @@
 [![Reddit](https://img.shields.io/badge/Reddit-API-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/dev/api/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
-**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox or your local machine. Utilizing GitHub Actions, this script runs daily, automating the process of archiving your Reddit data in Dropbox after a simple setup.
+**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox or your local machine. Utilizing GitHub Actions, this script runs every 2 hours during peak hours and twice during off-peak hours, automating the process of archiving your Reddit data in Dropbox after a simple setup.
 
 ## 📋 What You Get
 
@@ -15,11 +15,17 @@ When Reddit Stash runs successfully, your saved content is organized by subreddi
 ```
 reddit/
 ├── r_AskReddit/
-│   ├── POST_abcd123.md
-│   └── COMMENT_efgh456.md
+│   ├── POST_abcd123.md           # Your posted content
+│   ├── COMMENT_efgh456.md        # Your comments
+│   ├── SAVED_POST_xyz789.md      # Posts you saved
+│   └── SAVED_COMMENT_def012.md   # Comments you saved
 ├── r_ProgrammerHumor/
-│   └── POST_ijkl789.md
-└── file_log.json
+│   ├── UPVOTE_POST_ghi345.md     # Posts you upvoted
+│   └── GDPR_POST_jkl678.md       # From GDPR export (if enabled)
+├── gdpr_data/                    # GDPR CSV files (if processing enabled)
+│   ├── saved_posts.csv
+│   └── saved_comments.csv
+└── file_log.json                 # Tracks processed items
 ```
 
 Each post and comment is formatted with:
@@ -199,6 +205,7 @@ Before proceeding with any installation method, ensure that you have set the Red
     - `REDDIT_CLIENT_ID`
     - `REDDIT_CLIENT_SECRET`
     - `REDDIT_USERNAME`
+    - `REDDIT_PASSWORD`
     For Dropbox Setup
     - `DROPBOX_APP_KEY`
     - `DROPBOX_APP_SECRET`
@@ -809,7 +816,7 @@ Feel free to open issues or submit pull requests if you have any improvements or
 ### Resolved Issues
 ✅ The dropbox authentication now works correctly with refresh tokens  
 ✅ The script implements early exit strategy while fetching content for better efficiency  
-✅ Added Docker Image support to run it on Local/NAS systems  
+✅ Added Docker support for local containerization  
 ✅ Added processing of the GDPR export data from Reddit
 
 ### Future Enhancements
