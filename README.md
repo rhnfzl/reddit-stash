@@ -239,8 +239,8 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
 - Go to the **Actions** tab > Select the **Reddit Stash Scraper** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
 
 4. The workflow runs automatically on a schedule:
-   - Every 2 hours during *peak hours* (8:00-23:00 CET time in summer)
-   - Twice during *off-peak hours* (1:00 and 5:00 CET time in summer)
+   - Every 2 hours during *peak hours* (6:00-21:00 UTC)
+   - Twice during *off-peak hours* (23:00 and 3:00 UTC)
    - You can adjust these times in the workflow file to match your timezone if needed.
 
 5. **Additional Workflows**: The repository includes additional automated workflows for maintenance:
@@ -727,10 +727,10 @@ The system includes several utility modules:
 **Q: Why would I want to backup my Reddit content?**  
 A: Reddit only allows you to access your most recent 1000 saved items. This tool lets you preserve everything beyond that limit and ensures you have a backup even if content is removed from Reddit.
 
-**Q: How often does the automated backup run?**  
+**Q: How often does the automated backup run?**
 A: If you use the GitHub Actions setup, it runs on a schedule:
-- Every 2 hours during peak hours (8:00-23:00 CET time in summer)
-- Twice during off-peak hours (1:00 and 5:00 CET time in summer)
+- Every 2 hours during peak hours (6:00-21:00 UTC)
+- Twice during off-peak hours (23:00 and 3:00 UTC)
 
 **Q: Can I run this without GitHub Actions?**  
 A: Yes, you can run it locally on your machine or set up the Docker container version. The README provides instructions for both options.
