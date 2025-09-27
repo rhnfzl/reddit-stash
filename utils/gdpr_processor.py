@@ -1,7 +1,6 @@
 import os
 import pandas as pd
 from tqdm import tqdm
-from praw.models import Submission, Comment
 from utils.file_operations import save_to_file
 from utils.save_utils import save_submission, save_comment_and_context
 from utils.time_utilities import dynamic_sleep

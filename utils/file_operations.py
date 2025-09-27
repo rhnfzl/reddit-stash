@@ -1,5 +1,4 @@
 import os
-import time
 import configparser
 from tqdm import tqdm
 from praw.models import Submission, Comment  # Import Submission and Comment
