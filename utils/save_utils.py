@@ -139,27 +139,57 @@ def save_comment_and_context(comment, f, unsave=False):
         print(f"Error saving comment {comment.id}: {e}")
 
 def process_comments(comments, f, depth=0, simple_format=False):
-    """Process all comments and visualize depth using indentation."""
+    """Process all comments with tree-like visual hierarchy without triggering markdown code blocks."""
     for i, comment in enumerate(comments):
         if isinstance(comment, Comment):
-            indent = '    ' * depth
-            f.write(f'{indent}### Comment {i+1} by /u/{comment.author.name if comment.author else "[deleted]"}\n')
-            f.write(f'{indent}- **Upvotes:** {comment.score} | **Permalink:** [Link](https://reddit.com{comment.permalink})\n')
+            # Create tree structure using Unicode box drawing characters
+            if depth == 0:
+                tree_prefix = ""
+            elif i == len(comments) - 1:  # Last comment at this level
+                tree_prefix = "└── "
+            else:
+                tree_prefix = "├── "
+
+            # Add vertical lines for deeper nesting
+            if depth > 0:
+                parent_lines = "│   " * (depth - 1)
+                tree_prefix = parent_lines + tree_prefix
+
+            # Write comment header without problematic indentation
+            f.write(f'\n{tree_prefix}**Comment by /u/{comment.author.name if comment.author else "[deleted]"}**\n')
+            f.write(f'{tree_prefix}*Upvotes: {comment.score} | [Permalink](https://reddit.com{comment.permalink})*\n\n')
+
+            # Process comment body with blockquotes for nested content
+            comment_body = comment.body if comment.body else '[deleted]'
 
             # Check for image URLs in the comment body
             if any(comment.body.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
                 image_url = comment.body.split()[-1]  # Assuming the URL is the last word in the comment
                 image_path = download_image(image_url, os.path.dirname(f.name), comment.id)
                 if image_path:
-                    f.write(f'{indent}![Image]({image_path})\n')
-                    f.write(f'{indent}**Original Image URL:** [Link]({image_url})\n')
+                    # Apply blockquote formatting for nested images
+                    blockquote_prefix = "> " * max(1, depth) if depth > 0 else ""
+                    f.write(f'{blockquote_prefix}![Image]({image_path})\n')
+                    f.write(f'{blockquote_prefix}*Original Image URL: [Link]({image_url})*\n\n')
                 else:
-                    f.write(f'{indent}![Image]({image_url})\n')  # Fallback to the URL if download fails
+                    blockquote_prefix = "> " * max(1, depth) if depth > 0 else ""
+                    f.write(f'{blockquote_prefix}![Image]({image_url})\n\n')
             else:
-                f.write(f'{indent}{comment.body}\n\n')
+                # Apply blockquote formatting for nested text content
+                lines = comment_body.split('\n')
+                for line in lines:
+                    if depth > 0:
+                        # Use blockquotes for nested content
+                        blockquote_prefix = "> " * depth
+                        f.write(f'{blockquote_prefix}{line}\n')
+                    else:
+                        f.write(f'{line}\n')
+                f.write('\n')
 
             # Recursively process child comments
             if not simple_format and comment.replies:
-                process_comments(comment.replies, f, depth + 1)
+                process_comments(comment.replies, f, depth + 1, simple_format)
 
-            f.write(f'{indent}---\n\n')
+            # Add separator only for top-level comments to reduce clutter
+            if depth == 0:
+                f.write('---\n')
