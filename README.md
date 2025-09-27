@@ -134,6 +134,23 @@ For those who want to get up and running quickly, here's a streamlined process:
    python reddit_stash.py
    ```
 
+### Option 3: Docker Installation
+
+1. Build the Docker image:
+   ```bash
+   docker build -t reddit-stash .
+   ```
+2. Run with your environment variables:
+   ```bash
+   docker run -it \
+     -e REDDIT_CLIENT_ID=your_client_id \
+     -e REDDIT_CLIENT_SECRET=your_client_secret \
+     -e REDDIT_USERNAME=your_username \
+     -e REDDIT_PASSWORD=your_password \
+     -v $(pwd)/reddit:/app/reddit \
+     reddit-stash
+   ```
+
 For detailed setup instructions, continue reading the [Setup](#setup) section.
 
 ### Setup Method Comparison
