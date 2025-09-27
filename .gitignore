@@ -169,3 +169,7 @@ reddit_archive/
 *.json
 reddit_acvhive*
 file_log.json
+CLAUDE.md
+node_modules/
+.claude/
+BRANCH_DIFFERENCES.md
