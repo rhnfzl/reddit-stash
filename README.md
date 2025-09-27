@@ -471,27 +471,38 @@ If you've forked this repository to make custom modifications, follow these addi
    - No additional secrets required - uses your GitHub token automatically
    - Images build on every push to main branch
 
-2. **Docker Hub Limitations for Forks**
-   - ⚠️ **Docker Hub publishing is NOT available for forks**
-   - Only the original repository can publish to `rhnfzl/reddit-stash`
-   - Fork workflows will automatically skip Docker Hub publishing (no errors)
+2. **Using Docker with Your Fork**
+   - ✅ **Docker works perfectly with forks via GitHub Container Registry**
+   - Your fork publishes to `ghcr.io/YOUR_USERNAME/reddit-stash` automatically
+   - No setup required - uses your GitHub token automatically
 
-3. **GitHub Actions Secrets (Optional)**
-   - If you want Docker Hub publishing under your own account, set up:
-     - `DOCKERHUB_USERNAME`: Your Docker Hub username
-     - `DOCKERHUB_TOKEN`: Your Docker Hub access token
-   - Then modify the workflow to use your Docker Hub repository name
+3. **Docker Usage Options for Fork Users**
 
-4. **Using Your Fork's Images**
+   **Option A: Use Your Fork's Images (Recommended if you made code changes)**
    ```bash
-   # Replace all instances of:
-   ghcr.io/rhnfzl/reddit-stash:latest
-
-   # With:
-   ghcr.io/YOUR_USERNAME/reddit-stash:latest
+   # Pull and run your fork's image
+   docker pull ghcr.io/YOUR_USERNAME/reddit-stash:latest
+   docker run -it [environment variables] -v $(pwd)/reddit:/app/reddit ghcr.io/YOUR_USERNAME/reddit-stash:latest
    ```
 
-5. **Triggering Builds**
+   **Option B: Use Original Images (If you haven't modified the code)**
+   ```bash
+   # Pull and run original images
+   docker pull ghcr.io/rhnfzl/reddit-stash:latest
+   # OR: docker pull rhnfzl/reddit-stash:latest
+   docker run -it [environment variables] -v $(pwd)/reddit:/app/reddit ghcr.io/rhnfzl/reddit-stash:latest
+   ```
+
+   **Option C: Build Locally**
+   ```bash
+   # Clone your fork and build
+   git clone https://github.com/YOUR_USERNAME/reddit-stash.git
+   cd reddit-stash
+   docker build -t reddit-stash .
+   docker run -it [environment variables] -v $(pwd)/reddit:/app/reddit reddit-stash
+   ```
+
+4. **Triggering Builds**
    - Push to main branch: Automatically builds `latest` tag
    - Create releases: Automatically builds version tags
    - Manual trigger: Go to Actions tab → "Build and Publish Docker Images" → Run workflow
