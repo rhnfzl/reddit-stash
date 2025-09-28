@@ -404,10 +404,10 @@ def setup_default_rate_limiters() -> None:
     )
     rate_limit_manager.register_service('reddit', reddit_config)
 
-    # Imgur rate limits (very conservative due to strict API limits)
+    # Imgur rate limits (extremely conservative due to strict IP limits and rolling window)
     imgur_config = RateLimitConfig(
-        max_requests_per_minute=8,  # Very conservative
-        burst_capacity=3,
+        max_requests_per_minute=4,  # Very conservative - provides 260 req/hour buffer for rolling window
+        burst_capacity=2,  # Reduced burst to be extra safe
         adaptive_scaling=True,
         retry_after_seconds=120,  # Longer backoff for Imgur
         backoff_multiplier=2.0

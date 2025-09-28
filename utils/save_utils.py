@@ -43,16 +43,13 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
             except OSError:
                 return result_path, 0
         else:
-            # Fallback to old method if new system fails (backward compatibility)
-            return _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors)
+            # No fallback - respect rate limiting and service protection
+            return None, 0
 
     except Exception as e:
         print(f"Failed to download image from {image_url}: {e}")
-        # Try fallback method
-        try:
-            return _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors)
-        except Exception:
-            return None, 0
+        # No fallback - respect rate limiting and service protection
+        return None, 0
 
 
 def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):

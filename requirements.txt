@@ -22,5 +22,10 @@ requests-cache>=1.2.1       # HTTP request caching
 beautifulsoup4>=4.13.5      # HTML parsing
 html5lib>=1.1               # HTML5 parser for BeautifulSoup
 
+# Testing and development dependencies
+unittest-xml-reporting>=3.2.0    # XML test reporting
+coverage>=7.6.0                   # Code coverage measurement
+mock>=5.1.0                      # Mock object library (for older Python versions)
+
 # Note: All other dependencies (threading, sqlite3, json, logging, etc.)
 # are part of Python standard library and don't need to be listed here
