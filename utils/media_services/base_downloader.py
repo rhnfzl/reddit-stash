@@ -196,7 +196,8 @@ class BaseHTTPDownloader:
         service_name = self.config.name.lower()
 
         # Use the sophisticated rate limit manager instead of simple time-based limiting
-        if not rate_limit_manager.acquire(service_name, timeout=15):
+        # Increased timeout to 90 seconds to handle Imgur's backoff periods
+        if not rate_limit_manager.acquire(service_name, timeout=90):
             raise RuntimeError(f"Rate limit timeout for service '{service_name}'")
 
     def _get_filename_from_url(self, url: str) -> str:

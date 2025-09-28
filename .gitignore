@@ -178,3 +178,4 @@ archive/
 test_*.py
 .ruff_cache/
 test_downloads/
+tests/
