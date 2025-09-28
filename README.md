@@ -185,34 +185,6 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 | **Privacy** | Credentials in GitHub secrets | Credentials on local machine | Credentials in container |
 | **Best For** | Set & forget users | Power users with customization needs | Containerized environments & flexible scheduling |
 
-## 📚 Documentation
-
-Reddit Stash includes comprehensive documentation for advanced users and developers:
-
-### Core Documentation
-- **[CLAUDE.md](CLAUDE.md)**: Essential guidance for AI assistants working with this codebase
-- **[ARCHITECTURE.md](ARCHITECTURE.md)**: Detailed system architecture, data flows, and implementation details
-- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**: Complete troubleshooting guide with solutions to common issues
-
-### Advanced Features
-- **[Content Recovery System](ARCHITECTURE.md#content-recovery-system-architecture)**: 4-provider cascade for failed downloads (Wayback Machine, PullPush.io, Reddit Previews, Reveddit)
-- **[docs/RATE_LIMITING.md](docs/RATE_LIMITING.md)**: Comprehensive rate limiting strategies and implementation
-- **[docs/DOCKER.md](docs/DOCKER.md)**: Advanced Docker integration, scheduling, and deployment
-
-### Technical References
-- **[DEPENDENCIES.md](DEPENDENCIES.md)**: Complete dependency documentation with installation guides
-- **[TESTING.md](TESTING.md)**: Content Recovery System test suite with 25+ test cases
-
-### Quick Reference Links
-| Need Help With | Documentation |
-|----------------|---------------|
-| **Setup Issues** | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
-| **Docker Deployment** | [docs/DOCKER.md](docs/DOCKER.md) |
-| **Content Recovery** | [ARCHITECTURE.md](ARCHITECTURE.md#content-recovery-system-architecture) |
-| **Rate Limiting** | [docs/RATE_LIMITING.md](docs/RATE_LIMITING.md) |
-| **Dependencies** | [DEPENDENCIES.md](DEPENDENCIES.md) |
-| **AI Development** | [CLAUDE.md](CLAUDE.md) |
-
 ## Key Features
 
 - 🤖 **Automated Reddit Backup:** Automatically retrieves saved posts and comments from Reddit, even your posts and comments if you set it up.
@@ -253,19 +225,6 @@ Beyond text, Reddit Stash can download and preserve images, videos, and other me
 - ✅ Python 3.10-3.12 (Python 3.12 recommended for best performance)
 - 🔑 Reddit API credentials
 - 📊 A Dropbox account with an API token
-
-#### Python Version Benefits
-- **Python 3.10**: Minimum supported version, stable and reliable
-- **Python 3.11**: ~15% performance improvement, better error messages
-- **Python 3.12**: Additional optimizations, enhanced f-strings, improved debugging
-
-#### Enhanced Dependencies for Better Media Downloads
-Reddit Stash includes modern web technologies to dramatically improve media download success:
-- **curl-cffi**: Provides better compatibility with modern websites by mimicking real browser behavior
-- **tenacity**: Implements smart retry logic that automatically recovers from temporary failures
-- **Enhanced HTTP/2 support**: Better connection handling for faster, more reliable downloads
-
-These improvements result in **~80% media download success** compared to basic HTTP methods (~10% success), meaning you'll actually get most of the images and videos from your saved posts.
 
 ### Installation
 
@@ -1316,11 +1275,3 @@ Have an idea for improving Reddit Stash? Feel free to suggest it in the issues o
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-This means you are free to:
-- Use the software for commercial purposes
-- Modify the software
-- Distribute the software
-- Use the software privately
-
-With the condition that you include the original copyright notice and license in any copy of the software/source.

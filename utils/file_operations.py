@@ -71,7 +71,7 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
     
     # If the file is already logged or exists in the directory, skip saving
     if unique_key in existing_files:
-        return True  # Indicate that the file already exists and no saving was performed
+        return True, 0  # Indicate that the file already exists and no saving was performed, no media size
 
     # Ensure the subreddit directory exists only if we're about to save something new
     sub_dir = os.path.join(save_directory, subreddit_name)
@@ -81,9 +81,17 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
     
     # Proceed with saving the file
     try:
+        # Reset media size tracker before saving
+        from .save_utils import save_submission
+        if hasattr(save_submission, '_media_size_tracker'):
+            delattr(save_submission, '_media_size_tracker')
+
         with open(file_path, 'w', encoding="utf-8") as f:
             save_function(content, f, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
-        
+
+        # Get accumulated media size from the tracker
+        media_size = getattr(save_submission, '_media_size_tracker', 0)
+
         # Log the file after saving successfully with the unique key
         log_file(file_log, unique_key, {  # Use the unique_key constructed in save_to_file
             'subreddit': subreddit_name,
@@ -91,10 +99,10 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
             'file_path': file_path  # This will be converted to relative in log_file
         }, save_directory)
 
-        return False  # Indicate that the file was saved successfully
+        return False, media_size  # Indicate that the file was saved successfully and return media size
     except Exception as e:
         print(f"Failed to save {file_path}: {e}")
-        return False  # Indicate that the file could not be saved
+        return False, 0  # Indicate that the file could not be saved, no media size
 
 def handle_dynamic_sleep(item):
     """Handle dynamic sleep based on the type of Reddit item."""
@@ -183,13 +191,14 @@ def save_self_user_activity(submissions, comments, save_directory, existing_file
     """Save all user posts and comments."""
     for submission in tqdm(submissions, desc="Processing Users Submissions"):
         file_path = os.path.join(save_directory, submission.subreddit.display_name, f"POST_{submission.id}.md")
-        save_result = save_to_file(submission, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
+        save_result, media_size = save_to_file(submission, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
         if save_result:
             skipped_count += 1
             continue
 
         # Only count file size if file was actually saved successfully
         processed_count += 1
+        total_media_size += media_size  # Add media size from downloads
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
@@ -200,13 +209,14 @@ def save_self_user_activity(submissions, comments, save_directory, existing_file
 
     for comment in tqdm(comments, desc="Processing Users Comments"):
         file_path = os.path.join(save_directory, comment.subreddit.display_name, f"COMMENT_{comment.id}.md")
-        save_result = save_to_file(comment, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
+        save_result, media_size = save_to_file(comment, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
         if save_result:
             skipped_count += 1
             continue
 
         # Only count file size if file was actually saved successfully
         processed_count += 1
+        total_media_size += media_size  # Add media size from downloads
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
@@ -222,19 +232,20 @@ def save_saved_user_activity(saved_items, save_directory, existing_files, create
     for item in tqdm(saved_items, desc="Processing Saved Items"):
         if isinstance(item, Submission):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_POST_{item.id}.md")
-            save_result = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
+            save_result, media_size = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
             if save_result:
                 skipped_count += 1
                 continue
         elif isinstance(item, Comment):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_COMMENT_{item.id}.md")
-            save_result = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
+            save_result, media_size = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
             if save_result:
                 skipped_count += 1
                 continue
 
         # Only count file size if file was actually saved successfully
         processed_count += 1
+        total_media_size += media_size  # Add media size from downloads
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
@@ -250,19 +261,20 @@ def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_file
     for item in tqdm(upvoted_items, desc="Processing Upvoted Items"):
         if isinstance(item, Submission):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_POST_{item.id}.md")
-            save_result = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
+            save_result, media_size = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
             if save_result:
                 skipped_count += 1
                 continue
         elif isinstance(item, Comment):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_COMMENT_{item.id}.md")
-            save_result = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
+            save_result, media_size = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
             if save_result:
                 skipped_count += 1
                 continue
 
         # Only count file size if file was actually saved successfully
         processed_count += 1
+        total_media_size += media_size  # Add media size from downloads
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
