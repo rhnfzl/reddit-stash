@@ -422,6 +422,45 @@ def setup_default_rate_limiters() -> None:
     )
     rate_limit_manager.register_service('generic', generic_config)
 
+    # Content Recovery Services Rate Limits
+
+    # Wayback Machine - no hard limits but be respectful
+    wayback_config = RateLimitConfig(
+        max_requests_per_minute=60,  # Be gentle but reasonable
+        burst_capacity=5,
+        adaptive_scaling=True,
+        retry_after_seconds=30
+    )
+    rate_limit_manager.register_service('wayback_machine', wayback_config)
+
+    # PullPush.io - strict rate limits (15 req/min soft, 30 req/min hard)
+    pullpush_config = RateLimitConfig(
+        max_requests_per_minute=12,  # Stay well under 15 req/min soft limit
+        burst_capacity=3,
+        adaptive_scaling=True,
+        retry_after_seconds=300,  # 5 minutes backoff if rate limited
+        backoff_multiplier=3.0  # Aggressive backoff for strict API
+    )
+    rate_limit_manager.register_service('pullpush_io', pullpush_config)
+
+    # Reddit Previews - subject to Reddit rate limiting
+    reddit_previews_config = RateLimitConfig(
+        max_requests_per_minute=30,  # Conservative for Reddit services
+        burst_capacity=5,
+        adaptive_scaling=True,
+        retry_after_seconds=60
+    )
+    rate_limit_manager.register_service('reddit_previews', reddit_previews_config)
+
+    # Reveddit - no specific limits documented, be conservative
+    reveddit_config = RateLimitConfig(
+        max_requests_per_minute=20,  # Conservative approach
+        burst_capacity=3,
+        adaptive_scaling=True,
+        retry_after_seconds=60
+    )
+    rate_limit_manager.register_service('reveddit', reveddit_config)
+
 
 # Initialize default rate limiters on module load
 setup_default_rate_limiters()

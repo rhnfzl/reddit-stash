@@ -149,7 +149,7 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
         # Save all upvoted posts and comments
         processed_count, skipped_count, total_size, total_media_size = save_upvoted_posts_and_comments(
             list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
+            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
     
     elif save_type == 'SAVED':
@@ -183,22 +183,36 @@ def save_self_user_activity(submissions, comments, save_directory, existing_file
     """Save all user posts and comments."""
     for submission in tqdm(submissions, desc="Processing Users Submissions"):
         file_path = os.path.join(save_directory, submission.subreddit.display_name, f"POST_{submission.id}.md")
-        if save_to_file(submission, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
+        save_result = save_to_file(submission, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
+        if save_result:
             skipped_count += 1
             continue
 
+        # Only count file size if file was actually saved successfully
         processed_count += 1
-        total_size += os.path.getsize(file_path)
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            # File doesn't exist or can't be accessed, skip size calculation
+            pass
         handle_dynamic_sleep(submission)  # Call the refactored sleep function
 
     for comment in tqdm(comments, desc="Processing Users Comments"):
         file_path = os.path.join(save_directory, comment.subreddit.display_name, f"COMMENT_{comment.id}.md")
-        if save_to_file(comment, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
+        save_result = save_to_file(comment, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
+        if save_result:
             skipped_count += 1
             continue
 
+        # Only count file size if file was actually saved successfully
         processed_count += 1
-        total_size += os.path.getsize(file_path)
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            # File doesn't exist or can't be accessed, skip size calculation
+            pass
         handle_dynamic_sleep(comment)  # Call the refactored sleep function
 
     return processed_count, skipped_count, total_size, total_media_size
@@ -208,17 +222,25 @@ def save_saved_user_activity(saved_items, save_directory, existing_files, create
     for item in tqdm(saved_items, desc="Processing Saved Items"):
         if isinstance(item, Submission):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_POST_{item.id}.md")
-            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors):
+            save_result = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
+            if save_result:
                 skipped_count += 1
                 continue
         elif isinstance(item, Comment):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_COMMENT_{item.id}.md")
-            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors):
+            save_result = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
+            if save_result:
                 skipped_count += 1
                 continue
 
+        # Only count file size if file was actually saved successfully
         processed_count += 1
-        total_size += os.path.getsize(file_path)
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            # File doesn't exist or can't be accessed, skip size calculation
+            pass
         handle_dynamic_sleep(item)
 
     return processed_count, skipped_count, total_size, total_media_size
@@ -228,17 +250,25 @@ def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_file
     for item in tqdm(upvoted_items, desc="Processing Upvoted Items"):
         if isinstance(item, Submission):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_POST_{item.id}.md")
-            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
+            save_result = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
+            if save_result:
                 skipped_count += 1
                 continue
         elif isinstance(item, Comment):
             file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_COMMENT_{item.id}.md")
-            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
+            save_result = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors)
+            if save_result:
                 skipped_count += 1
                 continue
 
+        # Only count file size if file was actually saved successfully
         processed_count += 1
-        total_size += os.path.getsize(file_path)
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            # File doesn't exist or can't be accessed, skip size calculation
+            pass
         handle_dynamic_sleep(item)
 
     return processed_count, skipped_count, total_size, total_media_size
