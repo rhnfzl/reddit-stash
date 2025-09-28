@@ -63,6 +63,15 @@ class MediaDownloadManager:
 
             # Initialize Imgur downloader
             self._imgur_downloader = ImgurMediaDownloader()
+
+            # Configure Imgur API credentials if available
+            imgur_client_id = os.getenv('IMGUR_CLIENT_ID')
+            if imgur_client_id:
+                self._logger.info("Configuring Imgur API authentication (12,500 req/day limit)")
+                self._imgur_downloader.set_client_credentials([imgur_client_id])
+            else:
+                self._logger.warning("No IMGUR_CLIENT_ID found - using IP-based limits (500 req/hour)")
+
             rate_limit_manager.register_service_from_config(
                 'imgur',
                 self._imgur_downloader.config

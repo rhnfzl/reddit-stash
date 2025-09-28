@@ -37,7 +37,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
         if config is None:
             config = ServiceConfig(
                 name="Imgur",
-                rate_limit_per_minute=8,  # Imgur allows ~8 requests/minute
+                rate_limit_per_minute=4,  # Conservative rate for IP limits (240/hour leaves 260 buffer)
                 timeout_seconds=90,  # Increased to handle rate limiting delays
                 max_file_size=209715200,  # 200MB default
                 user_agent="Reddit Stash Media Downloader/1.0"
