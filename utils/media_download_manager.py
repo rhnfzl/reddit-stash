@@ -19,7 +19,7 @@ from .rate_limiter import rate_limit_manager
 from .error_isolation import get_service_manager
 from .feature_flags import get_media_config
 from .retry_queue import get_retry_queue
-from .content_recovery import ContentRecoveryService
+from .content_recovery.recovery_service import ContentRecoveryService
 
 
 class MediaDownloadManager:
@@ -40,6 +40,9 @@ class MediaDownloadManager:
 
         # Session-level blacklist to prevent retry loops
         self._failed_urls = set()
+
+        # Session-level URL tracking to prevent duplicate downloads
+        self._downloaded_urls = {}  # {url: local_path}
 
         # Persistent retry queue for cross-run recovery
         self._retry_queue = get_retry_queue()
@@ -128,6 +131,17 @@ class MediaDownloadManager:
             self._logger.debug(f"Skipping blacklisted URL (failed earlier in session): {url}")
             return None
 
+        # Check if URL was already downloaded in this session
+        if url in self._downloaded_urls:
+            existing_path = self._downloaded_urls[url]
+            if os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
+                self._logger.debug(f"URL already downloaded in this session: {url} -> {existing_path}")
+                return existing_path
+            else:
+                # File no longer exists or is empty, remove from cache and re-download
+                self._logger.debug(f"Cached file no longer valid, re-downloading: {url}")
+                del self._downloaded_urls[url]
+
         try:
             # Determine appropriate service for URL
             service_name, downloader = self._get_service_for_url(url)
@@ -148,6 +162,8 @@ class MediaDownloadManager:
 
             if result and result.is_success and result.local_path:
                 self._logger.debug(f"Successfully downloaded {url} to {result.local_path}")
+                # Track this URL as successfully downloaded in this session
+                self._downloaded_urls[url] = result.local_path
                 # Mark as successful in retry queue if it was a retry
                 self._retry_queue.mark_retry_completed(url, success=True)
                 return result.local_path
@@ -167,6 +183,9 @@ class MediaDownloadManager:
                             recovery_download_result = downloader.download(recovery_result.recovered_url, save_path)
                             if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                 self._logger.info(f"Successfully downloaded from recovered URL: {recovery_result.recovered_url}")
+                                # Track both original and recovered URLs as successfully downloaded
+                                self._downloaded_urls[url] = recovery_download_result.local_path
+                                self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
                                 # Mark original URL as successful in retry queue (recovery counts as success)
                                 self._retry_queue.mark_retry_completed(url, success=True)
                                 return recovery_download_result.local_path
@@ -201,6 +220,9 @@ class MediaDownloadManager:
                             recovery_download_result = downloader.download(recovery_result.recovered_url, save_path)
                             if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                 self._logger.info(f"Successfully downloaded from recovered URL after exception: {recovery_result.recovered_url}")
+                                # Track both original and recovered URLs as successfully downloaded
+                                self._downloaded_urls[url] = recovery_download_result.local_path
+                                self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
                                 # Mark original URL as successful in retry queue (recovery counts as success)
                                 self._retry_queue.mark_retry_completed(url, success=True)
                                 return recovery_download_result.local_path

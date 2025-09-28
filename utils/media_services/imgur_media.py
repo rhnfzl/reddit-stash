@@ -327,12 +327,104 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             )
 
         except Exception as e:
-            if "rate limit" in str(e).lower():
+            error_str = str(e).lower()
+
+            # Handle rate limiting
+            if "rate limit" in error_str:
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
                     error_message="Imgur rate limit exceeded",
                     retry_after=60
                 )
+
+            # Handle "file already exists" - this could be a valid existing file
+            elif "already exists" in error_str or "file exists" in error_str:
+                # Check potential file paths for existing valid files
+                save_dir = os.path.dirname(save_path)
+                base_name = os.path.basename(save_path)
+
+                # Generate possible file paths
+                potential_paths = [
+                    save_path,  # Original path
+                    os.path.join(save_dir, base_name + '.jpeg'),  # With .jpeg extension
+                    os.path.join(save_dir, base_name + '.jpg'),   # With .jpg extension
+                ]
+
+                # If base_name already has extension, try without it too
+                if '.' in base_name:
+                    name_without_ext = base_name.rsplit('.', 1)[0]
+                    potential_paths.extend([
+                        os.path.join(save_dir, name_without_ext + '.jpeg'),
+                        os.path.join(save_dir, name_without_ext + '.jpg'),
+                        os.path.join(save_dir, name_without_ext + '.png'),
+                        os.path.join(save_dir, name_without_ext + '.gif')
+                    ])
+
+                # Check for valid existing file
+                for check_path in potential_paths:
+                    if os.path.exists(check_path) and os.path.getsize(check_path) > 0:
+                        # Found valid existing file - return success
+                        file_size = os.path.getsize(check_path)
+
+                        # Create metadata for existing file
+                        metadata = MediaMetadata(
+                            url=image.link,
+                            media_type=MediaType.IMAGE,
+                            file_size=file_size,
+                            width=getattr(image, 'width', None),
+                            height=getattr(image, 'height', None),
+                            format=getattr(image, 'type', None),
+                            title=getattr(image, 'title', None)
+                        )
+
+                        return DownloadResult(
+                            status=DownloadStatus.SUCCESS,
+                            local_path=check_path,
+                            metadata=metadata,
+                            bytes_downloaded=file_size
+                        )
+
+                # No valid existing file found, try with overwrite
+                try:
+                    filename = image.download(path=os.path.dirname(save_path),
+                                            name=os.path.basename(save_path),
+                                            overwrite=True)
+
+                    # Get file size
+                    file_size = os.path.getsize(filename) if os.path.exists(filename) else 0
+
+                    # Create metadata
+                    metadata = MediaMetadata(
+                        url=image.link,
+                        media_type=MediaType.IMAGE,
+                        file_size=file_size,
+                        width=getattr(image, 'width', None),
+                        height=getattr(image, 'height', None),
+                        format=getattr(image, 'type', None),
+                        title=getattr(image, 'title', None)
+                    )
+
+                    return DownloadResult(
+                        status=DownloadStatus.SUCCESS,
+                        local_path=filename,
+                        metadata=metadata,
+                        bytes_downloaded=file_size
+                    )
+
+                except Exception as retry_e:
+                    return DownloadResult(
+                        status=DownloadStatus.FAILED,
+                        error_message=f"PyImgur download failed even with overwrite: {str(retry_e)}"
+                    )
+
+            # Handle deleted/not found content
+            elif any(phrase in error_str for phrase in ["does not exist", "not found", "404", "resource does not exist"]):
+                return DownloadResult(
+                    status=DownloadStatus.NOT_FOUND,
+                    error_message="Imgur content deleted or not found"
+                )
+
+            # Generic error handling
             else:
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
