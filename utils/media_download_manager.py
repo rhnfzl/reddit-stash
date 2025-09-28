@@ -19,6 +19,7 @@ from .rate_limiter import rate_limit_manager
 from .error_isolation import get_service_manager
 from .feature_flags import get_media_config
 from .retry_queue import get_retry_queue
+from .content_recovery import ContentRecoveryService
 
 
 class MediaDownloadManager:
@@ -43,6 +44,9 @@ class MediaDownloadManager:
         # Persistent retry queue for cross-run recovery
         self._retry_queue = get_retry_queue()
 
+        # Content recovery service for failed downloads
+        self._recovery_service = ContentRecoveryService(config=self._media_config)
+
         # Initialize services if media downloads are enabled
         if self._media_config.is_images_enabled():
             self._initialize_services()
@@ -63,6 +67,16 @@ class MediaDownloadManager:
                 'imgur',
                 self._imgur_downloader.config
             )
+
+            # Configure circuit breaker for Imgur with longer timeout to handle rate limiting delays
+            from .error_isolation import CircuitBreakerConfig
+            imgur_circuit_config = CircuitBreakerConfig(
+                failure_threshold=5,
+                recovery_timeout=60.0,
+                success_threshold=3,
+                timeout=90.0  # Increased from 30s to 90s for Imgur rate limiting
+            )
+            self._service_manager.register_service('imgur', imgur_circuit_config)
 
             # Initialize generic HTTP downloader
             from .service_abstractions import ServiceConfig
@@ -131,6 +145,30 @@ class MediaDownloadManager:
             else:
                 error_msg = result.error_message if result else "Unknown error"
                 self._logger.warning(f"Failed to download {url}: {error_msg}")
+
+                # Attempt content recovery before blacklisting
+                if self._recovery_service.is_enabled():
+                    self._logger.info(f"Attempting content recovery for failed URL: {url}")
+                    recovery_result = self._recovery_service.attempt_recovery(url, error_msg)
+
+                    if recovery_result.success and recovery_result.recovered_url:
+                        self._logger.info(f"Recovery successful! Using recovered URL: {recovery_result.recovered_url}")
+                        # Try downloading from the recovered URL
+                        try:
+                            recovery_download_result = downloader.download(recovery_result.recovered_url, save_path)
+                            if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
+                                self._logger.info(f"Successfully downloaded from recovered URL: {recovery_result.recovered_url}")
+                                # Mark original URL as successful in retry queue (recovery counts as success)
+                                self._retry_queue.mark_retry_completed(url, success=True)
+                                return recovery_download_result.local_path
+                            else:
+                                recovery_error = recovery_download_result.error_message if recovery_download_result else "Unknown recovery download error"
+                                self._logger.warning(f"Failed to download from recovered URL: {recovery_error}")
+                        except Exception as e:
+                            self._logger.warning(f"Exception downloading from recovered URL: {e}")
+                    else:
+                        self._logger.debug(f"Content recovery failed: {recovery_result.error_message}")
+
                 # Add to session blacklist to prevent retry loops
                 self._failed_urls.add(url)
                 # Add to persistent retry queue for cross-run recovery
@@ -139,6 +177,27 @@ class MediaDownloadManager:
 
         except Exception as e:
             self._logger.error(f"Exception during media download from {url}: {e}")
+
+            # Attempt content recovery before blacklisting
+            if self._recovery_service.is_enabled():
+                self._logger.info(f"Attempting content recovery after exception for URL: {url}")
+                try:
+                    recovery_result = self._recovery_service.attempt_recovery(url, str(e))
+
+                    if recovery_result.success and recovery_result.recovered_url:
+                        self._logger.info(f"Recovery successful after exception! Using recovered URL: {recovery_result.recovered_url}")
+                        # Try downloading from the recovered URL
+                        downloader = self._get_service_for_url(recovery_result.recovered_url)[1]
+                        if downloader:
+                            recovery_download_result = downloader.download(recovery_result.recovered_url, save_path)
+                            if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
+                                self._logger.info(f"Successfully downloaded from recovered URL after exception: {recovery_result.recovered_url}")
+                                # Mark original URL as successful in retry queue (recovery counts as success)
+                                self._retry_queue.mark_retry_completed(url, success=True)
+                                return recovery_download_result.local_path
+                except Exception as recovery_e:
+                    self._logger.warning(f"Recovery attempt also failed: {recovery_e}")
+
             # Add to session blacklist to prevent retry loops
             self._failed_urls.add(url)
             # Add to persistent retry queue for cross-run recovery
