@@ -277,18 +277,29 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             return None
 
     def _download_single_image(self, imgur_id: str, save_path: str, original_url: str) -> DownloadResult:
-        """Download a single Imgur image."""
+        """Download a single Imgur image using three-tier fallback system."""
         try:
-            # Try PyImgur first if available
+            # Tier 1: Try PyImgur first if available
             if self._pyimgur_client:
-                return self._download_image_pyimgur(imgur_id, save_path)
-            else:
-                return self._download_image_direct(imgur_id, save_path, original_url)
+                result = self._download_image_pyimgur(imgur_id, save_path)
+                if result.status != DownloadStatus.FAILED:
+                    return result
+                self._logger.debug(f"PyImgur failed for {imgur_id}, trying API fallback: {result.error_message}")
+
+            # Tier 2: Try direct Imgur API v3 if we have client IDs
+            if self._client_ids:
+                result = self._download_image_via_api(imgur_id, save_path)
+                if result.status != DownloadStatus.FAILED:
+                    return result
+                self._logger.debug(f"Imgur API failed for {imgur_id}, trying direct fallback: {result.error_message}")
+
+            # Tier 3: Final fallback to direct HTTP download
+            return self._download_image_direct(imgur_id, save_path, original_url)
 
         except Exception as e:
             return DownloadResult(
                 status=DownloadStatus.FAILED,
-                error_message=f"Single image download failed: {str(e)}"
+                error_message=f"All download methods failed: {str(e)}"
             )
 
     def _download_image_pyimgur(self, imgur_id: str, save_path: str) -> DownloadResult:
@@ -429,6 +440,106 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
                     error_message=f"PyImgur download failed: {str(e)}"
+                )
+
+    def _download_image_via_api(self, imgur_id: str, save_path: str) -> DownloadResult:
+        """Download image using direct Imgur API v3 calls."""
+        try:
+            # Check if we have client IDs for API access
+            if not self._client_ids:
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message="No Imgur client IDs available for API access"
+                )
+
+            self._respect_rate_limit()
+
+            # Use current client ID with rotation
+            client_id = self._get_current_client_id()
+            headers = {
+                'Authorization': f'Client-ID {client_id}',
+                'User-Agent': self.config.user_agent
+            }
+
+            # Get image metadata from API
+            api_url = f'https://api.imgur.com/3/image/{imgur_id}'
+            response = self._session.get(api_url, headers=headers, timeout=(5.0, 10.0))
+
+            if response.status_code == 429:
+                # Rate limited, try next client ID
+                self._rotate_client_id()
+                return DownloadResult(
+                    status=DownloadStatus.RATE_LIMITED,
+                    error_message="Imgur API rate limit exceeded",
+                    retry_after=60
+                )
+
+            if response.status_code == 404:
+                return DownloadResult(
+                    status=DownloadStatus.NOT_FOUND,
+                    error_message="Image not found via Imgur API"
+                )
+
+            response.raise_for_status()
+            data = response.json()
+
+            if not data.get('success') or not data.get('data'):
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message="Invalid response from Imgur API"
+                )
+
+            image_data = data['data']
+            image_url = image_data.get('link')
+
+            if not image_url:
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message="No image URL in Imgur API response"
+                )
+
+            # Download the actual image file
+            download_result = self.download_file(image_url, save_path)
+
+            # Enhance result with API metadata if download was successful
+            if download_result.is_success and download_result.metadata:
+                enhanced_metadata = MediaMetadata(
+                    url=image_url,
+                    media_type=download_result.metadata.media_type,
+                    file_size=download_result.metadata.file_size,
+                    width=image_data.get('width'),
+                    height=image_data.get('height'),
+                    format=image_data.get('type'),
+                    title=image_data.get('title'),
+                    description=image_data.get('description')
+                )
+                return DownloadResult(
+                    status=download_result.status,
+                    local_path=download_result.local_path,
+                    metadata=enhanced_metadata,
+                    bytes_downloaded=download_result.bytes_downloaded,
+                    download_time=download_result.download_time
+                )
+
+            return download_result
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "rate limit" in error_str:
+                return DownloadResult(
+                    status=DownloadStatus.RATE_LIMITED,
+                    error_message="Imgur API rate limit exceeded",
+                    retry_after=60
+                )
+            elif "not found" in error_str or "404" in error_str:
+                return DownloadResult(
+                    status=DownloadStatus.NOT_FOUND,
+                    error_message="Image not found via Imgur API"
+                )
+            else:
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message=f"Imgur API download failed: {str(e)}"
                 )
 
     def _download_image_direct(self, imgur_id: str, save_path: str, original_url: str) -> DownloadResult:
