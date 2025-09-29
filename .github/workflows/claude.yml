@@ -30,6 +30,16 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt || pip install -r requirements-minimal.txt
+
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@v1
@@ -40,11 +50,110 @@ jobs:
           additional_permissions: |
             actions: read
 
-          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
-          # prompt: 'Update the pull request description to include a summary of changes.'
+          # Custom prompt with Reddit Stash project context
+          prompt: |
+            You are assisting with Reddit Stash, a Python application for backing up Reddit content.
 
-          # Optional: Add claude_args to customize behavior and configuration
+            ## Project Overview
+            - **Purpose**: Backs up saved posts, comments, user activity from Reddit to local storage or Dropbox
+            - **Python Version**: 3.10+ (3.12 recommended)
+            - **Core Features**: Reddit API via PRAW, 4-provider content recovery cascade, media download system, Dropbox sync
+            - **Architecture**: SQLite databases for caching/retry queue, comprehensive rate limiting, URL preprocessing
+
+            ## Key Components
+            - **Main Script**: reddit_stash.py - Primary application entry point
+            - **Dropbox Utils**: dropbox_utils.py --download/--upload - Cloud sync operations
+            - **Media System**: utils/media_download_manager.py with service-specific handlers
+            - **Recovery System**: utils/content_recovery/ with 4 provider cascade
+            - **Security**: utils/url_security.py, utils/path_security.py for validation
+            - **Cleanup Scripts**: cleanup_corrupt_images.py, fix_double_extensions.py
+
+            ## Testing & Diagnostics
+            - **Recovery Tests**: python tests/run_recovery_tests.py -v
+            - **File Logs**: reddit/file_log.json tracks processed items
+            - **SQLite DBs**: .recovery_cache.db, .retry_queue.db
+            - **Configuration**: settings.ini + environment variables
+
+            ## Common Operations
+            ```bash
+            # Run main application
+            python reddit_stash.py
+
+            # Test content recovery
+            python tests/run_recovery_tests.py -v
+
+            # Fix corrupt images
+            python cleanup_corrupt_images.py --fix
+
+            # Dropbox operations
+            python dropbox_utils.py --download
+            python dropbox_utils.py --upload
+            ```
+
+            ## Essential Knowledge & Troubleshooting
+
+            ### File Organization
+            ```
+            reddit/
+            ├── r_SubredditName/
+            │   ├── POST_{id}.md / SAVED_POST_{id}.md / UPVOTE_POST_{id}.md
+            │   ├── COMMENT_{id}.md / SAVED_COMMENT_{id}.md / UPVOTE_COMMENT_{id}.md
+            │   ├── GDPR_POST_{id}.md / GDPR_COMMENT_{id}.md
+            │   └── [id]_media.* (downloaded images/videos)
+            ├── .recovery_cache.db (recovery system cache)
+            ├── .retry_queue.db (persistent retry queue)
+            └── file_log.json (processed items tracking)
+            ```
+
+            ### Rate Limiting (CRITICAL - API bans if violated)
+            - **Reddit API**: 100 req/min via PRAW (built-in)
+            - **Imgur**: 4 req/min (240/hour with safety buffer)
+            - **PullPush.io**: 12 req/min (under 15 soft limit)
+            - **Wayback Machine**: 60 req/min
+            - **Generic HTTP**: 30 req/min
+            - Token bucket with jitter, respect Retry-After headers
+
+            ### Common Issues & Solutions
+            - **Reddit images as HTML**: Check Accept headers, fixed in base_downloader.py
+            - **Double extensions (.jpg.jpg)**: PyImgur bug, fixed in imgur_media.py
+            - **GitHub HTML downloads**: URL preprocessing transforms blob→raw URLs
+            - **404 errors**: Content recovery cascade auto-activates
+            - **Disk space**: 20% safety margin validation
+            - **SQLite locks**: WAL mode enabled, proper connection handling
+
+            ### Environment Variables
+            ```bash
+            # Required (Reddit API)
+            REDDIT_CLIENT_ID="your_client_id"
+            REDDIT_CLIENT_SECRET="your_client_secret"
+            REDDIT_USERNAME="your_username"
+            REDDIT_PASSWORD="your_password:123456"  # Include 2FA if enabled
+
+            # Optional (Enhanced Features)
+            DROPBOX_APP_KEY="your_app_key"
+            DROPBOX_APP_SECRET="your_app_secret"
+            DROPBOX_REFRESH_TOKEN="your_refresh_token"
+            IMGUR_CLIENT_ID="your_imgur_client_id"
+            ```
+
+            ### settings.ini Key Options
+            - `save_type`: ALL/SAVED/ACTIVITY/UPVOTED
+            - `check_type`: LOG (file_log.json) / DIR (file existence)
+            - `unsave_after_download`: true/false (bypasses 1000-item limit)
+            - `process_gdpr`: true/false (CSV exports)
+            - `process_api`: true/false (Reddit API)
+
+            ## Important Considerations
+            1. **Rate Limits**: Respect API limits (Reddit: 100/min, Imgur: 4/min, PullPush: 12/min)
+            2. **Security**: Never expose API credentials, validate all URLs and paths
+            3. **Error Handling**: Graceful handling of 404s, network issues, disk space
+            4. **Media Downloads**: Check for HTML wrappers, double extensions, URL preprocessing
+            5. **Database Operations**: Use WAL mode, proper indexing, connection pooling
+
+            Now, please help with the user's request: ${{ github.event.comment.body || github.event.issue.body || github.event.review.body }}
+
+          # Claude configuration with expanded tool permissions for Reddit Stash operations
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://docs.claude.com/en/docs/claude-code/sdk#command-line for available options
-          # claude_args: '--model claude-opus-4-1-20250805 --allowed-tools Bash(gh pr:*)'
+          claude_args: '--allowed-tools "Bash(gh:*),Bash(python:*),Bash(python3:*),Bash(pip:*),Bash(sqlite3:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(find:*),Bash(ruff:*),Bash(docker:*),Bash(curl:*),Bash(head:*),Bash(tail:*),Bash(wc:*)" --max-turns 25'
 

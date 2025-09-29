@@ -1,10 +1,15 @@
 import os
+import logging
 import pandas as pd
 from tqdm import tqdm
 from utils.file_operations import save_to_file
 from utils.save_utils import save_submission, save_comment_and_context
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
+from utils.path_security import create_reddit_file_path
+
+
+logger = logging.getLogger(__name__)
 
 def get_gdpr_directory(save_directory):
     """Return the path to the GDPR data directory."""
@@ -37,9 +42,16 @@ def process_gdpr_export(reddit, save_directory, existing_files, created_dirs_cac
             try:
                 # Get full submission data using the ID
                 submission = reddit.submission(id=row['id'])
-                file_path = os.path.join(save_directory, 
-                                       submission.subreddit.display_name, 
-                                       f"GDPR_POST_{submission.id}.md")
+                # Use secure path creation to prevent directory traversal
+                path_result = create_reddit_file_path(
+                    save_directory, submission.subreddit.display_name, "GDPR_POST", submission.id
+                )
+                if not path_result.is_safe:
+                    logger.error(f"Unsafe path for GDPR submission {submission.id}: {path_result.issues}")
+                    skipped_count += 1
+                    continue
+
+                file_path = path_result.safe_path
                 
                 # Use existing save_to_file function
                 if save_to_file(submission, file_path, save_submission,
@@ -66,9 +78,16 @@ def process_gdpr_export(reddit, save_directory, existing_files, created_dirs_cac
             try:
                 # Get full comment data using the ID
                 comment = reddit.comment(id=row['id'])
-                file_path = os.path.join(save_directory, 
-                                       comment.subreddit.display_name, 
-                                       f"GDPR_COMMENT_{comment.id}.md")
+                # Use secure path creation to prevent directory traversal
+                path_result = create_reddit_file_path(
+                    save_directory, comment.subreddit.display_name, "GDPR_COMMENT", comment.id
+                )
+                if not path_result.is_safe:
+                    logger.error(f"Unsafe path for GDPR comment {comment.id}: {path_result.issues}")
+                    skipped_count += 1
+                    continue
+
+                file_path = path_result.safe_path
                 
                 # Use existing save_to_file function
                 if save_to_file(comment, file_path, save_comment_and_context,

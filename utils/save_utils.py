@@ -19,7 +19,45 @@ def extract_video_id(url):
     return None
 
 def download_image(image_url, save_directory, submission_id, ignore_tls_errors=None):
-    """Download an image from the given URL and save it locally."""
+    """Download an image from the given URL and save it locally using the sophisticated media download system.
+
+    Returns:
+        tuple: (file_path, file_size) if successful, (None, 0) if failed
+    """
+    try:
+        # Import the new media download manager
+        from .media_download_manager import download_media_file
+
+        # Use the new media download system which includes:
+        # - Proper Imgur API integration with rate limiting
+        # - Reddit media handling (i.redd.it, v.redd.it)
+        # - Circuit breaker protection and retry logic
+        # - Service-specific error isolation
+        result_path = download_media_file(image_url, save_directory, submission_id)
+
+        if result_path:
+            # Get file size for storage tracking
+            try:
+                file_size = os.path.getsize(result_path)
+                return result_path, file_size
+            except OSError:
+                return result_path, 0
+        else:
+            # No fallback - respect rate limiting and service protection
+            return None, 0
+
+    except Exception as e:
+        print(f"Failed to download image from {image_url}: {e}")
+        # No fallback - respect rate limiting and service protection
+        return None, 0
+
+
+def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
+    """Fallback to the original download method for backward compatibility.
+
+    Returns:
+        tuple: (file_path, file_size) if successful, (None, 0) if failed
+    """
     try:
         # Load ignore_tls_errors setting if not provided
         if ignore_tls_errors is None:
@@ -34,23 +72,29 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
 
         response = requests.get(image_url, **request_kwargs)
         response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
-        
+
         # Determine the image extension from the URL
         extension = os.path.splitext(image_url)[1]
         if extension.lower() not in ['.jpg', '.jpeg', '.png', '.gif']:
             extension = '.jpg'  # Default to .jpg if the extension is unusual
-        
+
         # Save the image with a unique name
         image_filename = f"{submission_id}{extension}"
         image_path = os.path.join(save_directory, image_filename)
-        
+
         with open(image_path, 'wb') as f:
             f.write(response.content)
-        
-        return image_path
+
+        # Get file size for storage tracking
+        try:
+            file_size = os.path.getsize(image_path)
+            return image_path, file_size
+        except OSError:
+            return image_path, 0
+
     except Exception as e:
-        print(f"Failed to download image from {image_url}: {e}")
-        return None
+        print(f"Fallback download failed for {image_url}: {e}")
+        return None, 0
 
 def save_submission(submission, f, unsave=False, ignore_tls_errors=None):
     """Save a submission and its metadata, optionally unsaving it after."""
@@ -75,10 +119,14 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None):
         else:
             if submission.url.endswith(('.jpg', '.jpeg', '.png', '.gif')):
                 # Download and save the image locally
-                image_path = download_image(submission.url, os.path.dirname(f.name), submission.id, ignore_tls_errors)
+                image_path, image_size = download_image(submission.url, os.path.dirname(f.name), submission.id, ignore_tls_errors)
                 if image_path:
                     f.write(f"![Image]({image_path})\n")
                     f.write(f"**Original Image URL:** [Link]({submission.url})\n")
+                    # Store media size in a global variable for tracking (will be handled by file_operations.py)
+                    if not hasattr(save_submission, '_media_size_tracker'):
+                        save_submission._media_size_tracker = 0
+                    save_submission._media_size_tracker += image_size
                 else:
                     f.write(f"![Image]({submission.url})\n")  # Fallback to the URL if download fails
             elif "youtube.com" in submission.url or "youtu.be" in submission.url:
@@ -177,16 +225,27 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
 
             # Check for image URLs in the comment body
             if any(comment.body.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
-                image_url = comment.body.split()[-1]  # Assuming the URL is the last word in the comment
-                image_path = download_image(image_url, os.path.dirname(f.name), comment.id, ignore_tls_errors)
-                if image_path:
-                    # Apply blockquote formatting for nested images
-                    blockquote_prefix = "> " * max(1, depth) if depth > 0 else ""
-                    f.write(f'{blockquote_prefix}![Image]({image_path})\n')
-                    f.write(f'{blockquote_prefix}*Original Image URL: [Link]({image_url})*\n\n')
+                potential_url = comment.body.split()[-1]  # Get the last word in the comment
+                # Only proceed if it looks like a valid URL (has domain and protocol)
+                if potential_url.startswith(('http://', 'https://')) and '.' in potential_url:
+                    image_url = potential_url
                 else:
-                    blockquote_prefix = "> " * max(1, depth) if depth > 0 else ""
-                    f.write(f'{blockquote_prefix}![Image]({image_url})\n\n')
+                    image_url = None  # Skip if it's just a filename
+
+                if image_url:  # Only proceed if we have a valid URL
+                    image_path, image_size = download_image(image_url, os.path.dirname(f.name), comment.id, ignore_tls_errors)
+                    if image_path:
+                        # Apply blockquote formatting for nested images
+                        blockquote_prefix = "> " * max(1, depth) if depth > 0 else ""
+                        f.write(f'{blockquote_prefix}![Image]({image_path})\n')
+                        f.write(f'{blockquote_prefix}*Original Image URL: [Link]({image_url})*\n\n')
+                        # Store media size in a global variable for tracking
+                        if not hasattr(save_submission, '_media_size_tracker'):
+                            save_submission._media_size_tracker = 0
+                        save_submission._media_size_tracker += image_size
+                    else:
+                        blockquote_prefix = "> " * max(1, depth) if depth > 0 else ""
+                        f.write(f'{blockquote_prefix}![Image]({image_url})\n\n')
             else:
                 # Apply blockquote formatting for nested text content
                 lines = comment_body.split('\n')
