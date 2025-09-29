@@ -11,7 +11,7 @@ import logging
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
-from .service_abstractions import DownloadResult, DownloadStatus, MediaType
+from .service_abstractions import DownloadResult, DownloadStatus
 from .media_services.reddit_media import RedditMediaDownloader
 from .media_services.imgur_media import ImgurMediaDownloader
 from .media_services.base_downloader import BaseHTTPDownloader

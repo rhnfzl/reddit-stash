@@ -15,7 +15,7 @@ Usage:
 import re
 import logging
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 

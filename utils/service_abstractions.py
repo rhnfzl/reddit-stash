@@ -32,7 +32,7 @@ class DownloadStatus(Enum):
     INVALID_URL = "invalid_url"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class MediaMetadata:
     """Metadata for a media item."""
     url: str
@@ -46,7 +46,7 @@ class MediaMetadata:
     description: Optional[str] = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class DownloadResult:
     """
     Result of a download operation following the Result pattern.
@@ -78,7 +78,7 @@ class DownloadResult:
         return self.status in [DownloadStatus.FAILED, DownloadStatus.RATE_LIMITED]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ServiceConfig:
     """Configuration for a media service."""
     name: str
@@ -88,6 +88,12 @@ class ServiceConfig:
     timeout_seconds: int = 15
     max_file_size: int = 52428800  # 50MB default
     user_agent: str = "Reddit Stash Media Downloader"
+    # Security enhancements (2024-2025 best practices)
+    max_redirects: int = 5
+    connect_timeout: float = 5.0
+    read_timeout: float = 15.0
+    allowed_content_types: Optional[List[str]] = None  # None = allow all, [] = none, [list] = specific types
+    verify_ssl: bool = True
 
 
 @runtime_checkable

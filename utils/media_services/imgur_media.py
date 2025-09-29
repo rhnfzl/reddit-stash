@@ -9,6 +9,7 @@ Implements web-researched best practices for 2024.
 
 import os
 import re
+import logging
 from typing import Optional, List
 from urllib.parse import urlparse
 
@@ -40,9 +41,18 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 rate_limit_per_minute=4,  # Conservative rate for IP limits (240/hour leaves 260 buffer)
                 timeout_seconds=90,  # Increased to handle rate limiting delays
                 max_file_size=209715200,  # 200MB default
-                user_agent="Reddit Stash Media Downloader/1.0"
+                user_agent="Reddit Stash Media Downloader/1.0",
+                # Security enhancements
+                max_redirects=3,  # Imgur rarely redirects more than once
+                connect_timeout=5.0,
+                read_timeout=90.0,  # Imgur can be slow due to rate limiting
+                allowed_content_types=['image/*', 'video/*'],  # Only allow media content
+                verify_ssl=True
             )
         super().__init__(config)
+
+        # Setup logging
+        self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
         # Try to import PyImgur, fall back to direct API if not available
         self._pyimgur_client = None
@@ -68,12 +78,12 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                     self._pyimgur_client = pyimgur.Imgur(client_ids[0], client_secret)
                     self._client_ids = client_ids
                 except Exception as e:
-                    print(f"Warning: Failed to initialize PyImgur client: {e}")
+                    self._logger.warning(f"Failed to initialize PyImgur client: {e}")
                     self._pyimgur_client = None
 
         except ImportError:
             self._pyimgur_available = False
-            print("Warning: PyImgur not available, using direct API calls only")
+            self._logger.info("PyImgur not available, using direct API calls only")
 
     def can_handle(self, url: str) -> bool:
         """Check if this service can handle the given URL."""
@@ -114,7 +124,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 return self._get_metadata_direct_api(imgur_id, media_type, url)
 
         except Exception as e:
-            print(f"Warning: Failed to get Imgur metadata for {url}: {e}")
+            self._logger.debug(f"Failed to get Imgur metadata for {url}: {e}")
             return MediaMetadata(
                 url=url,
                 media_type=MediaType.UNKNOWN,
@@ -213,7 +223,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 )
 
         except Exception as e:
-            print(f"Warning: PyImgur metadata extraction failed: {e}")
+            self._logger.debug(f"PyImgur metadata extraction failed: {e}")
             return None
 
     def _get_metadata_direct_api(self, imgur_id: str, media_type: str, original_url: str) -> Optional[MediaMetadata]:
@@ -241,7 +251,8 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             response = self._session.get(url, headers=headers, timeout=(5.0, 10.0))
 
             if response.status_code == 429:
-                # Rate limited, try next client ID
+                # Rate limited, try next client ID (expected behavior)
+                self._logger.debug("Imgur API rate limited (429) for metadata request, rotating client ID")
                 self._rotate_client_id()
                 return None
 
@@ -273,7 +284,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             return None
 
         except Exception as e:
-            print(f"Warning: Direct API metadata extraction failed: {e}")
+            self._logger.debug(f"Direct API metadata extraction failed: {e}")
             return None
 
     def _download_single_image(self, imgur_id: str, save_path: str, original_url: str) -> DownloadResult:
@@ -281,20 +292,44 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
         try:
             # Tier 1: Try PyImgur first if available
             if self._pyimgur_client:
+                self._logger.debug(f"Attempting PyImgur download for {imgur_id}")
                 result = self._download_image_pyimgur(imgur_id, save_path)
-                if result.status != DownloadStatus.FAILED:
+                if result.status == DownloadStatus.SUCCESS:
+                    self._logger.debug(f"PyImgur download successful for {imgur_id}")
                     return result
-                self._logger.debug(f"PyImgur failed for {imgur_id}, trying API fallback: {result.error_message}")
+                elif result.status == DownloadStatus.RATE_LIMITED:
+                    self._logger.debug(f"PyImgur rate limited for {imgur_id}, trying API fallback")
+                elif result.status == DownloadStatus.NOT_FOUND:
+                    self._logger.debug(f"PyImgur content not found for {imgur_id}: {result.error_message}")
+                    return result  # Don't retry for NOT_FOUND
+                else:
+                    self._logger.debug(f"PyImgur failed for {imgur_id}, trying API fallback: {result.error_message}")
 
             # Tier 2: Try direct Imgur API v3 if we have client IDs
             if self._client_ids:
+                self._logger.debug(f"Attempting Imgur API download for {imgur_id}")
                 result = self._download_image_via_api(imgur_id, save_path)
-                if result.status != DownloadStatus.FAILED:
+                if result.status == DownloadStatus.SUCCESS:
+                    self._logger.debug(f"Imgur API download successful for {imgur_id}")
                     return result
-                self._logger.debug(f"Imgur API failed for {imgur_id}, trying direct fallback: {result.error_message}")
+                elif result.status == DownloadStatus.RATE_LIMITED:
+                    self._logger.debug(f"Imgur API rate limited for {imgur_id}, trying direct fallback")
+                elif result.status == DownloadStatus.NOT_FOUND:
+                    self._logger.debug(f"Imgur API content not found for {imgur_id}: {result.error_message}")
+                    return result  # Don't retry for NOT_FOUND
+                else:
+                    self._logger.debug(f"Imgur API failed for {imgur_id}, trying direct fallback: {result.error_message}")
 
             # Tier 3: Final fallback to direct HTTP download
-            return self._download_image_direct(imgur_id, save_path, original_url)
+            self._logger.debug(f"Attempting direct download for {imgur_id}")
+            result = self._download_image_direct(imgur_id, save_path, original_url)
+
+            if result.status == DownloadStatus.SUCCESS:
+                self._logger.debug(f"Direct download successful for {imgur_id}")
+            else:
+                self._logger.warning(f"All download methods failed for {imgur_id}: {result.error_message}")
+
+            return result
 
         except Exception as e:
             return DownloadResult(
@@ -345,8 +380,9 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
         except Exception as e:
             error_str = str(e).lower()
 
-            # Handle rate limiting
+            # Handle rate limiting (expected behavior for Imgur)
             if "rate limit" in error_str:
+                self._logger.debug(f"PyImgur rate limit encountered for {imgur_id} (expected behavior)")
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
                     error_message="Imgur rate limit exceeded",
@@ -471,7 +507,8 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             response = self._session.get(api_url, headers=headers, timeout=(5.0, 10.0))
 
             if response.status_code == 429:
-                # Rate limited, try next client ID
+                # Rate limited, try next client ID (expected behavior)
+                self._logger.debug(f"Imgur API rate limited (429) for {imgur_id}, rotating client ID")
                 self._rotate_client_id()
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
@@ -531,6 +568,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
         except Exception as e:
             error_str = str(e).lower()
             if "rate limit" in error_str:
+                self._logger.debug(f"Imgur API rate limit in exception for {imgur_id} (expected behavior)")
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
                     error_message="Imgur API rate limit exceeded",
@@ -621,7 +659,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                         downloaded_files.append(downloaded_path)
 
                 except Exception as e:
-                    print(f"Warning: Failed to download album image {i+1}: {e}")
+                    self._logger.warning(f"Failed to download album image {i+1}/{len(album.images)}: {e}")
                     continue
 
             if downloaded_files:
@@ -675,6 +713,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             )
 
             if response.status_code == 429:
+                self._logger.debug(f"Imgur API rate limited (429) for album {album_id}, rotating client ID")
                 self._rotate_client_id()
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
@@ -717,7 +756,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                         total_downloaded += result.bytes_downloaded
                         downloaded_files.append(result.local_path)
                 except Exception as e:
-                    print(f"Warning: Failed to download album image {i+1}: {e}")
+                    self._logger.warning(f"Failed to download album image {i+1}/{len(images)}: {e}")
                     continue
 
             if downloaded_files:
@@ -760,8 +799,11 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
     def _rotate_client_id(self):
         """Rotate to next client ID to handle rate limits."""
         if len(self._client_ids) > 1:
+            old_index = self._current_client_index
             self._current_client_index = (self._current_client_index + 1) % len(self._client_ids)
-            print(f"Rotated to client ID {self._current_client_index + 1}")
+            self._logger.debug(f"Rotated from client ID {old_index + 1} to {self._current_client_index + 1} (of {len(self._client_ids)} total)")
+        else:
+            self._logger.debug("Rate limit encountered but only 1 client ID available, waiting for reset")
 
     def get_service_name(self) -> str:
         """Get the name of this service."""
@@ -792,9 +834,9 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 import pyimgur
                 client_secret = client_secrets[0] if client_secrets else None
                 self._pyimgur_client = pyimgur.Imgur(client_ids[0], client_secret)
-                print(f"PyImgur client initialized with {len(client_ids)} client ID(s)")
+                self._logger.info(f"PyImgur client initialized with {len(client_ids)} client ID(s)")
             except Exception as e:
-                print(f"Warning: Failed to initialize PyImgur with credentials: {e}")
+                self._logger.warning(f"Failed to initialize PyImgur with credentials: {e}")
                 self._pyimgur_client = None
 
     def _fix_double_extension(self, actual_filename: str, intended_filename: str) -> str:
@@ -815,7 +857,6 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             return actual_filename
 
         actual_base = os.path.basename(actual_filename)
-        intended_base = os.path.basename(intended_filename)
 
         # Check if we have a double extension pattern
         name_parts = actual_base.split('.')
@@ -828,7 +869,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
 
                 try:
                     os.rename(actual_filename, correct_path)
-                    self._logger.info(f"Fixed double extension: {actual_base} -> {correct_name}")
+                    self._logger.debug(f"Fixed double extension: {actual_base} -> {correct_name}")
                     return correct_path
                 except OSError as e:
                     self._logger.warning(f"Could not fix double extension for {actual_base}: {e}")

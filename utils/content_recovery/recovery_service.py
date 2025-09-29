@@ -7,7 +7,7 @@ managing multiple providers and implementing the recovery cascade strategy.
 
 import time
 import logging
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .recovery_metadata import (
@@ -334,7 +334,7 @@ class ContentRecoveryService:
                 old_timeout = getattr(provider, 'timeout', 10)
                 provider.timeout = 5  # Quick test
 
-                result = provider.attempt_recovery(test_url)
+                provider.attempt_recovery(test_url)
                 results[source.value] = True  # Provider responded (success/failure doesn't matter)
 
                 provider.timeout = old_timeout  # Restore original timeout

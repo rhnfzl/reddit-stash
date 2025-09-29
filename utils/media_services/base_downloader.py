@@ -12,7 +12,7 @@ import re
 import hashlib
 import shutil
 import logging
-from typing import Optional, Dict, Callable
+from typing import Optional, Dict, Callable, Any
 from urllib.parse import urlparse, unquote
 from dataclasses import dataclass
 
@@ -36,8 +36,8 @@ from urllib3.util.retry import Retry
 # Tenacity for intelligent retry strategies
 try:
     from tenacity import (
-        retry, stop_after_attempt, wait_exponential, wait_fixed,
-        retry_if_exception_type, retry_if_result, before_sleep_log
+        retry, stop_after_attempt, wait_exponential,
+        retry_if_exception_type, before_sleep_log
     )
     import logging
     TENACITY_AVAILABLE = True
@@ -51,8 +51,7 @@ from ..service_abstractions import (
 from ..rate_limiter import rate_limit_manager
 from ..url_transformer import url_transformer
 from ..constants import (
-    DOWNLOAD_CHUNK_SIZE, DISK_SPACE_SAFETY_FACTOR, MIN_MEDIA_FILE_SIZE,
-    SQLITE_CACHE_SIZE_KB, MIN_FREE_SPACE_MB
+    DOWNLOAD_CHUNK_SIZE, DISK_SPACE_SAFETY_FACTOR, MIN_MEDIA_FILE_SIZE
 )
 
 # Optional imports for format-specific validation
@@ -157,11 +156,17 @@ class BaseHTTPDownloader:
             # Use curl_cffi with Chrome browser impersonation for better TLS fingerprinting
             self._session = requests.Session(
                 impersonate="chrome110",  # Impersonate Chrome 110 for optimal compatibility
-                timeout=self.config.timeout_seconds
+                timeout=(self.config.connect_timeout, self.config.read_timeout),
+                max_redirects=self.config.max_redirects,
+                verify=self.config.verify_ssl
             )
         else:
             # Fallback to standard requests session
             self._session = requests.Session()
+
+            # Configure security settings
+            self._session.max_redirects = self.config.max_redirects
+            self._session.verify = self.config.verify_ssl
 
             # Configure retry strategy for standard requests
             retry_strategy = Retry(
@@ -169,7 +174,8 @@ class BaseHTTPDownloader:
                 read=3,
                 connect=3,
                 backoff_factor=0.3,
-                status_forcelist=(429, 500, 502, 503, 504)
+                status_forcelist=(429, 500, 502, 503, 504),
+                redirect=self.config.max_redirects
             )
 
             from requests.adapters import HTTPAdapter
@@ -265,6 +271,76 @@ class BaseHTTPDownloader:
             return f"{name}{header_ext}"
 
         return filename
+
+    def _validate_content_type(self, content_type: str) -> bool:
+        """
+        Validate content type against allowed types for security.
+
+        Args:
+            content_type: The content-type header value
+
+        Returns:
+            True if content type is allowed, False otherwise
+        """
+        if self.config.allowed_content_types is None:
+            # None means allow all content types
+            return True
+
+        if not self.config.allowed_content_types:
+            # Empty list means no content types allowed
+            return False
+
+        # Normalize content type (remove charset, etc.)
+        content_type = content_type.lower().split(';')[0].strip()
+
+        # Check against allowed types (supports wildcards like image/*)
+        for allowed_type in self.config.allowed_content_types:
+            allowed_type = allowed_type.lower().strip()
+
+            if allowed_type == content_type:
+                return True
+
+            # Support wildcard matching (e.g., image/* matches image/jpeg)
+            if allowed_type.endswith('/*'):
+                category = allowed_type[:-2]
+                if content_type.startswith(category + '/'):
+                    return True
+
+        return False
+
+    def _create_enhanced_error_message(self, base_message: str, url: str = None,
+                                     context: Dict[str, Any] = None) -> str:
+        """
+        Create enhanced error message with debugging context.
+
+        Args:
+            base_message: Base error message
+            url: URL being processed (if applicable)
+            context: Additional context for debugging
+
+        Returns:
+            Enhanced error message with context
+        """
+        parts = [base_message]
+
+        # Add service context
+        parts.append(f"[Service: {self.config.name}]")
+
+        # Add URL context (truncated for readability)
+        if url:
+            display_url = url if len(url) <= 100 else url[:97] + "..."
+            parts.append(f"[URL: {display_url}]")
+
+        # Add additional context
+        if context:
+            context_parts = []
+            for key, value in context.items():
+                if value is not None:
+                    context_parts.append(f"{key}={value}")
+            if context_parts:
+                parts.append(f"[Context: {', '.join(context_parts)}]")
+
+        return " ".join(parts)
 
     def _check_disk_space(self, file_size: int, save_path: str) -> bool:
         """
@@ -403,10 +479,25 @@ class BaseHTTPDownloader:
         with self._session.get(
             url,
             stream=True,
-            timeout=(5.0, self.config.timeout_seconds),
+            timeout=(self.config.connect_timeout, self.config.read_timeout),
             allow_redirects=True
         ) as response:
             response.raise_for_status()
+
+            # Validate content type for security
+            content_type = response.headers.get('content-type', '').lower()
+            if not self._validate_content_type(content_type):
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message=self._create_enhanced_error_message(
+                        f"Content type '{content_type}' not allowed",
+                        url=url,
+                        context={
+                            'allowed_types': str(self.config.allowed_content_types),
+                            'response_headers': 'content-type'
+                        }
+                    )
+                )
 
             # Get file information
             total_size = int(response.headers.get('content-length', 0))
@@ -420,14 +511,29 @@ class BaseHTTPDownloader:
             if total_size > self.config.max_file_size:
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
-                    error_message=f"File too large: {total_size} bytes (limit: {self.config.max_file_size})"
+                    error_message=self._create_enhanced_error_message(
+                        f"File too large: {total_size:,} bytes",
+                        url=url,
+                        context={
+                            'limit_bytes': f"{self.config.max_file_size:,}",
+                            'content_length': str(total_size)
+                        }
+                    )
                 )
 
             # Check disk space availability
             if not self._check_disk_space(total_size, fixed_save_path):
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
-                    error_message="Insufficient disk space for download"
+                    error_message=self._create_enhanced_error_message(
+                        "Insufficient disk space for download",
+                        url=url,
+                        context={
+                            'file_size_mb': f"{total_size / (1024**2):.1f}",
+                            'safety_factor': str(DISK_SPACE_SAFETY_FACTOR),
+                            'save_path': os.path.dirname(fixed_save_path)
+                        }
+                    )
                 )
 
             # Create directory if needed
@@ -472,7 +578,16 @@ class BaseHTTPDownloader:
 
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
-                    error_message=f"File integrity validation failed: {integrity_result.error_message}"
+                    error_message=self._create_enhanced_error_message(
+                        f"File integrity validation failed: {integrity_result.error_message}",
+                        url=url,
+                        context={
+                            'downloaded_bytes': str(downloaded),
+                            'expected_bytes': str(total_size),
+                            'hash_algorithm': hash_name,
+                            'checksum': integrity_result.checksum[:16] + "..." if integrity_result.checksum else None
+                        }
+                    )
                 )
 
             # Validate content type to detect HTML responses (Reddit wrapper pages)
@@ -555,14 +670,22 @@ class BaseHTTPDownloader:
                 # Fallback without retry if tenacity not available
                 return self._download_with_retry(url, save_path, progress_callback)
 
-        except Timeout:
+        except Timeout as e:
             # Report timeout as server error
             service_name = self.config.name.lower()
             rate_limit_manager.report_response(service_name, 408)  # Request Timeout
 
             return DownloadResult(
                 status=DownloadStatus.FAILED,
-                error_message=f"Download timed out after {self.config.timeout_seconds} seconds"
+                error_message=self._create_enhanced_error_message(
+                    "Download timed out",
+                    url=url,
+                    context={
+                        'connect_timeout': f"{self.config.connect_timeout}s",
+                        'read_timeout': f"{self.config.read_timeout}s",
+                        'timeout_type': str(type(e).__name__)
+                    }
+                )
             )
         except ConnectionError as e:
             # Report connection error
@@ -571,7 +694,15 @@ class BaseHTTPDownloader:
 
             return DownloadResult(
                 status=DownloadStatus.FAILED,
-                error_message=f"Connection error: {str(e)}"
+                error_message=self._create_enhanced_error_message(
+                    "Connection failed",
+                    url=url,
+                    context={
+                        'error_type': str(type(e).__name__),
+                        'details': str(e)[:100],  # Truncate long error messages
+                        'ssl_verify': str(self.config.verify_ssl)
+                    }
+                )
             )
         except RequestsError as e:
             service_name = self.config.name.lower()
@@ -590,7 +721,15 @@ class BaseHTTPDownloader:
 
                     return DownloadResult(
                         status=DownloadStatus.RATE_LIMITED,
-                        error_message="Rate limit exceeded",
+                        error_message=self._create_enhanced_error_message(
+                            "Rate limit exceeded",
+                            url=url,
+                            context={
+                                'retry_after_seconds': str(retry_seconds),
+                                'status_code': str(status_code),
+                                'has_retry_after_header': str(bool(retry_after))
+                            }
+                        ),
                         retry_after=retry_seconds
                     )
                 else:
@@ -599,7 +738,15 @@ class BaseHTTPDownloader:
 
                     return DownloadResult(
                         status=DownloadStatus.FAILED,
-                        error_message=f"HTTP error {status_code}: {str(e)}"
+                        error_message=self._create_enhanced_error_message(
+                            f"HTTP error {status_code}",
+                            url=url,
+                            context={
+                                'status_code': str(status_code),
+                                'response_headers': 'available' if hasattr(e, 'response') else 'none',
+                                'details': str(e)[:100]
+                            }
+                        )
                     )
             else:
                 # Handle requests without response (connection errors, etc.)
@@ -607,7 +754,15 @@ class BaseHTTPDownloader:
 
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
-                    error_message=f"Request error: {str(e)}"
+                    error_message=self._create_enhanced_error_message(
+                        "Request error",
+                        url=url,
+                        context={
+                            'error_type': str(type(e).__name__),
+                            'details': str(e)[:100],
+                            'has_response': 'false'
+                        }
+                    )
                 )
         except OSError as e:
             # Handle disk space and permission errors specifically
@@ -617,19 +772,44 @@ class BaseHTTPDownloader:
                 rate_limit_manager.report_response(service_name, 507)  # Insufficient Storage
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
-                    error_message="No space left on device"
+                    error_message=self._create_enhanced_error_message(
+                        "No space left on device",
+                        url=url,
+                        context={
+                            'errno': str(e.errno),
+                            'save_path': save_path,
+                            'error_details': str(e)
+                        }
+                    )
                 )
             elif e.errno == 13:  # EACCES - Permission denied
                 rate_limit_manager.report_response(service_name, 403)  # Forbidden
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
-                    error_message="Permission denied writing to file"
+                    error_message=self._create_enhanced_error_message(
+                        "Permission denied writing to file",
+                        url=url,
+                        context={
+                            'errno': str(e.errno),
+                            'save_path': save_path,
+                            'directory': os.path.dirname(save_path)
+                        }
+                    )
                 )
             else:
                 rate_limit_manager.report_response(service_name, 500)
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
-                    error_message=f"File system error: {str(e)}"
+                    error_message=self._create_enhanced_error_message(
+                        "File system error",
+                        url=url,
+                        context={
+                            'errno': str(getattr(e, 'errno', 'unknown')),
+                            'error_type': str(type(e).__name__),
+                            'save_path': save_path,
+                            'details': str(e)[:100]
+                        }
+                    )
                 )
         except Exception as e:
             # Report general error
@@ -638,7 +818,15 @@ class BaseHTTPDownloader:
 
             return DownloadResult(
                 status=DownloadStatus.FAILED,
-                error_message=f"Unexpected error: {str(e)}"
+                error_message=self._create_enhanced_error_message(
+                    "Unexpected error during download",
+                    url=url,
+                    context={
+                        'error_type': str(type(e).__name__),
+                        'details': str(e)[:100],
+                        'save_path': save_path
+                    }
+                )
             )
 
     def download(self, url: str, save_path: str) -> DownloadResult:

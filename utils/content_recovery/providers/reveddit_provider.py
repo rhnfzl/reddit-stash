@@ -21,7 +21,7 @@ import time
 import requests
 import logging
 from typing import Optional, Dict, Any
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse
 import re
 
 from ..recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
@@ -199,7 +199,7 @@ class RevedditProvider:
                 elif response.status_code == 200 and len(content) > 5000:
                     # Page loaded successfully but may not have deleted content
                     # This could mean the content wasn't deleted by moderators
-                    self._logger.debug(f"Reveddit page loaded but no deleted content indicators found")
+                    self._logger.debug("Reveddit page loaded but no deleted content indicators found")
                     return None
 
         except requests.exceptions.RequestException as e:
