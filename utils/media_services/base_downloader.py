@@ -44,13 +44,13 @@ try:
 except ImportError:
     TENACITY_AVAILABLE = False
 
-from utils.service_abstractions import (
+from ..service_abstractions import (
     DownloadResult, DownloadStatus,
     MediaMetadata, MediaType, ServiceConfig
 )
-from utils.rate_limiter import rate_limit_manager
-from utils.url_transformer import url_transformer
-from utils.constants import (
+from ..rate_limiter import rate_limit_manager
+from ..url_transformer import url_transformer
+from ..constants import (
     DOWNLOAD_CHUNK_SIZE, DISK_SPACE_SAFETY_FACTOR, MIN_MEDIA_FILE_SIZE,
     SQLITE_CACHE_SIZE_KB, MIN_FREE_SPACE_MB
 )

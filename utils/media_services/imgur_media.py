@@ -12,7 +12,7 @@ import re
 from typing import Optional, List
 from urllib.parse import urlparse
 
-from utils.service_abstractions import (
+from ..service_abstractions import (
     DownloadResult, DownloadStatus,
     MediaMetadata, MediaType, ServiceConfig
 )
