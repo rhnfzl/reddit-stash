@@ -138,15 +138,15 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             return self._detect_media_type(headers)
 
     def _download_reddit_image(self, url: str, save_path: str) -> DownloadResult:
-        """Download Reddit hosted image (i.redd.it)."""
-        return self.download_file(url, save_path)
+        """Download Reddit hosted image (i.redd.it) with optimized headers."""
+        return self._download_with_reddit_headers(url, save_path)
 
     def _download_reddit_preview(self, url: str, save_path: str) -> DownloadResult:
-        """Download Reddit preview image with URL decoding."""
+        """Download Reddit preview image with URL decoding and optimized headers."""
         try:
             # Reddit preview URLs often have encoding issues, clean them up
             cleaned_url = url.replace('amp;', '')
-            return self.download_file(cleaned_url, save_path)
+            return self._download_with_reddit_headers(cleaned_url, save_path)
         except Exception as e:
             return DownloadResult(
                 status=DownloadStatus.FAILED,
@@ -246,6 +246,38 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
         except Exception:
             return None
+
+    def _download_with_reddit_headers(self, url: str, save_path: str) -> DownloadResult:
+        """
+        Download Reddit images with optimal headers to prevent HTML wrapper pages.
+
+        Reddit uses content negotiation - when it sees browser-like Accept headers
+        prioritizing text/html, it serves HTML wrapper pages instead of raw images.
+        This method temporarily overrides headers to prioritize image formats.
+        """
+        # Store original headers
+        original_headers = self._session.headers.copy()
+
+        try:
+            # Set Reddit-optimized headers that prioritize images
+            reddit_headers = {
+                'Accept': 'image/*,*/*;q=0.8',  # Prioritize images, fallback to any content
+                'User-Agent': self.config.user_agent,
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Cache-Control': 'no-cache'
+            }
+
+            # Update session headers temporarily
+            self._session.headers.update(reddit_headers)
+
+            # Perform the download with optimized headers
+            return self.download_file(url, save_path)
+
+        finally:
+            # Always restore original headers
+            self._session.headers.clear()
+            self._session.headers.update(original_headers)
 
     def _is_ffmpeg_available(self) -> bool:
         """Check if ffmpeg is available in system PATH."""

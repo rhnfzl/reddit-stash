@@ -48,6 +48,7 @@ from ..service_abstractions import (
     MediaMetadata, MediaType, ServiceConfig
 )
 from ..rate_limiter import rate_limit_manager
+from ..url_transformer import url_transformer
 
 # Optional imports for format-specific validation
 try:
@@ -177,17 +178,15 @@ class BaseHTTPDownloader:
             self._session.mount("https://", adapter)
 
         # Set enhanced headers for better compatibility
+        # Accept header prioritizes images to prevent Reddit serving HTML wrapper pages
         self._session.headers.update({
             'User-Agent': self.config.user_agent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept': 'image/webp,image/apng,image/jpeg,image/png,image/*,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
             'DNT': '1',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
             'Cache-Control': 'max-age=0'
         })
 
@@ -420,6 +419,35 @@ class BaseHTTPDownloader:
                     status=DownloadStatus.FAILED,
                     error_message=f"File integrity validation failed: {integrity_result.error_message}"
                 )
+
+            # Validate content type to detect HTML responses (Reddit wrapper pages)
+            content_type = response.headers.get('content-type', '').lower()
+            if 'text/html' in content_type:
+                # Remove HTML file since it's not the expected image
+                try:
+                    os.remove(fixed_save_path)
+                except OSError:
+                    pass
+
+                # Get platform-specific error message
+                platform = url_transformer.get_domain_info(url)
+                if platform:
+                    platform_msg = f"{platform} served an HTML viewer page instead of raw file"
+                else:
+                    platform_msg = f"Received HTML instead of expected content from {urlparse(url).netloc}"
+
+                self._logger.warning(f"Received HTML instead of image from {url}. "
+                                   f"Content-Type: {content_type}. {platform_msg}")
+
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message=f"{platform_msg}. Content-Type: {content_type}"
+                )
+
+            # Additional validation: Check for image-like filenames getting HTML content
+            expected_image_ext = os.path.splitext(save_path)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff']
+            if expected_image_ext and 'image/' not in content_type and content_type != 'application/octet-stream':
+                self._logger.warning(f"Expected image but got Content-Type: {content_type} for {url}")
 
             # Create metadata
             metadata = MediaMetadata(

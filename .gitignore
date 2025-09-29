@@ -180,3 +180,5 @@ test_*.py
 test_downloads/
 tests/
 docs/
+cleanup_corrupt_images.py
+fix_double_extensions.py
