@@ -21,7 +21,7 @@ import logging
 from .service_abstractions import ServiceConfig
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class RateLimitConfig:
     """Configuration for rate limiting behavior."""
     max_requests_per_minute: int

@@ -39,7 +39,13 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 rate_limit_per_minute=100,  # Reddit API allows ~100 requests/min
                 timeout_seconds=30,
                 max_file_size=209715200,  # 200MB default
-                user_agent="Reddit Stash Media Downloader/1.0"
+                user_agent="Reddit Stash Media Downloader/1.0",
+                # Security enhancements
+                max_redirects=5,  # Reddit may redirect through multiple services
+                connect_timeout=5.0,
+                read_timeout=30.0,
+                allowed_content_types=['image/*', 'video/*', 'audio/*'],  # Allow media content
+                verify_ssl=True
             )
         super().__init__(config)
 

@@ -15,12 +15,60 @@ import json
 import time
 import threading
 import logging
+import configparser
+import os
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from pathlib import Path
 from enum import Enum
 import random
 
+from .sqlite_manager import get_retry_queue_manager
+
+
+@dataclass
+class RetryConfig:
+    """Configuration for retry queue behavior."""
+    max_retries: int = 5
+    base_retry_delay_high: int = 5
+    base_retry_delay_medium: int = 10
+    base_retry_delay_low: int = 15
+    exponential_base_delay: int = 60
+    max_retry_delay: int = 86400  # 24 hours
+    dead_letter_threshold_days: int = 7
+
+
+def load_retry_config() -> RetryConfig:
+    """Load retry configuration from settings.ini with fallbacks to defaults."""
+    config = configparser.ConfigParser()
+
+    # Find settings.ini in the project root
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)
+    config_path = os.path.join(project_root, 'settings.ini')
+
+    # Use defaults if config file doesn't exist or section is missing
+    retry_config = RetryConfig()
+
+    try:
+        if os.path.exists(config_path):
+            config.read(config_path)
+
+            if config.has_section('Retry'):
+                retry_section = config['Retry']
+                retry_config.max_retries = retry_section.getint('max_retries', retry_config.max_retries)
+                retry_config.base_retry_delay_high = retry_section.getint('base_retry_delay_high', retry_config.base_retry_delay_high)
+                retry_config.base_retry_delay_medium = retry_section.getint('base_retry_delay_medium', retry_config.base_retry_delay_medium)
+                retry_config.base_retry_delay_low = retry_section.getint('base_retry_delay_low', retry_config.base_retry_delay_low)
+                retry_config.exponential_base_delay = retry_section.getint('exponential_base_delay', retry_config.exponential_base_delay)
+                retry_config.max_retry_delay = retry_section.getint('max_retry_delay', retry_config.max_retry_delay)
+                retry_config.dead_letter_threshold_days = retry_section.getint('dead_letter_threshold_days', retry_config.dead_letter_threshold_days)
+
+    except Exception as e:
+        # Log warning but continue with defaults
+        logging.getLogger(__name__).warning(f"Failed to load retry configuration: {e}. Using defaults.")
+
+    return retry_config
 
 
 class RetryStatus(Enum):
@@ -46,19 +94,29 @@ class RetryItem:
     last_attempt_at: Optional[float] = None
     status: RetryStatus = RetryStatus.PENDING
     metadata: Dict[str, Any] = None
+    config: Optional[RetryConfig] = None
 
     def __post_init__(self):
+        if self.config is None:
+            self.config = load_retry_config()
         if self.created_at == 0.0:
             self.created_at = time.time()
         if self.next_retry_at == 0.0:
             self.next_retry_at = self.created_at + self._calculate_initial_delay()
         if self.metadata is None:
             self.metadata = {}
+        # Update max_retries from config if not explicitly set
+        if self.max_retries == 5:  # Default value
+            self.max_retries = self.config.max_retries
 
     def _calculate_initial_delay(self) -> float:
-        """Calculate initial delay based on priority."""
-        base_delays = {1: 5, 2: 5, 3: 5}  # All 5 seconds for testing
-        return base_delays.get(self.priority, 5)
+        """Calculate initial delay based on priority using configuration."""
+        base_delays = {
+            1: self.config.base_retry_delay_high,
+            2: self.config.base_retry_delay_medium,
+            3: self.config.base_retry_delay_low
+        }
+        return base_delays.get(self.priority, self.config.base_retry_delay_medium)
 
     def calculate_next_retry_delay(self) -> float:
         """Calculate delay until next retry using exponential backoff with jitter."""
@@ -66,14 +124,14 @@ class RetryItem:
             base_delay = self._calculate_initial_delay()
         else:
             # Exponential backoff: 2^attempt * base_delay
-            base_delay = (2 ** self.retry_count) * 60  # Start with 1 minute
+            base_delay = (2 ** self.retry_count) * self.config.exponential_base_delay
 
         # Add jitter (±25%)
         jitter = random.uniform(0.75, 1.25)
         delay = base_delay * jitter
 
-        # Cap maximum delay at 24 hours
-        return min(delay, 86400)
+        # Cap maximum delay using configuration
+        return min(delay, self.config.max_retry_delay)
 
     def is_ready_for_retry(self) -> bool:
         """Check if item is ready for retry."""
@@ -85,10 +143,11 @@ class RetryItem:
 
     def should_move_to_dead_letter(self) -> bool:
         """Check if item should be moved to dead letter queue."""
+        dead_letter_threshold_seconds = self.config.dead_letter_threshold_days * 24 * 3600
         return (
             self.retry_count >= self.max_retries or
             self.status == RetryStatus.FAILED_PERMANENT or
-            (time.time() - self.created_at) > (7 * 24 * 3600)  # 7 days old
+            (time.time() - self.created_at) > dead_letter_threshold_seconds
         )
 
     def increment_retry(self) -> None:
@@ -116,30 +175,30 @@ class SQLiteRetryQueue:
         self.database_path = Path(database_path)
         self._lock = threading.RLock()
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.config = load_retry_config()
+        self.sqlite_manager = get_retry_queue_manager(str(database_path))
         self._initialize_database()
 
     def _initialize_database(self) -> None:
         """Initialize SQLite database with proper schema and indexes."""
-        with sqlite3.connect(self.database_path, timeout=30) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging for better concurrency
-            conn.execute("PRAGMA synchronous=NORMAL")  # Balance safety and performance
-            conn.execute("PRAGMA foreign_keys=ON")
+        with self.sqlite_manager.get_connection() as conn:
+            # Note: WAL mode and other optimizations are handled by sqlite_manager
 
             # Create main retry queue table
-            conn.execute("""
+            conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS retry_queue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     url TEXT NOT NULL,
                     service_name TEXT NOT NULL,
                     error_message TEXT NOT NULL,
                     retry_count INTEGER DEFAULT 0,
-                    max_retries INTEGER DEFAULT 5,
+                    max_retries INTEGER DEFAULT {self.config.max_retries},
                     priority INTEGER DEFAULT 1,
                     created_at REAL NOT NULL,
                     next_retry_at REAL NOT NULL,
                     last_attempt_at REAL,
                     status TEXT DEFAULT 'pending',
-                    metadata TEXT DEFAULT '{}',
+                    metadata TEXT DEFAULT '{{}}',
                     UNIQUE(url, service_name)
                 )
             """)
@@ -179,21 +238,26 @@ class SQLiteRetryQueue:
             self._logger.info(f"Initialized retry queue database at {self.database_path}")
 
     def add_failed_download(self, url: str, error: str, service_name: str,
-                          priority: int = 1, max_retries: int = 5,
+                          priority: int = 1, max_retries: Optional[int] = None,
                           metadata: Optional[Dict[str, Any]] = None) -> None:
         """Add a failed download to the retry queue."""
+        # Use config default if max_retries not specified
+        if max_retries is None:
+            max_retries = self.config.max_retries
+
         retry_item = RetryItem(
             url=url,
             service_name=service_name,
             error_message=error,
             priority=priority,
             max_retries=max_retries,
-            metadata=metadata or {}
+            metadata=metadata or {},
+            config=self.config
         )
 
         with self._lock:
             try:
-                with sqlite3.connect(self.database_path, timeout=30) as conn:
+                with self.sqlite_manager.get_connection() as conn:
                     # Use INSERT OR REPLACE to handle duplicates
                     conn.execute("""
                         INSERT OR REPLACE INTO retry_queue
@@ -224,7 +288,7 @@ class SQLiteRetryQueue:
         """Get pending retry items, optionally filtered by service."""
         with self._lock:
             try:
-                with sqlite3.connect(self.database_path, timeout=30) as conn:
+                with self.sqlite_manager.get_connection() as conn:
                     conn.row_factory = sqlite3.Row
 
                     # Build query based on filters
@@ -265,7 +329,7 @@ class SQLiteRetryQueue:
         """Mark a retry as started (in progress)."""
         with self._lock:
             try:
-                with sqlite3.connect(self.database_path, timeout=30) as conn:
+                with self.sqlite_manager.get_connection() as conn:
                     cursor = conn.execute("""
                         UPDATE retry_queue
                         SET status = 'in_progress', last_attempt_at = ?
@@ -284,7 +348,7 @@ class SQLiteRetryQueue:
         """Mark a retry as completed."""
         with self._lock:
             try:
-                with sqlite3.connect(self.database_path, timeout=30) as conn:
+                with self.sqlite_manager.get_connection() as conn:
                     if success:
                         # Remove from retry queue on success
                         conn.execute("""
@@ -379,7 +443,7 @@ class SQLiteRetryQueue:
 
         with self._lock:
             try:
-                with sqlite3.connect(self.database_path, timeout=30) as conn:
+                with self.sqlite_manager.get_connection() as conn:
                     # Move very old items to dead letter queue
                     cursor = conn.execute("""
                         SELECT * FROM retry_queue
@@ -428,7 +492,7 @@ class SQLiteRetryQueue:
         """Get statistics about the retry queue."""
         with self._lock:
             try:
-                with sqlite3.connect(self.database_path, timeout=30) as conn:
+                with self.sqlite_manager.get_connection() as conn:
                     stats = {}
 
                     # Retry queue stats
@@ -471,7 +535,7 @@ class SQLiteRetryQueue:
         """Get items from the dead letter queue."""
         with self._lock:
             try:
-                with sqlite3.connect(self.database_path, timeout=30) as conn:
+                with self.sqlite_manager.get_connection() as conn:
                     conn.row_factory = sqlite3.Row
 
                     cursor = conn.execute("""
@@ -498,7 +562,7 @@ class SQLiteRetryQueue:
         """Move an item from dead letter queue back to retry queue."""
         with self._lock:
             try:
-                with sqlite3.connect(self.database_path, timeout=30) as conn:
+                with self.sqlite_manager.get_connection() as conn:
                     # Get item from dead letter queue
                     cursor = conn.execute("""
                         SELECT * FROM dead_letter_queue

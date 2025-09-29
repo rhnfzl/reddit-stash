@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """
 Test runner for Content Recovery System.
 
@@ -8,17 +9,17 @@ environment setup, and comprehensive reporting.
 
 import os
 import sys
+
+# Add project root to path (must be before other imports)
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
 import time
 import argparse
 import unittest
 from io import StringIO
 from typing import List, Dict, Any
 
-# Add project root to path
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, project_root)
-
-# Import test modules
 from tests.test_content_recovery import (
     TestWaybackMachineProvider,
     TestPullPushProvider,
@@ -118,19 +119,17 @@ class RecoveryTestRunner:
             TestContentRecoveryService,
         ]
 
-        unit_result = self.run_test_suite(unit_test_classes, "Unit Tests")
+        self.run_test_suite(unit_test_classes, "Unit Tests")
 
         # Integration tests
-        integration_result = None
         if include_integration:
             integration_test_classes = [TestRecoveryIntegration]
-            integration_result = self.run_test_suite(integration_test_classes, "Integration Tests")
+            self.run_test_suite(integration_test_classes, "Integration Tests")
 
         # Performance tests
-        performance_result = None
         if include_performance:
             performance_test_classes = [TestRecoveryPerformance]
-            performance_result = self.run_test_suite(performance_test_classes, "Performance Tests")
+            self.run_test_suite(performance_test_classes, "Performance Tests")
 
         # Generate final report
         return self._generate_final_report()

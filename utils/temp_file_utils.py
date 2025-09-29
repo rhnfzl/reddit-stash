@@ -10,7 +10,7 @@ import os
 import tempfile
 import logging
 from contextlib import contextmanager
-from typing import Generator, List, Union
+from typing import Generator, Union
 from pathlib import Path
 
 
