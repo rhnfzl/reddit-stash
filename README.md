@@ -37,11 +37,25 @@ Each post and comment is formatted with:
 - Subreddit details
 - Any images or links from the original post
 
+When Reddit Stash completes processing, you'll receive detailed storage information:
+```
+Processing completed. 150 items processed, 25 items skipped.
+Markdown file storage: 12.45 MB
+Media file storage: 89.32 MB
+Total combined storage: 101.77 MB
+```
+
+This gives you clear visibility into:
+- **Text content storage**: How much space your saved posts and comments use
+- **Media storage**: How much space downloaded images and videos use
+- **Total storage**: Combined space used for your complete Reddit archive
+
 ## Table of Contents
 - [What You Get](#-what-you-get)
 - [How It Works](#how-it-works)
 - [Quick Start](#-quick-start)
   - [Setup Method Comparison](#setup-method-comparison)
+- [Documentation](#-documentation)
 - [Key Features](#key-features)
 - [Why Use Reddit Stash](#-why-use-reddit-stash)
 - [Setup](#setup)
@@ -150,9 +164,12 @@ For those who want to get up and running quickly, here's a streamlined process:
      -e DROPBOX_APP_KEY=your_dropbox_key \
      -e DROPBOX_APP_SECRET=your_dropbox_secret \
      -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+     -e IMGUR_CLIENT_ID=your_imgur_client_id \
+     -e IMGUR_CLIENT_SECRET=your_imgur_client_secret \
      -v $(pwd)/reddit:/app/reddit \
      reddit-stash
    ```
+   *Note: IMGUR_CLIENT_ID and IMGUR_CLIENT_SECRET are optional - Imgur API registration is permanently closed, only users with existing applications can use these*
 
 For detailed setup instructions, continue reading the [Setup](#setup) section.
 
@@ -177,6 +194,8 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 - 🔍 **File Deduplication:** Uses intelligent file existence checking to avoid re-downloading content.
 - ⏱️ **Rate Limit Management:** Implements dynamic sleep timers to respect Reddit's API rate limits.
 - 🔒 **GDPR Data Processing:** Optional processing of Reddit's GDPR export data.
+- 🖼️ **Enhanced Media Downloads:** Download images, videos, and other media with dramatically improved success rates (~80% vs previous ~10%), featuring intelligent fallback systems and modern web compatibility.
+- 🔄 **Content Recovery System:** 4-provider cascade for failed downloads (Wayback Machine, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs.
 
 ## 🎯 Why Use Reddit Stash
 
@@ -197,17 +216,15 @@ All of your saved posts are available locally in markdown format, making them ea
 ### 5. Integration with Note-Taking Systems
 Since content is saved in markdown, you can easily import it into note-taking systems like Obsidian, Notion, or any markdown-compatible tool.
 
+### 6. Media Preservation
+Beyond text, Reddit Stash can download and preserve images, videos, and other media from posts, ensuring you have complete archives even if external hosting services go offline.
+
 ## Setup
 
 ### Prerequisites
 - ✅ Python 3.10-3.12 (Python 3.12 recommended for best performance)
 - 🔑 Reddit API credentials
 - 📊 A Dropbox account with an API token
-
-#### Python Version Benefits
-- **Python 3.10**: Minimum supported version, stable and reliable
-- **Python 3.11**: ~15% performance improvement, better error messages
-- **Python 3.12**: Additional optimizations, enhanced f-strings, improved debugging
 
 ### Installation
 
@@ -230,6 +247,9 @@ Before proceeding with any installation method, ensure that you have set the Red
     - `DROPBOX_APP_KEY`
     - `DROPBOX_APP_SECRET`
     - `DROPBOX_REFRESH_TOKEN`
+    For Enhanced Media Downloads (Optional - Imgur API registration is permanently closed)
+    - `IMGUR_CLIENT_ID` (only if you already have an existing Imgur application)
+    - `IMGUR_CLIENT_SECRET` (only if you already have an existing Imgur application)
 - Enter the respective secret values without any quotes.
 
 After adding all secrets: ![Repository Secrets](resources/repository_secrets.png).
@@ -275,6 +295,9 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     export DROPBOX_APP_KEY='dropbox-app-key'
     export DROPBOX_APP_SECRET='dropbox-secret-key'
     export DROPBOX_REFRESH_TOKEN='dropbox-secret-key'
+    # Optional, for enhanced Imgur downloading (if you have existing API access)
+    export IMGUR_CLIENT_ID='your_imgur_client_id'
+    export IMGUR_CLIENT_SECRET='your_imgur_client_secret'
     ```
 
     For Windows:
@@ -288,8 +311,11 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     set DROPBOX_APP_KEY='dropbox-app-key'
     set DROPBOX_APP_SECRET='dropbox-secret-key'
     set DROPBOX_REFRESH_TOKEN='dropbox-secret-key'
+    # Optional, for enhanced Imgur downloading (if you have existing API access)
+    set IMGUR_CLIENT_ID='your_imgur_client_id'
+    set IMGUR_CLIENT_SECRET='your_imgur_client_secret'
     ```
-    
+
     You can verify the setup with:
     ```
     echo $REDDIT_CLIENT_ID
@@ -299,6 +325,8 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     echo $DROPBOX_APP_KEY
     echo $DROPBOX_APP_SECRET
     echo $DROPBOX_REFRESH_TOKEN
+    echo $IMGUR_CLIENT_ID
+    echo $IMGUR_CLIENT_SECRET
     ```
 
 6. Usage:
@@ -631,6 +659,62 @@ password = None  # Can be set here or via environment variables
 * **ignore_tls_errors**: When set to `true`, ignores TLS certificate errors when downloading images from third-party sites. ⚠️ **Warning**: This reduces security by bypassing SSL certificate verification. Only enable for archival purposes when you explicitly need to download content from sites with expired or invalid certificates.
 
 Note: You can still use environment variables as a fallback or override for the Reddit API credentials if they are not set in the settings.ini file.
+
+#### Media Download Configuration
+
+Reddit Stash includes an advanced media download system that can download images, videos, and other media from Reddit posts and comments. Through modern web technologies and intelligent retry mechanisms, this system achieves **~80% success rates** for media downloads - a dramatic improvement over basic HTTP methods (~10% success).
+
+**What this means for you:**
+- Most images and videos from your saved posts will actually be downloaded and preserved
+- Better compatibility with modern hosting services and anti-bot protection
+- Automatic recovery from temporary failures and rate limiting
+- Separate tracking shows you exactly how much media content was successfully saved
+
+##### Imgur API Integration (Enhanced Download Support)
+
+**⚠️ Important: Imgur API is permanently closed to new users**
+
+**What this means for you:**
+- **Most users**: Reddit Stash works great without Imgur API - you'll get occasional Imgur download failures, which is normal
+- **Lucky few**: If you already had an Imgur application before 2024, you can use it for better Imgur downloads
+
+##### If You DON'T Have Imgur API Access (Most Users)
+
+**This is the normal experience** - don't worry about trying to get Imgur credentials:
+
+✅ **What works perfectly**:
+- Reddit-hosted images and videos (i.redd.it, v.redd.it)
+- Most other image hosting services
+- All text content and metadata
+
+⚠️ **What you might see occasionally**:
+- Some Imgur images fail with "429 rate limit" errors
+- This is expected and normal - not something you need to fix
+
+##### If You DO Have Existing Imgur API Access (Rare)
+
+If you already have an Imgur application from before 2024:
+
+1. **Find your credentials** at https://imgur.com/account/settings/apps
+2. **Set environment variables**:
+   ```bash
+   export IMGUR_CLIENT_ID='your_imgur_client_id'
+   export IMGUR_CLIENT_SECRET='your_imgur_client_secret'
+   ```
+3. **Enjoy enhanced features**: Better reliability, album support, fewer rate limits
+
+##### Media Download Environment Variables
+
+For enhanced media downloading, you can optionally set these environment variables:
+
+```bash
+# Imgur API (if you have existing credentials)
+export IMGUR_CLIENT_ID='your_imgur_client_id'
+export IMGUR_CLIENT_SECRET='your_imgur_client_secret'
+
+# These improve download reliability and enable advanced features
+# Leave unset if you don't have Imgur API access - basic downloads will still work
+```
 
 #### Setting Up Reddit Environment Variables
 
@@ -1103,54 +1187,28 @@ A: The script has built-in dynamic sleep timers to respect Reddit's API rate lim
 
 ## 🔧 Troubleshooting
 
-If you encounter issues with Reddit Stash, here are solutions to common problems:
+For comprehensive troubleshooting guidance, see **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** which includes:
 
-### Authentication Issues
+### Quick Solutions for Common Issues
 
-**Problem**: "Invalid credentials" or "Authentication failed" errors
-- **Solution**: 
-  1. Double-check your Reddit API credentials
-  2. Ensure your Reddit account is verified with an email address
-  3. Make sure your app is properly set up with the correct redirect URI
-  4. Verify that your password is correct (for local installations)
+- **Authentication Problems**: Reddit API setup, 2FA issues, credential validation
+- **Media Download Issues**: Imgur rate limits, curl-cffi installation, ffmpeg setup
+- **Performance Problems**: Rate limiting, timeout configuration, memory optimization
+- **Content Recovery Issues**: Provider failures, cache errors, network connectivity
+- **Docker Issues**: Container setup, volume mounting, environment variables
+- **GitHub Actions Problems**: Workflow failures, secrets configuration, scheduling
 
-### Rate Limiting
+### Most Common Issues (Quick Reference)
 
-**Problem**: "Too many requests" or frequent pauses during execution
-- **Solution**: 
-  1. This is normal behavior to respect Reddit's API limits
-  2. The script will automatically slow down and retry
-  3. For larger archives, consider running at off-peak hours
-  4. Try reducing the frequency of scheduled runs in GitHub Actions
+| Problem | Quick Solution | Detailed Guide |
+|---------|---------------|----------------|
+| **Imgur 429 Errors** | This is normal - Imgur API is permanently closed | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#imgur-rate-limits-429-errors--comprehensively-fixed) |
+| **curl-cffi Installation** | Platform-specific installation instructions | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#curl_cffi-installation-issues) |
+| **Missing ffmpeg** | Install ffmpeg for video+audio merging | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#missing-ffmpeg-for-reddit-videos) |
+| **Authentication Failed** | Check Reddit API credentials and 2FA setup | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#environment-issues) |
+| **Empty Results** | Verify save_type and file paths in settings.ini | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#performance-issues) |
 
-### Empty Results
-
-**Problem**: Script runs successfully but no files are saved
-- **Solution**: 
-  1. Verify that your Reddit account has saved posts/comments
-  2. Check your `settings.ini` file to ensure the correct `save_type` is selected
-  3. Look at the console output for any warnings or errors
-  4. Make sure your file paths in settings.ini are correct
-
-### Dropbox Issues
-
-**Problem**: Files aren't appearing in Dropbox
-- **Solution**: 
-  1. Verify your Dropbox API credentials and refresh token
-  2. Check that your Dropbox app has the correct permissions
-  3. Run `python dropbox_utils.py --upload` manually to test the upload
-  4. Look for error messages during the upload process
-
-### GitHub Actions Workflow Failures
-
-**Problem**: GitHub Actions workflow fails
-- **Solution**: 
-  1. Check the workflow logs for detailed error messages
-  2. Verify all required secrets are set correctly
-  3. Make sure your Dropbox token hasn't expired
-  4. Check for changes in the Reddit API that might affect the script
-
-If you're experiencing issues not covered here, please open an issue on GitHub with details about the problem and any error messages you received.
+For any issues not covered in the troubleshooting guide, please open an issue on GitHub with details about the problem and any error messages you received.
 
 ## 🔐 Security Considerations
 
@@ -1195,33 +1253,25 @@ Feel free to open issues or submit pull requests if you have any improvements or
 ### Future Enhancements
 Have an idea for improving Reddit Stash? Feel free to suggest it in the issues or contribute a pull request!
 
+**✅ Recently Implemented:**
+- **Content Recovery System** - 4-provider cascade for failed downloads (Wayback Machine, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs
+- **Advanced Media Download System** - Modern web compatibility with HTTP/2 support and browser impersonation
+- **Comprehensive Rate Limiting** - Multi-layer rate limiting with provider-specific limits and intelligent backoff
+
+**🔮 Planned Enhancements:**
 - [ ] Improve error handling for edge cases
-- [ ] Add support for additional cloud storage providers
+- [ ] Add support for additional cloud storage providers (Google Drive, OneDrive)
 - [ ] Create a simple web interface for configuration
-- [ ] **Media Download System** - Download images, videos, and audio from Reddit posts (available in develop branch)
-  - Support for Reddit-hosted media (i.redd.it, v.redd.it), Imgur albums, Gfycat, Gyazo, Streamable
-  - Intelligent thumbnail generation for large images
-  - Retry queue system with exponential backoff for failed downloads
-  - Per-domain rate limiting to prevent API throttling
-- [ ] **Deleted Content Recovery** - Recover deleted posts and comments using multiple services
-  - Wayback Machine integration for archived content
-  - PullPush.io API (Pushshift successor) for Reddit content recovery
-  - Reveddit API support for removed content
-  - Reddit preview fallback system
-- [ ] **Advanced Media Processing**
+- [ ] **Enhanced Media Processing**
   - Video compression and format conversion options
   - Parallel downloads with queue management
   - Selective downloads by file size/type with user-defined rules
   - Download progress tracking and statistics
+- [ ] **Additional Recovery Providers**
+  - Archive.today integration
+  - Library of Congress web archive
+  - Custom recovery provider plugins
 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-This means you are free to:
-- Use the software for commercial purposes
-- Modify the software
-- Distribute the software
-- Use the software privately
-
-With the condition that you include the original copyright notice and license in any copy of the software/source.

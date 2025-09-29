@@ -1,5 +1,31 @@
-praw
-dropbox
-pandas
-tqdm
-requests
+# Core Reddit Stash dependencies (Updated Sept 2025)
+praw>=7.8.1                 # Reddit API wrapper
+dropbox>=12.0.2             # Dropbox API client
+pandas>=2.3.2               # Data manipulation
+tqdm>=4.67.1                # Progress bars
+requests>=2.32.5            # HTTP library
+
+# Media download dependencies
+pyimgur>=0.8.1              # Imgur API integration
+urllib3>=2.5.0              # HTTP connection pooling
+curl-cffi>=0.13.0            # HTTP/2 + browser TLS fingerprinting
+tenacity>=9.0.0             # Intelligent retry strategies
+backoff>=2.2.1              # Exponential backoff with jitter for rate limiting
+
+# Enhanced configuration and validation
+configparser>=7.2.0         # Configuration parsing
+blake3>=1.0.6                # Fast cryptographic hashing for file integrity
+
+# Optional media processing dependencies
+pillow>=11.3.0              # Image processing
+requests-cache>=1.2.1       # HTTP request caching
+beautifulsoup4>=4.13.5      # HTML parsing
+html5lib>=1.1               # HTML5 parser for BeautifulSoup
+
+# Testing and development dependencies
+unittest-xml-reporting>=3.2.0    # XML test reporting
+coverage>=7.6.0                   # Code coverage measurement
+mock>=5.1.0                      # Mock object library (for older Python versions)
+
+# Note: All other dependencies (threading, sqlite3, json, logging, etc.)
+# are part of Python standard library and don't need to be listed here

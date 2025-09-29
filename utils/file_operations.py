@@ -1,11 +1,16 @@
 import os
 import configparser
+import logging
 from tqdm import tqdm
 from praw.models import Submission, Comment  # Import Submission and Comment
 from utils.log_utils import log_file, save_file_log
 from utils.save_utils import save_submission, save_comment_and_context  # Import common functions
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
+from utils.path_security import create_safe_path, create_reddit_file_path
+
+
+logger = logging.getLogger(__name__)
 
 # Dynamically determine the path to the root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,10 +26,23 @@ check_type = config.get('Settings', 'check_type', fallback='DIR').upper()
 
 def create_directory(subreddit_name, save_directory, created_dirs_cache):
     """Create the directory for saving data if it does not exist."""
-    sub_dir = os.path.join(save_directory, subreddit_name)
+    # Use secure path creation to prevent directory traversal
+    path_result = create_safe_path(save_directory, subreddit_name)
+
+    if not path_result.is_safe:
+        logger.error(f"Unsafe subreddit name '{subreddit_name}': {path_result.issues}")
+        # Use a sanitized version or fallback
+        fallback_name = "sanitized_subreddit"
+        path_result = create_safe_path(save_directory, fallback_name)
+        if not path_result.is_safe:
+            raise ValueError(f"Cannot create safe directory path: {path_result.issues}")
+
+    sub_dir = path_result.safe_path
     if sub_dir not in created_dirs_cache:
         os.makedirs(sub_dir, exist_ok=True)
         created_dirs_cache.add(sub_dir)
+        logger.info(f"Created directory: {sub_dir}")
+
     return sub_dir
 
 def get_existing_files_from_log(file_log):
@@ -61,29 +79,48 @@ def get_existing_files_from_dir(save_directory):
             existing_files.add(unique_key)
     return existing_files
 
-def save_to_file(content, file_path, save_function, existing_files, file_log, save_directory, created_dirs_cache, unsave=False, ignore_tls_errors=None):
+def save_to_file(content, file_path, save_function, existing_files, file_log, save_directory, created_dirs_cache, category="POST", unsave=False, ignore_tls_errors=None):
     """Save content to a file using the specified save function."""
     file_id = content.id  # Assuming `id` is unique for each Reddit content
     subreddit_name = content.subreddit.display_name  # Get the subreddit name
     
-    # Create the unique key including the content type
-    unique_key = f"{file_id}-{subreddit_name}-{type(content).__name__}"
+    # Create the unique key including the content type and category
+    unique_key = f"{file_id}-{subreddit_name}-{type(content).__name__}-{category}"
     
     # If the file is already logged or exists in the directory, skip saving
     if unique_key in existing_files:
-        return True  # Indicate that the file already exists and no saving was performed
+        return True, 0  # Indicate that the file already exists and no saving was performed, no media size
 
     # Ensure the subreddit directory exists only if we're about to save something new
-    sub_dir = os.path.join(save_directory, subreddit_name)
+    # Use secure path creation to prevent directory traversal
+    path_result = create_safe_path(save_directory, subreddit_name)
+
+    if not path_result.is_safe:
+        logger.error(f"Unsafe subreddit name '{subreddit_name}': {path_result.issues}")
+        # Use a sanitized version or fallback
+        fallback_name = "sanitized_subreddit"
+        path_result = create_safe_path(save_directory, fallback_name)
+        if not path_result.is_safe:
+            raise ValueError(f"Cannot create safe directory path: {path_result.issues}")
+
+    sub_dir = path_result.safe_path
     if sub_dir not in created_dirs_cache:
         os.makedirs(sub_dir, exist_ok=True)
         created_dirs_cache.add(sub_dir)
     
     # Proceed with saving the file
     try:
+        # Reset media size tracker before saving
+        from .save_utils import save_submission
+        if hasattr(save_submission, '_media_size_tracker'):
+            delattr(save_submission, '_media_size_tracker')
+
         with open(file_path, 'w', encoding="utf-8") as f:
             save_function(content, f, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
-        
+
+        # Get accumulated media size from the tracker
+        media_size = getattr(save_submission, '_media_size_tracker', 0)
+
         # Log the file after saving successfully with the unique key
         log_file(file_log, unique_key, {  # Use the unique_key constructed in save_to_file
             'subreddit': subreddit_name,
@@ -91,10 +128,10 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
             'file_path': file_path  # This will be converted to relative in log_file
         }, save_directory)
 
-        return False  # Indicate that the file was saved successfully
+        return False, media_size  # Indicate that the file was saved successfully and return media size
     except Exception as e:
         print(f"Failed to save {file_path}: {e}")
-        return False  # Indicate that the file could not be saved
+        return False, 0  # Indicate that the file could not be saved, no media size
 
 def handle_dynamic_sleep(item):
     """Handle dynamic sleep based on the type of Reddit item."""
@@ -127,117 +164,200 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
 
     processed_count = 0  # Counter for processed items
     skipped_count = 0  # Counter for skipped items
-    total_size = 0  # Total size of processed data in bytes
+    total_size = 0  # Total size of processed markdown data in bytes
+    total_media_size = 0  # Total size of downloaded media files in bytes
 
     if save_type == 'ALL':
         # Save all user submissions and comments
-        processed_count, skipped_count, total_size = save_self_user_activity(
+        processed_count, skipped_count, total_size, total_media_size = save_self_user_activity(
             list(user.submissions.new(limit=1000)),
             list(user.comments.new(limit=1000)),
             save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
+            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
-        
+
         # Save all saved items (posts and comments)
-        processed_count, skipped_count, total_size = save_saved_user_activity(
+        processed_count, skipped_count, total_size, total_media_size = save_saved_user_activity(
             list(user.saved(limit=1000)), save_directory, existing_files,
-            created_dirs_cache, processed_count, skipped_count, total_size, file_log,
+            created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log,
             unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
-        
+
         # Save all upvoted posts and comments
-        processed_count, skipped_count, total_size = save_upvoted_posts_and_comments(
+        processed_count, skipped_count, total_size, total_media_size = save_upvoted_posts_and_comments(
             list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
+            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
     
     elif save_type == 'SAVED':
-        processed_count, skipped_count, total_size = save_saved_user_activity(
+        processed_count, skipped_count, total_size, total_media_size = save_saved_user_activity(
             list(user.saved(limit=1000)), save_directory, existing_files,
-            created_dirs_cache, processed_count, skipped_count, total_size, file_log,
+            created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log,
             unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
     
     elif save_type == 'ACTIVITY':
-        processed_count, skipped_count, total_size = save_self_user_activity(
+        processed_count, skipped_count, total_size, total_media_size = save_self_user_activity(
             list(user.submissions.new(limit=1000)),
             list(user.comments.new(limit=1000)),
             save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
+            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
         
     elif save_type == 'UPVOTED':
-        processed_count, skipped_count, total_size = save_upvoted_posts_and_comments(
+        processed_count, skipped_count, total_size, total_media_size = save_upvoted_posts_and_comments(
             list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, file_log, ignore_tls_errors
+            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
 
     # Save the updated file log
     save_file_log(file_log, save_directory)
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, total_media_size
 
 
-def save_self_user_activity(submissions, comments, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, ignore_tls_errors=None):
+def save_self_user_activity(submissions, comments, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors=None):
     """Save all user posts and comments."""
     for submission in tqdm(submissions, desc="Processing Users Submissions"):
-        file_path = os.path.join(save_directory, submission.subreddit.display_name, f"POST_{submission.id}.md")
-        if save_to_file(submission, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
+        # Use secure path creation to prevent directory traversal
+        path_result = create_reddit_file_path(
+            save_directory, submission.subreddit.display_name, "POST", submission.id
+        )
+        if not path_result.is_safe:
+            logger.error(f"Unsafe path for submission {submission.id}: {path_result.issues}")
+            continue
+
+        file_path = path_result.safe_path
+        save_result, media_size = save_to_file(submission, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, category="POST", ignore_tls_errors=ignore_tls_errors)
+        if save_result:
             skipped_count += 1
             continue
 
+        # Only count file size if file was actually saved successfully
         processed_count += 1
-        total_size += os.path.getsize(file_path)
+        total_media_size += media_size  # Add media size from downloads
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            # File doesn't exist or can't be accessed, skip size calculation
+            pass
         handle_dynamic_sleep(submission)  # Call the refactored sleep function
 
     for comment in tqdm(comments, desc="Processing Users Comments"):
-        file_path = os.path.join(save_directory, comment.subreddit.display_name, f"COMMENT_{comment.id}.md")
-        if save_to_file(comment, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
+        # Use secure path creation to prevent directory traversal
+        path_result = create_reddit_file_path(
+            save_directory, comment.subreddit.display_name, "COMMENT", comment.id
+        )
+        if not path_result.is_safe:
+            logger.error(f"Unsafe path for comment {comment.id}: {path_result.issues}")
+            continue
+
+        file_path = path_result.safe_path
+        save_result, media_size = save_to_file(comment, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, category="COMMENT", ignore_tls_errors=ignore_tls_errors)
+        if save_result:
             skipped_count += 1
             continue
 
+        # Only count file size if file was actually saved successfully
         processed_count += 1
-        total_size += os.path.getsize(file_path)
+        total_media_size += media_size  # Add media size from downloads
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            # File doesn't exist or can't be accessed, skip size calculation
+            pass
         handle_dynamic_sleep(comment)  # Call the refactored sleep function
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, total_media_size
 
-def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, unsave=False, ignore_tls_errors=None):
+def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log, unsave=False, ignore_tls_errors=None):
     """Save only saved user posts and comments."""
     for item in tqdm(saved_items, desc="Processing Saved Items"):
         if isinstance(item, Submission):
-            file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_POST_{item.id}.md")
-            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors):
+            # Use secure path creation to prevent directory traversal
+            path_result = create_reddit_file_path(
+                save_directory, item.subreddit.display_name, "SAVED_POST", item.id
+            )
+            if not path_result.is_safe:
+                logger.error(f"Unsafe path for saved submission {item.id}: {path_result.issues}")
+                continue
+
+            file_path = path_result.safe_path
+            save_result, media_size = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, category="SAVED_POST", unsave=unsave, ignore_tls_errors=ignore_tls_errors)
+            if save_result:
                 skipped_count += 1
                 continue
         elif isinstance(item, Comment):
-            file_path = os.path.join(save_directory, item.subreddit.display_name, f"SAVED_COMMENT_{item.id}.md")
-            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, unsave=unsave, ignore_tls_errors=ignore_tls_errors):
+            # Use secure path creation to prevent directory traversal
+            path_result = create_reddit_file_path(
+                save_directory, item.subreddit.display_name, "SAVED_COMMENT", item.id
+            )
+            if not path_result.is_safe:
+                logger.error(f"Unsafe path for saved comment {item.id}: {path_result.issues}")
+                continue
+
+            file_path = path_result.safe_path
+            save_result, media_size = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, category="SAVED_COMMENT", unsave=unsave, ignore_tls_errors=ignore_tls_errors)
+            if save_result:
                 skipped_count += 1
                 continue
 
+        # Only count file size if file was actually saved successfully
         processed_count += 1
-        total_size += os.path.getsize(file_path)
+        total_media_size += media_size  # Add media size from downloads
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            # File doesn't exist or can't be accessed, skip size calculation
+            pass
         handle_dynamic_sleep(item)
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, total_media_size
 
-def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, file_log, ignore_tls_errors=None):
+def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors=None):
     """Save only upvoted user posts and comments."""
     for item in tqdm(upvoted_items, desc="Processing Upvoted Items"):
         if isinstance(item, Submission):
-            file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_POST_{item.id}.md")
-            if save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
+            # Use secure path creation to prevent directory traversal
+            path_result = create_reddit_file_path(
+                save_directory, item.subreddit.display_name, "UPVOTE_POST", item.id
+            )
+            if not path_result.is_safe:
+                logger.error(f"Unsafe path for upvoted submission {item.id}: {path_result.issues}")
+                continue
+
+            file_path = path_result.safe_path
+            save_result, media_size = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, category="UPVOTE_POST", ignore_tls_errors=ignore_tls_errors)
+            if save_result:
                 skipped_count += 1
                 continue
         elif isinstance(item, Comment):
-            file_path = os.path.join(save_directory, item.subreddit.display_name, f"UPVOTE_COMMENT_{item.id}.md")
-            if save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, ignore_tls_errors=ignore_tls_errors):
+            # Use secure path creation to prevent directory traversal
+            path_result = create_reddit_file_path(
+                save_directory, item.subreddit.display_name, "UPVOTE_COMMENT", item.id
+            )
+            if not path_result.is_safe:
+                logger.error(f"Unsafe path for upvoted comment {item.id}: {path_result.issues}")
+                continue
+
+            file_path = path_result.safe_path
+            save_result, media_size = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, category="UPVOTE_COMMENT", ignore_tls_errors=ignore_tls_errors)
+            if save_result:
                 skipped_count += 1
                 continue
 
+        # Only count file size if file was actually saved successfully
         processed_count += 1
-        total_size += os.path.getsize(file_path)
+        total_media_size += media_size  # Add media size from downloads
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            # File doesn't exist or can't be accessed, skip size calculation
+            pass
         handle_dynamic_sleep(item)
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, total_media_size

@@ -29,7 +29,7 @@ concurrency:
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # Kill job if it runs longer than 10 minutes
+    timeout-minutes: 180  # Kill job if it runs longer than 3 hours (needed for extensive media downloads and recovery cascade)
       
     steps:
     - name: Checkout repository
@@ -79,7 +79,7 @@ jobs:
 
     # Process Reddit data
     - name: Run Reddit Stash Script
-      timeout-minutes: 3
+      timeout-minutes: 90  # Generous timeout for processing large collections, extensive media downloads, and recovery cascade operations
       env:
         REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
         REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
@@ -90,7 +90,7 @@ jobs:
 
     # Upload any changed files to Dropbox
     - name: Upload updated data to Dropbox
-      timeout-minutes: 2
+      timeout-minutes: 50  # Extended timeout for uploading large volumes of media files and markdown content
       env:
         DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
