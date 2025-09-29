@@ -182,3 +182,4 @@ docs/
 cleanup_corrupt_images.py
 fix_double_extensions.py
 reddit_local/
+clean_upvoted_items.py

@@ -20,7 +20,7 @@ from .providers import (
     RedditPreviewProvider,
     RevedditProvider
 )
-from utils.feature_flags import get_media_config
+from ..feature_flags import get_media_config
 
 
 class ContentRecoveryService:
