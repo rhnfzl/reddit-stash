@@ -12,12 +12,12 @@ import tempfile
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 
-from utils.service_abstractions import (
+from ..service_abstractions import (
     DownloadResult, DownloadStatus,
     MediaMetadata, MediaType, ServiceConfig
 )
-from utils.temp_file_utils import temp_files_cleanup
-from utils.constants import FFMPEG_TIMEOUT_SECONDS
+from ..temp_file_utils import temp_files_cleanup
+from ..constants import FFMPEG_TIMEOUT_SECONDS
 from .base_downloader import BaseHTTPDownloader
 
 

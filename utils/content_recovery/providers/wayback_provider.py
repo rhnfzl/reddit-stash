@@ -17,8 +17,8 @@ import logging
 from typing import Optional, Dict, Any
 from urllib.parse import quote, urlparse
 
-from utils.content_recovery.recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
-from utils.rate_limiter import rate_limited
+from ..recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
+from ...rate_limiter import rate_limited
 
 
 class WaybackMachineProvider:

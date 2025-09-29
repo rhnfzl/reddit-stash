@@ -11,7 +11,7 @@ import logging
 from urllib.parse import urlparse, urlunparse
 from typing import Set, Optional, Dict, Any
 from dataclasses import dataclass
-from utils.constants import MAX_URL_LENGTH, MIN_URL_LENGTH
+from .constants import MAX_URL_LENGTH, MIN_URL_LENGTH
 
 
 logger = logging.getLogger(__name__)
