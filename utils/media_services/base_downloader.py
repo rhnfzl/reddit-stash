@@ -10,6 +10,7 @@ import os
 import time
 import re
 import hashlib
+import shutil
 import logging
 from typing import Optional, Dict, Callable
 from urllib.parse import urlparse, unquote
@@ -43,12 +44,16 @@ try:
 except ImportError:
     TENACITY_AVAILABLE = False
 
-from ..service_abstractions import (
+from utils.service_abstractions import (
     DownloadResult, DownloadStatus,
     MediaMetadata, MediaType, ServiceConfig
 )
-from ..rate_limiter import rate_limit_manager
-from ..url_transformer import url_transformer
+from utils.rate_limiter import rate_limit_manager
+from utils.url_transformer import url_transformer
+from utils.constants import (
+    DOWNLOAD_CHUNK_SIZE, DISK_SPACE_SAFETY_FACTOR, MIN_MEDIA_FILE_SIZE,
+    SQLITE_CACHE_SIZE_KB, MIN_FREE_SPACE_MB
+)
 
 # Optional imports for format-specific validation
 try:
@@ -261,6 +266,49 @@ class BaseHTTPDownloader:
 
         return filename
 
+    def _check_disk_space(self, file_size: int, save_path: str) -> bool:
+        """
+        Check if there's sufficient disk space for download.
+
+        Args:
+            file_size: Expected file size in bytes
+            save_path: Path where file will be downloaded
+
+        Returns:
+            True if sufficient disk space available, False otherwise
+        """
+        if file_size <= 0:
+            return True  # Can't check if size unknown, allow download
+
+        try:
+            # Get disk usage for the directory
+            directory = os.path.dirname(save_path) or '.'
+            usage = shutil.disk_usage(directory)
+
+            # Apply safety factor (configurable extra space required)
+            safety_factor = DISK_SPACE_SAFETY_FACTOR
+            required_space = int(file_size * safety_factor)
+
+            if usage.free < required_space:
+                self._logger.warning(
+                    f"Insufficient disk space for {save_path}. "
+                    f"Required: {required_space / (1024**3):.2f}GB, "
+                    f"Available: {usage.free / (1024**3):.2f}GB"
+                )
+                return False
+
+            self._logger.debug(
+                f"Disk space check passed. "
+                f"Required: {required_space / (1024**2):.1f}MB, "
+                f"Available: {usage.free / (1024**3):.2f}GB"
+            )
+            return True
+
+        except (OSError, ValueError) as e:
+            self._logger.warning(f"Could not check disk space: {e}")
+            # If we can't check disk space, allow download (better than blocking)
+            return True
+
     def _validate_url(self, url: str) -> bool:
         """
         Validate URL to filter out invalid URLs before download attempts.
@@ -375,6 +423,13 @@ class BaseHTTPDownloader:
                     error_message=f"File too large: {total_size} bytes (limit: {self.config.max_file_size})"
                 )
 
+            # Check disk space availability
+            if not self._check_disk_space(total_size, fixed_save_path):
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message="Insufficient disk space for download"
+                )
+
             # Create directory if needed
             os.makedirs(os.path.dirname(fixed_save_path), exist_ok=True)
 
@@ -390,7 +445,7 @@ class BaseHTTPDownloader:
                 hash_name = "SHA256"
 
             with open(fixed_save_path, 'wb') as file:
-                for chunk in response.iter_content(chunk_size=8192):
+                for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                     if chunk:
                         size = file.write(chunk)
                         downloaded += size
@@ -554,6 +609,28 @@ class BaseHTTPDownloader:
                     status=DownloadStatus.FAILED,
                     error_message=f"Request error: {str(e)}"
                 )
+        except OSError as e:
+            # Handle disk space and permission errors specifically
+            service_name = self.config.name.lower()
+
+            if e.errno == 28:  # ENOSPC - No space left on device
+                rate_limit_manager.report_response(service_name, 507)  # Insufficient Storage
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message="No space left on device"
+                )
+            elif e.errno == 13:  # EACCES - Permission denied
+                rate_limit_manager.report_response(service_name, 403)  # Forbidden
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message="Permission denied writing to file"
+                )
+            else:
+                rate_limit_manager.report_response(service_name, 500)
+                return DownloadResult(
+                    status=DownloadStatus.FAILED,
+                    error_message=f"File system error: {str(e)}"
+                )
         except Exception as e:
             # Report general error
             service_name = self.config.name.lower()
@@ -674,7 +751,7 @@ class BaseHTTPDownloader:
                     )
 
             # Layer 4: Minimum size check (avoid empty/truncated files)
-            if actual_size < 100:  # Arbitrary minimum for media files
+            if actual_size < MIN_MEDIA_FILE_SIZE:  # Configurable minimum for media files
                 return FileIntegrityResult(
                     is_valid=False,
                     error_message=f"File too small ({actual_size} bytes), likely corrupted",

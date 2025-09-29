@@ -12,10 +12,12 @@ import tempfile
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 
-from ..service_abstractions import (
+from utils.service_abstractions import (
     DownloadResult, DownloadStatus,
     MediaMetadata, MediaType, ServiceConfig
 )
+from utils.temp_file_utils import temp_files_cleanup
+from utils.constants import FFMPEG_TIMEOUT_SECONDS
 from .base_downloader import BaseHTTPDownloader
 
 
@@ -180,7 +182,12 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
             # Download audio to temporary file
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_audio:
-                audio_result = self.download_file(audio_url, temp_audio.name)
+                temp_audio_path = temp_audio.name
+
+            # Use context manager for guaranteed cleanup of temporary files
+            temp_video_path = video_result.local_path if video_result.local_path != save_path else None
+            with temp_files_cleanup(temp_audio_path, temp_video_path):
+                audio_result = self.download_file(audio_url, temp_audio_path)
 
                 if audio_result.is_success:
                     # Merge video and audio using ffmpeg
@@ -189,14 +196,6 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                         audio_result.local_path,
                         save_path
                     )
-
-                    # Cleanup temporary files
-                    try:
-                        os.unlink(temp_audio.name)
-                        if merged_result.is_success and video_result.local_path != save_path:
-                            os.unlink(video_result.local_path)
-                    except OSError:
-                        pass
 
                     if merged_result.is_success:
                         # Update result with merged file info
@@ -323,7 +322,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=300,  # 5 minute timeout
+                timeout=FFMPEG_TIMEOUT_SECONDS,  # Configurable timeout
                 text=True
             )
 
