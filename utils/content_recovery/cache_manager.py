@@ -31,6 +31,11 @@ class RecoveryCacheManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
 
+                # Enable WAL mode for better concurrency
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
+
                 # Recovery attempts table
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS recovery_attempts (
@@ -62,7 +67,15 @@ class RecoveryCacheManager:
                     )
                 """)
 
-                # Indexes for performance
+                # Indexes for performance optimization (2024 best practices)
+
+                # Primary lookup index - covers main cache query pattern
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_recovery_cache_lookup
+                    ON recovery_cache(url_hash, recovery_source, expires_at)
+                """)
+
+                # Individual column indexes for specific queries
                 cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_recovery_cache_url_hash
                     ON recovery_cache(url_hash)
@@ -74,8 +87,35 @@ class RecoveryCacheManager:
                 """)
 
                 cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_recovery_cache_source
+                    ON recovery_cache(recovery_source)
+                """)
+
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_recovery_cache_cached_at
+                    ON recovery_cache(cached_at)
+                """)
+
+                # Recovery attempts indexes
+                cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_recovery_attempts_url
                     ON recovery_attempts(original_url)
+                """)
+
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_recovery_attempts_source
+                    ON recovery_attempts(recovery_source)
+                """)
+
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_recovery_attempts_time
+                    ON recovery_attempts(attempted_at)
+                """)
+
+                # Composite index for statistics queries
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_recovery_attempts_stats
+                    ON recovery_attempts(recovery_source, attempted_at, success)
                 """)
 
                 conn.commit()
@@ -259,3 +299,118 @@ class RecoveryCacheManager:
         except sqlite3.Error as e:
             self._logger.error(f"Failed to get cache size: {e}")
             return 0
+
+    def optimize_database(self) -> bool:
+        """
+        Optimize database performance using PRAGMA optimize.
+
+        Should be called periodically or before closing connections.
+        Based on 2024 SQLite performance best practices.
+
+        Returns:
+            True if optimization succeeded, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # Run PRAGMA optimize to update statistics and improve query performance
+                cursor.execute("PRAGMA optimize")
+
+                # Update table statistics
+                cursor.execute("ANALYZE")
+
+                conn.commit()
+                self._logger.debug("Database optimization completed")
+                return True
+
+        except sqlite3.Error as e:
+            self._logger.error(f"Failed to optimize database: {e}")
+            return False
+
+    def vacuum_database(self, auto_vacuum: bool = True) -> bool:
+        """
+        Vacuum the database to reclaim space and improve performance.
+
+        Args:
+            auto_vacuum: Enable auto-vacuum mode for future operations
+
+        Returns:
+            True if vacuum succeeded, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # Enable auto-vacuum if requested
+                if auto_vacuum:
+                    cursor.execute("PRAGMA auto_vacuum = FULL")
+
+                # Vacuum the database to reclaim space
+                cursor.execute("VACUUM")
+
+                self._logger.info("Database vacuum completed")
+                return True
+
+        except sqlite3.Error as e:
+            self._logger.error(f"Failed to vacuum database: {e}")
+            return False
+
+    def get_database_info(self) -> Dict[str, Any]:
+        """
+        Get detailed database information for monitoring.
+
+        Returns:
+            Dictionary with database statistics and performance metrics
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                info = {}
+
+                # Database file size
+                cursor.execute("PRAGMA page_size")
+                page_size = cursor.fetchone()[0]
+
+                cursor.execute("PRAGMA page_count")
+                page_count = cursor.fetchone()[0]
+
+                info['file_size_bytes'] = page_size * page_count
+                info['page_size'] = page_size
+                info['page_count'] = page_count
+
+                # Journal mode and cache settings
+                cursor.execute("PRAGMA journal_mode")
+                info['journal_mode'] = cursor.fetchone()[0]
+
+                cursor.execute("PRAGMA cache_size")
+                info['cache_size'] = cursor.fetchone()[0]
+
+                # Table counts
+                cursor.execute("SELECT COUNT(*) FROM recovery_cache")
+                info['cache_entries'] = cursor.fetchone()[0]
+
+                cursor.execute("SELECT COUNT(*) FROM recovery_attempts")
+                info['attempt_entries'] = cursor.fetchone()[0]
+
+                # Index information
+                cursor.execute("""
+                    SELECT name FROM sqlite_master
+                    WHERE type='index' AND sql IS NOT NULL
+                """)
+                info['indexes'] = [row[0] for row in cursor.fetchall()]
+
+                return info
+
+        except sqlite3.Error as e:
+            self._logger.error(f"Failed to get database info: {e}")
+            return {}
+
+    def __del__(self):
+        """Cleanup method - optimize database before destruction."""
+        try:
+            self.optimize_database()
+        except:
+            # Ignore errors during cleanup
+            pass

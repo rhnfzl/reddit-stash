@@ -1,0 +1,25 @@
+# Minimal Reddit Stash dependencies (without curl-cffi)
+# Use this for environments where curl-cffi installation is problematic
+
+# Core dependencies - required for basic functionality
+praw>=7.8.1                 # Reddit API wrapper
+dropbox>=12.0.2             # Dropbox API client
+pandas>=2.3.2               # Data manipulation
+tqdm>=4.67.1                # Progress bars
+requests>=2.32.5            # HTTP library (fallback for curl-cffi)
+
+# Essential media download dependencies
+pyimgur>=0.8.1              # Imgur API integration
+urllib3>=2.5.0              # HTTP connection pooling
+tenacity>=9.0.0             # Intelligent retry strategies
+backoff>=2.2.1              # Exponential backoff with jitter
+
+# Configuration and validation
+configparser>=7.2.0         # Configuration parsing
+blake3>=1.0.6                # Fast cryptographic hashing
+
+# Basic media processing
+pillow>=11.3.0              # Image processing
+
+# Note: curl-cffi is excluded - the system will fallback to standard requests
+# For enhanced browser impersonation and HTTP/2 support, use requirements.txt instead

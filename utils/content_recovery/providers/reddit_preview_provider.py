@@ -19,8 +19,8 @@ from typing import Optional, Dict, Any
 from urllib.parse import urlparse, quote, unquote
 import re
 
-from ..recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
-from ...rate_limiter import rate_limited
+from utils.content_recovery.recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
+from utils.rate_limiter import rate_limited
 
 
 class RedditPreviewProvider:
