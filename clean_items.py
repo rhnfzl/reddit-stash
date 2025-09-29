@@ -6,8 +6,6 @@ Allows cleaning specific types of items (upvoted, saved, comments, submissions).
 
 import os
 import json
-import shutil
-from pathlib import Path
 
 def clean_items(reddit_dir="reddit", file_log_path="reddit/file_log.json",
                 upvoted=False, saved=False, comments=False, submissions=False):

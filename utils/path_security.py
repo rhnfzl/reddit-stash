@@ -9,8 +9,7 @@ and ensure all file operations stay within designated directories. Implements
 import os
 import re
 import logging
-from pathlib import Path
-from typing import Optional, Set
+from typing import Optional
 from dataclasses import dataclass
 
 
@@ -92,7 +91,6 @@ class SecurePathHandler:
             )
 
         issues = []
-        original_component = component
 
         # Strip whitespace
         component = component.strip()

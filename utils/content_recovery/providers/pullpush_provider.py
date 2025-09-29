@@ -17,7 +17,7 @@ import time
 import requests
 import logging
 from typing import Optional, Dict, Any
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse
 import re
 
 from ..recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
