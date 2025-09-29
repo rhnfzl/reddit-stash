@@ -21,6 +21,7 @@ from .feature_flags import get_media_config
 from .retry_queue import get_retry_queue
 from .content_recovery.recovery_service import ContentRecoveryService
 from .url_transformer import url_transformer
+from .url_security import get_url_validator
 
 
 class MediaDownloadManager:
@@ -156,6 +157,39 @@ class MediaDownloadManager:
                     self._logger.debug(f"Note: {transform_result.notes}")
             else:
                 download_url = url
+
+            # Validate URL security before downloading
+            url_validator = get_url_validator()
+            validation_result = url_validator.validate_url(download_url)
+
+            if not validation_result.is_valid:
+                self._logger.error(f"URL failed security validation: {download_url}")
+                self._logger.error(f"Security issues: {validation_result.issues}")
+                self._logger.error(f"Risk level: {validation_result.risk_level}")
+
+                # Add to failed URLs to prevent retrying
+                self._failed_urls.add(url)
+
+                # Add to retry queue with security failure status
+                self._retry_queue.add_failed_url(
+                    url=url,
+                    error_message=f"Security validation failed: {validation_result.issues}",
+                    content_type="media",
+                    max_retries=0  # Don't retry security failures
+                )
+
+                return None
+
+            # Use cleaned URL if available
+            if validation_result.cleaned_url:
+                download_url = validation_result.cleaned_url
+                self._logger.debug(f"Using cleaned URL: {download_url}")
+
+            # Log security warnings for medium-risk URLs
+            if validation_result.risk_level == "medium":
+                self._logger.warning(f"Medium-risk URL detected: {download_url}")
+                self._logger.warning(f"Issues: {validation_result.issues}")
+                # Continue with download but log the warning
 
             # Determine appropriate service for URL (using transformed URL if available)
             service_name, downloader = self._get_service_for_url(download_url)
