@@ -55,7 +55,6 @@ This gives you clear visibility into:
 - [How It Works](#how-it-works)
 - [Quick Start](#-quick-start)
   - [Setup Method Comparison](#setup-method-comparison)
-- [Documentation](#-documentation)
 - [Key Features](#key-features)
 - [Why Use Reddit Stash](#-why-use-reddit-stash)
 - [Setup](#setup)
@@ -66,9 +65,20 @@ This gives you clear visibility into:
     - [Docker Installation](#docker-installation)
   - [Setup Verification Checklist](#setup-verification-checklist)
 - [Configuration](#configuration)
-  - [Settings.ini File](#settingsini-file)
+  - [Configuration Quick Reference](#configuration-quick-reference)
+  - [Configuration Sections](#configuration-sections)
+    - [[Settings] - Core Application Behavior](#settings---core-application-behavior)
+    - [[Configuration] - Reddit API Credentials](#configuration---reddit-api-credentials)
+    - [[Media] - Advanced Media Download System](#media---advanced-media-download-system)
+    - [[Imgur] - Imgur API Configuration](#imgur---imgur-api-configuration)
+    - [[Recovery] - Content Recovery System](#recovery---content-recovery-system)
+    - [[Retry] - Retry Queue Configuration](#retry---retry-queue-configuration)
+  - [Important Configuration Notes](#important-configuration-notes)
   - [Setting Up Reddit Environment Variables](#setting-up-reddit-environment-variables)
   - [Setting Up Dropbox App](#setting-up-dropbox-app)
+  - [Settings Index (Alphabetical)](#settings-index-alphabetical)
+- [Docker Environment Variables](#docker-environment-variables)
+- [Alternative Scheduling: External Cron Setup](#alternative-scheduling-external-cron-setup)
 - [Important Notes](#important-notes)
   - [About Unsaving](#important-note-about-unsaving)
   - [GDPR Data Processing](#gdpr-data-processing)
@@ -619,13 +629,34 @@ After completing your chosen installation method, verify that everything is work
 
 ## Configuration
 
-#### `settings.ini` File
-
 The `settings.ini` file in the root directory of the project allows you to configure how Reddit Stash operates. This comprehensive configuration system controls everything from basic saving behavior to advanced media processing and content recovery.
 
-## Configuration Sections Overview
+### Configuration Quick Reference
 
-### `[Settings]` - Core Application Behavior
+Jump to any section or browse the complete settings index:
+
+| Section | Settings Count | Purpose | Jump To |
+|---------|----------------|---------|---------|
+| **[Settings]** | 8 | Core behavior (save paths, types, file checking) | [↓ View](#settings---core-application-behavior) |
+| **[Configuration]** | 4 | Reddit API credentials (use env vars!) | [↓ View](#configuration---reddit-api-credentials) |
+| **[Media]** | 12 | Media download controls (images, videos, albums) | [↓ View](#media---advanced-media-download-system) |
+| **[Imgur]** | 3 | Imgur API configuration (optional) | [↓ View](#imgur---imgur-api-configuration) |
+| **[Recovery]** | 9 | Content recovery system (4-provider cascade) | [↓ View](#recovery---content-recovery-system) |
+| **[Retry]** | 7 | Retry queue management (exponential backoff) | [↓ View](#retry---retry-queue-configuration) |
+| **Total** | **43 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
+
+**Quick Tips:**
+- 🔒 **Security First**: Use environment variables for credentials, not settings.ini
+- ⚡ **Performance**: `check_type=LOG`, `max_concurrent_downloads=3-5`
+- 💾 **Storage**: Configure `max_image_size`, `max_video_size`, `max_daily_storage_mb`
+- 🔄 **Recovery**: Enable all 4 providers for best deleted content recovery
+- 📖 **Full Docs**: Each setting includes type, defaults, examples, and trade-offs
+
+---
+
+### Configuration Sections
+
+#### `[Settings]` - Core Application Behavior
 
 ```ini
 [Settings]
@@ -880,7 +911,7 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     - Manually download problematic images
     - Report invalid certificates to site owners
 
-### `[Configuration]` - Reddit API Credentials
+#### `[Configuration]` - Reddit API Credentials
 
 ```ini
 [Configuration]
@@ -916,7 +947,7 @@ Result: 🚨 YOUR CREDENTIALS ARE NOW PUBLIC ON GITHUB 🚨
 Anyone can: Access your Reddit account, download your data, post as you
 ```
 
-#### API Configuration Settings:
+##### API Configuration Settings:
 
 * **`client_id`** - Reddit application client ID
   - **Type**: String or `None`
@@ -980,14 +1011,14 @@ Anyone can: Access your Reddit account, download your data, post as you
     export REDDIT_PASSWORD='your_password:123456'
     ```
 
-#### Credential Priority (How Reddit Stash Checks):
+##### Credential Priority (How Reddit Stash Checks):
 
 1. **Environment Variables** (checked first) ← USE THIS
 2. **settings.ini values** (fallback) ← AVOID THIS
 
 If environment variable exists, settings.ini value is **completely ignored**.
 
-#### Safe settings.ini Configuration:
+##### Safe settings.ini Configuration:
 
 **✅ SAFE - Keep credentials as None:**
 ```ini
@@ -1007,7 +1038,7 @@ username = your_username           # ⚠️ ACCOUNT IDENTIFIER
 password = your_password           # ⚠️ ACCOUNT TAKEOVER RISK
 ```
 
-#### When settings.ini Credentials Might Be Acceptable:
+##### When settings.ini Credentials Might Be Acceptable:
 
 Only use settings.ini for credentials if **ALL** of these are true:
 
@@ -1022,7 +1053,7 @@ Only use settings.ini for credentials if **ALL** of these are true:
 
 **If you're unsure about even ONE of these, use environment variables!**
 
-#### How to Verify Your Setup is Secure:
+##### How to Verify Your Setup is Secure:
 
 ```bash
 # Check if credentials are in settings.ini
@@ -1038,7 +1069,7 @@ password = None
 client_id = abc123  # ⚠️ FIX THIS
 ```
 
-#### Additional Security Best Practices:
+##### Additional Security Best Practices:
 
 1. **Add settings.ini to .gitignore** (even with None values, for safety)
 2. **Use .env files** for local development (also in .gitignore)
@@ -1047,11 +1078,11 @@ client_id = abc123  # ⚠️ FIX THIS
 5. **Never screenshot** settings with credentials
 6. **Check git history** if you accidentally committed credentials
 
-#### Setup Guide:
+##### Setup Guide:
 
 For detailed instructions on setting up environment variables properly, see [Setting Up Reddit Environment Variables](#setting-up-reddit-environment-variables)
 
-### `[Media]` - Advanced Media Download System
+#### `[Media]` - Advanced Media Download System
 
 ```ini
 [Media]
@@ -1414,7 +1445,7 @@ max_daily_storage_mb = 1024           # Daily storage limit in MB
     max_daily_storage_mb = 0      # No limit (use with caution!)
     ```
 
-### `[Imgur]` - Imgur API Configuration
+#### `[Imgur]` - Imgur API Configuration
 
 ```ini
 [Imgur]
@@ -1517,7 +1548,7 @@ recover_deleted = true                 # Attempt recovery of deleted content
     recover_deleted = false  # Skip recovery, faster
     ```
 
-### `[Recovery]` - Content Recovery System
+#### `[Recovery]` - Content Recovery System
 
 ```ini
 [Recovery]
@@ -1779,7 +1810,7 @@ Reddit Stash includes a sophisticated 4-provider cascade system that attempts to
     enable_background_cleanup = false  # Manual only
     ```
 
-### `[Retry]` - Retry Queue Configuration
+#### `[Retry]` - Retry Queue Configuration
 
 ```ini
 [Retry]
@@ -2004,6 +2035,70 @@ Day 4, Run 1: Retry fails → Queue (attempt 5/5, 480s backoff)
 Day 5, Run 1: Final retry fails → Max retries exceeded, keep in queue
 Day 8: Item in queue for >7 days → Move to dead letter queue
 ```
+
+---
+
+### Settings Index (Alphabetical)
+
+Quick alphabetical reference of all 43 settings with links to detailed documentation:
+
+#### A-C
+- **`base_retry_delay_high`** (Integer, default: 5) - High-priority retry delay | [→ Retry Section](#priority-based-delay-settings)
+- **`base_retry_delay_low`** (Integer, default: 15) - Low-priority retry delay | [→ Retry Section](#priority-based-delay-settings)
+- **`base_retry_delay_medium`** (Integer, default: 10) - Medium-priority retry delay | [→ Retry Section](#priority-based-delay-settings)
+- **`cache_duration_hours`** (Integer, default: 24) - Cache recovery results duration | [→ Recovery Section](#recovery-performance-settings)
+- **`check_type`** (String, default: LOG) - File existence checking method | [→ Settings Section](#core-settings-explained)
+- **`cleanup_interval_minutes`** (Integer, default: 60) - Cache cleanup frequency | [→ Recovery Section](#recovery-cache-management)
+- **`client_id`** (String, default: None) - Reddit API client ID | [→ Configuration Section](#api-configuration-settings)
+- **`client_ids`** (String, default: None) - Imgur application client IDs | [→ Imgur Section](#imgur-settings-explained)
+- **`client_secret`** (String, default: None) - Reddit API client secret | [→ Configuration Section](#api-configuration-settings)
+- **`client_secrets`** (String, default: None) - Imgur application client secrets | [→ Imgur Section](#imgur-settings-explained)
+- **`create_thumbnails`** (Boolean, default: true) - Generate thumbnail versions | [→ Media Section](#media-settings-explained)
+
+#### D-I
+- **`dead_letter_threshold_days`** (Integer, default: 7) - Days before moving to DLQ | [→ Retry Section](#dead-letter-queue-settings)
+- **`download_albums`** (Boolean, default: true) - Process multi-image posts | [→ Media Section](#media-settings-explained)
+- **`download_audio`** (Boolean, default: true) - Control audio downloads | [→ Media Section](#media-settings-explained)
+- **`download_enabled`** (Boolean, default: true) - Master media download switch | [→ Media Section](#media-settings-explained)
+- **`download_images`** (Boolean, default: true) - Control image downloads | [→ Media Section](#media-settings-explained)
+- **`download_timeout`** (Integer, default: 30) - Per-file download timeout | [→ Media Section](#media-settings-explained)
+- **`download_videos`** (Boolean, default: true) - Control video downloads | [→ Media Section](#media-settings-explained)
+- **`dropbox_directory`** (String, default: /reddit) - Dropbox cloud storage path | [→ Settings Section](#core-settings-explained)
+- **`enable_background_cleanup`** (Boolean, default: true) - Automatic cache maintenance | [→ Recovery Section](#recovery-cache-management)
+- **`exponential_base_delay`** (Integer, default: 60) - Exponential backoff base delay | [→ Retry Section](#exponential-backoff-settings)
+- **`ignore_tls_errors`** (Boolean, default: false) - Bypass SSL certificate validation | [→ Settings Section](#core-settings-explained)
+
+#### M-P
+- **`max_album_images`** (Integer, default: 50) - Limit images per album | [→ Media Section](#media-settings-explained)
+- **`max_cache_entries`** (Integer, default: 10000) - Maximum cached recovery results | [→ Recovery Section](#recovery-cache-management)
+- **`max_cache_size_mb`** (Integer, default: 100) - Cache size limit in MB | [→ Recovery Section](#recovery-cache-management)
+- **`max_concurrent_downloads`** (Integer, default: 3) - Parallel download streams | [→ Media Section](#media-settings-explained)
+- **`max_daily_storage_mb`** (Integer, default: 1024) - Daily storage limit in MB | [→ Media Section](#media-settings-explained)
+- **`max_image_size`** (Integer, default: 5242880) - Max image file size in bytes | [→ Media Section](#media-settings-explained)
+- **`max_retries`** (Integer, default: 5) - Maximum retry attempts | [→ Retry Section](#retry-attempt-settings)
+- **`max_retry_delay`** (Integer, default: 86400) - Maximum retry delay cap | [→ Retry Section](#exponential-backoff-settings)
+- **`max_video_size`** (Integer, default: 209715200) - Max video file size in bytes | [→ Media Section](#media-settings-explained)
+- **`password`** (String, default: None) - Reddit account password | [→ Configuration Section](#api-configuration-settings)
+- **`process_api`** (Boolean, default: true) - Fetch content from Reddit API | [→ Settings Section](#core-settings-explained)
+- **`process_gdpr`** (Boolean, default: false) - Process GDPR export files | [→ Settings Section](#core-settings-explained)
+
+#### R-U
+- **`recover_deleted`** (Boolean, default: true) - Attempt Imgur content recovery | [→ Imgur Section](#imgur-settings-explained)
+- **`save_directory`** (String, default: reddit/) - Local save directory | [→ Settings Section](#core-settings-explained)
+- **`save_type`** (String, default: ALL) - What content to download | [→ Settings Section](#core-settings-explained)
+- **`thumbnail_size`** (Integer, default: 800) - Thumbnail dimensions in pixels | [→ Media Section](#media-settings-explained)
+- **`timeout_seconds`** (Integer, default: 10) - Per-provider recovery timeout | [→ Recovery Section](#recovery-performance-settings)
+- **`unsave_after_download`** (Boolean, default: false) - Auto-unsave after download | [→ Settings Section](#core-settings-explained)
+- **`use_pushshift_api`** (Boolean, default: true) - Use PullPush.io provider | [→ Recovery Section](#recovery-provider-settings)
+- **`use_reddit_previews`** (Boolean, default: true) - Use Reddit preview system | [→ Recovery Section](#recovery-provider-settings)
+- **`use_reveddit_api`** (Boolean, default: true) - Use Reveddit provider | [→ Recovery Section](#recovery-provider-settings)
+- **`use_wayback_machine`** (Boolean, default: true) - Use Internet Archive | [→ Recovery Section](#recovery-provider-settings)
+- **`username`** (String, default: None) - Reddit username | [→ Configuration Section](#api-configuration-settings)
+
+#### V
+- **`video_quality`** (String, default: high) - Video quality preference | [→ Media Section](#media-settings-explained)
+
+**💡 Tip**: Use your browser's search (Ctrl+F / Cmd+F) to quickly find a specific setting in the detailed sections above.
 
 ---
 
