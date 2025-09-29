@@ -2671,31 +2671,6 @@ A: No, unless you enable the `unsave_after_download` option. This script only re
 **Q: What happens if the script encounters rate limits?**  
 A: The script has built-in dynamic sleep timers to respect Reddit's API rate limits. It will automatically pause and retry when necessary.
 
-## 🔧 Troubleshooting
-
-For comprehensive troubleshooting guidance, see **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** which includes:
-
-### Quick Solutions for Common Issues
-
-- **Authentication Problems**: Reddit API setup, 2FA issues, credential validation
-- **Media Download Issues**: Imgur rate limits, curl-cffi installation, ffmpeg setup
-- **Performance Problems**: Rate limiting, timeout configuration, memory optimization
-- **Content Recovery Issues**: Provider failures, cache errors, network connectivity
-- **Docker Issues**: Container setup, volume mounting, environment variables
-- **GitHub Actions Problems**: Workflow failures, secrets configuration, scheduling
-
-### Most Common Issues (Quick Reference)
-
-| Problem | Quick Solution | Detailed Guide |
-|---------|---------------|----------------|
-| **Imgur 429 Errors** | This is normal - Imgur API is permanently closed | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#imgur-rate-limits-429-errors--comprehensively-fixed) |
-| **curl-cffi Installation** | Platform-specific installation instructions | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#curl_cffi-installation-issues) |
-| **Missing ffmpeg** | Install ffmpeg for video+audio merging | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#missing-ffmpeg-for-reddit-videos) |
-| **Authentication Failed** | Check Reddit API credentials and 2FA setup | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#environment-issues) |
-| **Empty Results** | Verify save_type and file paths in settings.ini | [TROUBLESHOOTING.md](TROUBLESHOOTING.md#performance-issues) |
-
-For any issues not covered in the troubleshooting guide, please open an issue on GitHub with details about the problem and any error messages you received.
-
 ## 🔐 Security Considerations
 
 When using Reddit Stash, keep these security considerations in mind:
