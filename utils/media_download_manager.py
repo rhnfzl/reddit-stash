@@ -20,6 +20,7 @@ from .error_isolation import get_service_manager
 from .feature_flags import get_media_config
 from .retry_queue import get_retry_queue
 from .content_recovery.recovery_service import ContentRecoveryService
+from .url_transformer import url_transformer
 
 
 class MediaDownloadManager:
@@ -143,17 +144,30 @@ class MediaDownloadManager:
                 del self._downloaded_urls[url]
 
         try:
-            # Determine appropriate service for URL
-            service_name, downloader = self._get_service_for_url(url)
+            # Apply URL transformation to convert viewer URLs to direct download URLs
+            transform_result = url_transformer.transform(url)
+            download_url = transform_result.url
+
+            if transform_result.transformed:
+                self._logger.info(f"Transformed URL for direct access: {transform_result.platform}")
+                self._logger.debug(f"Original: {url}")
+                self._logger.debug(f"Transformed: {download_url}")
+                if transform_result.notes:
+                    self._logger.debug(f"Note: {transform_result.notes}")
+            else:
+                download_url = url
+
+            # Determine appropriate service for URL (using transformed URL if available)
+            service_name, downloader = self._get_service_for_url(download_url)
 
             if not downloader:
-                self._logger.warning(f"No suitable downloader found for URL: {url}")
+                self._logger.warning(f"No suitable downloader found for URL: {download_url}")
                 return None
 
-            # Execute download with error isolation
+            # Execute download with error isolation (using transformed URL)
             result = self._service_manager.execute_with_protection(
                 service_name,
-                lambda: downloader.download(url, save_path),
+                lambda: downloader.download(download_url, save_path),
                 fallback_value=DownloadResult(
                     status=DownloadStatus.FAILED,
                     error_message="Service unavailable"
@@ -178,9 +192,14 @@ class MediaDownloadManager:
 
                     if recovery_result.success and recovery_result.recovered_url:
                         self._logger.info(f"Recovery successful! Using recovered URL: {recovery_result.recovered_url}")
-                        # Try downloading from the recovered URL
+                        # Try downloading from the recovered URL (apply transformation if needed)
                         try:
-                            recovery_download_result = downloader.download(recovery_result.recovered_url, save_path)
+                            recovery_transform = url_transformer.transform(recovery_result.recovered_url)
+                            final_recovery_url = recovery_transform.url
+                            if recovery_transform.transformed:
+                                self._logger.debug(f"Also transformed recovery URL: {recovery_result.recovered_url} -> {final_recovery_url}")
+
+                            recovery_download_result = downloader.download(final_recovery_url, save_path)
                             if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                 self._logger.info(f"Successfully downloaded from recovered URL: {recovery_result.recovered_url}")
                                 # Track both original and recovered URLs as successfully downloaded
@@ -214,10 +233,15 @@ class MediaDownloadManager:
 
                     if recovery_result.success and recovery_result.recovered_url:
                         self._logger.info(f"Recovery successful after exception! Using recovered URL: {recovery_result.recovered_url}")
-                        # Try downloading from the recovered URL
-                        downloader = self._get_service_for_url(recovery_result.recovered_url)[1]
+                        # Try downloading from the recovered URL (apply transformation if needed)
+                        recovery_transform = url_transformer.transform(recovery_result.recovered_url)
+                        final_recovery_url = recovery_transform.url
+                        if recovery_transform.transformed:
+                            self._logger.debug(f"Also transformed recovery URL: {recovery_result.recovered_url} -> {final_recovery_url}")
+
+                        downloader = self._get_service_for_url(final_recovery_url)[1]
                         if downloader:
-                            recovery_download_result = downloader.download(recovery_result.recovered_url, save_path)
+                            recovery_download_result = downloader.download(final_recovery_url, save_path)
                             if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                 self._logger.info(f"Successfully downloaded from recovered URL after exception: {recovery_result.recovered_url}")
                                 # Track both original and recovered URLs as successfully downloaded

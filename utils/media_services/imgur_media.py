@@ -313,8 +313,13 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
             # Use PyImgur's download method
+            # Remove extension from filename since PyImgur adds its own extension
+            name_without_ext = os.path.splitext(os.path.basename(save_path))[0]
             filename = image.download(path=os.path.dirname(save_path),
-                                    name=os.path.basename(save_path))
+                                    name=name_without_ext)
+
+            # Check for double extension issue and fix if needed
+            filename = self._fix_double_extension(filename, save_path)
 
             # Get file size
             file_size = os.path.getsize(filename) if os.path.exists(filename) else 0
@@ -791,3 +796,42 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             except Exception as e:
                 print(f"Warning: Failed to initialize PyImgur with credentials: {e}")
                 self._pyimgur_client = None
+
+    def _fix_double_extension(self, actual_filename: str, intended_filename: str) -> str:
+        """
+        Fix double extension issue from PyImgur downloads.
+
+        PyImgur sometimes creates files like 'image.jpg.jpg' when the intended
+        filename already has an extension. This method detects and fixes such cases.
+
+        Args:
+            actual_filename: The filename PyImgur actually created
+            intended_filename: The filename we originally wanted
+
+        Returns:
+            The corrected filename (may be same as actual_filename if no issue)
+        """
+        if not os.path.exists(actual_filename):
+            return actual_filename
+
+        actual_base = os.path.basename(actual_filename)
+        intended_base = os.path.basename(intended_filename)
+
+        # Check if we have a double extension pattern
+        name_parts = actual_base.split('.')
+        if len(name_parts) >= 3:  # e.g., ['image', 'gif', 'gif']
+            # Check if last two parts are the same extension
+            if name_parts[-1] == name_parts[-2] and name_parts[-1] in ['gif', 'jpg', 'jpeg', 'png', 'webp']:
+                # We have a double extension - fix it
+                correct_name = '.'.join(name_parts[:-1])  # Remove the duplicate extension
+                correct_path = os.path.join(os.path.dirname(actual_filename), correct_name)
+
+                try:
+                    os.rename(actual_filename, correct_path)
+                    self._logger.info(f"Fixed double extension: {actual_base} -> {correct_name}")
+                    return correct_path
+                except OSError as e:
+                    self._logger.warning(f"Could not fix double extension for {actual_base}: {e}")
+                    return actual_filename
+
+        return actual_filename
