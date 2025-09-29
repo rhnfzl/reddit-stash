@@ -1460,12 +1460,12 @@ recover_deleted = true                 # Attempt recovery of deleted content
 ⚠️ **CRITICAL NOTE**: Imgur API registration permanently closed to new users in May 2024. These settings only work if you already have existing Imgur application credentials.
 
 * **`client_ids`** - Imgur application client IDs for API access
-  - **Type**: String (comma-separated list)
+  - **Type**: String (comma-separated list in settings.ini, single value in env var)
   - **Default**: `None`
   - **Valid Values**: 
     - `None`: No Imgur API access (uses fallback methods)
     - Single ID: `abc123def456`
-    - Multiple IDs: `id1,id2,id3` (for rate limit rotation)
+    - Multiple IDs (settings.ini only): `id1,id2,id3` (for rate limit rotation)
   - **Format Rules**:
     - No spaces around commas: `id1,id2,id3` ✅
     - With spaces (invalid): `id1, id2, id3` ❌
@@ -1474,29 +1474,42 @@ recover_deleted = true                 # Attempt recovery of deleted content
     - Enables official Imgur API access
     - Higher rate limits (12,500 requests/day per app)
     - Album support and metadata
-    - Multiple IDs rotate to avoid single-app rate limits
+    - Multiple IDs (settings.ini only) rotate to avoid single-app rate limits
   - **Without API Access**:
     - Falls back to direct HTTP downloads
     - Lower success rate (~30-40% vs ~70-80% with API)
     - Frequent 429 rate limit errors (expected and normal)
     - No album support
+  - **Configuration Methods**:
+    
+    | Method | Single ID | Multiple IDs | Best For |
+    |--------|-----------|--------------|----------|
+    | **Environment Variable** | ✅ Yes | ❌ No | Most users, single app |
+    | **settings.ini** | ✅ Yes | ✅ Yes | Advanced: rate limit rotation |
+    
   - **How to Get** (only if you registered before May 2024):
     1. Go to https://imgur.com/account/settings/apps
     2. Select your application
     3. Copy the "Client ID" value
   - **Examples**:
     ```ini
+    # settings.ini - Multiple IDs supported
     client_ids = None                           # No API (most users)
     client_ids = abc123def456                   # Single app
-    client_ids = abc123,def456,ghi789          # Multiple apps (rotation)
+    client_ids = abc123,def456,ghi789          # Multiple apps (rotation) ⚠️ settings.ini only
     ```
+    ```bash
+    # Environment variable - Single ID only
+    export IMGUR_CLIENT_ID='abc123def456'       # Single app only
+    ```
+  - **⚠️ Important**: Multiple client ID rotation is **only supported in settings.ini**, not via environment variables. If you need rotation across multiple Imgur apps, you must use settings.ini configuration.
 
 * **`client_secrets`** - Imgur application client secrets
-  - **Type**: String (comma-separated list)
+  - **Type**: String (comma-separated list in settings.ini, single value in env var)
   - **Default**: `None`
   - **Valid Values**: 
     - `None`: No Imgur API access
-    - Comma-separated secrets matching `client_ids` order
+    - Comma-separated secrets matching `client_ids` order (settings.ini only)
   - **MUST MATCH** `client_ids`:
     - If `client_ids` has 3 IDs, `client_secrets` must have 3 secrets
     - Order matters: `client_ids[0]` pairs with `client_secrets[0]`
@@ -1506,15 +1519,28 @@ recover_deleted = true                 # Attempt recovery of deleted content
     - Keep these SECRET (never commit to version control!)
   - **Security Warning**:
     - These are sensitive credentials
-    - Use environment variables (`IMGUR_CLIENT_SECRET`) instead
+    - Environment variables recommended for single app
     - Never share or expose publicly
+  - **Configuration Methods**:
+    
+    | Method | Single Secret | Multiple Secrets | Recommended |
+    |--------|--------------|------------------|-------------|
+    | **Environment Variable** | ✅ Yes | ❌ No | ✅ Most secure |
+    | **settings.ini** | ✅ Yes | ✅ Yes | ⚠️ Only if multiple apps |
+    
   - **Examples**:
     ```ini
+    # settings.ini - Multiple secrets supported
     client_secrets = None                                                    # No API
     client_secrets = abcdef1234567890abcdef1234567890abcdef12              # Single
-    client_secrets = secret1_40chars,secret2_40chars,secret3_40chars        # Multiple
+    client_secrets = secret1_40chars,secret2_40chars,secret3_40chars        # Multiple ⚠️ settings.ini only
+    ```
+    ```bash
+    # Environment variable - Single secret only (RECOMMENDED)
+    export IMGUR_CLIENT_SECRET='abcdef1234567890abcdef1234567890abcdef12'
     ```
   - **Validation**: Script checks that count matches `client_ids`
+  - **⚠️ Note**: Multiple client secrets are **only supported in settings.ini**. For single app (most users), use environment variable for better security.
 
 * **`recover_deleted`** - Attempt recovery of deleted/unavailable Imgur content
   - **Type**: Boolean
@@ -2050,9 +2076,9 @@ Quick alphabetical reference of all 43 settings with links to detailed documenta
 - **`check_type`** (String, default: LOG) - File existence checking method | [→ Settings Section](#core-settings-explained)
 - **`cleanup_interval_minutes`** (Integer, default: 60) - Cache cleanup frequency | [→ Recovery Section](#recovery-cache-management)
 - **`client_id`** (String, default: None) - Reddit API client ID | [→ Configuration Section](#api-configuration-settings)
-- **`client_ids`** (String, default: None) - Imgur application client IDs | [→ Imgur Section](#imgur-settings-explained)
+- **`client_ids`** (String, default: None) - Imgur client IDs (multiple in settings.ini only) | [→ Imgur Section](#imgur-settings-explained)
 - **`client_secret`** (String, default: None) - Reddit API client secret | [→ Configuration Section](#api-configuration-settings)
-- **`client_secrets`** (String, default: None) - Imgur application client secrets | [→ Imgur Section](#imgur-settings-explained)
+- **`client_secrets`** (String, default: None) - Imgur client secrets (multiple in settings.ini only) | [→ Imgur Section](#imgur-settings-explained)
 - **`create_thumbnails`** (Boolean, default: true) - Generate thumbnail versions | [→ Media Section](#media-settings-explained)
 
 #### D-I
