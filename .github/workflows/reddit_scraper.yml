@@ -37,7 +37,7 @@ jobs:
       timeout-minutes: 1
 
     - name: TruffleHog OSS
-      uses: trufflesecurity/trufflehog@v3.90.8
+      uses: trufflesecurity/trufflehog@main
       with:
         extra_args: --only-verified
 
