@@ -2,6 +2,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10--3.12-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Workflow-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/features/actions)
+[![Docker](https://img.shields.io/badge/Docker-Available-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://github.com/rhnfzl/reddit-stash/pkgs/container/reddit-stash)
 [![Dropbox](https://img.shields.io/badge/Dropbox-Integration-0061FF?style=for-the-badge&logo=dropbox&logoColor=white)](https://www.dropbox.com/)
 [![Reddit](https://img.shields.io/badge/Reddit-API-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/dev/api/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
@@ -364,7 +365,67 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
 
 #### Docker Installation
 
-You can run Reddit Stash in a Docker container for isolation and consistent environment across different systems.
+🐳 **Pre-built Images Available!** No build required - pull and run directly from GitHub Container Registry.
+
+##### Option 1: Use Pre-built Images (Recommended for NAS/HomeLab)
+
+Pull pre-built multi-platform images (AMD64/ARM64) from GitHub Container Registry:
+
+```bash
+# Pull the latest stable image
+docker pull ghcr.io/rhnfzl/reddit-stash:latest
+
+# Run with your credentials
+docker run -d \
+  --name reddit-stash \
+  -v reddit-data:/app/reddit \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  ghcr.io/rhnfzl/reddit-stash:latest
+```
+
+**Available Image Tags:**
+
+| Tag | Description | Use Case |
+|-----|-------------|----------|
+| `latest` | Latest stable from main branch | Production deployments |
+| `develop` | Development version | Testing new features |
+| `py3.10-latest`, `py3.11-latest`, `py3.12-latest` | Python-specific versions | Specific Python requirements |
+| `v1.0.0` | Semantic version tags | Version pinning |
+| `sha-abc123` | Commit-specific builds | Reproducible deployments |
+
+**Platform Support:**
+- ✅ **AMD64** (x86_64) - Standard x86 systems
+- ✅ **ARM64** - Raspberry Pi, ARM-based NAS devices
+
+**NAS/HomeLab Compatibility:**
+- Synology DSM (Container Manager)
+- QNAP (Container Station)
+- TrueNAS SCALE
+- unRAID (Community Applications)
+- OpenMediaVault (Docker plugin)
+- Proxmox (LXC/Docker)
+- Portainer, Yacht, CasaOS, Dockge
+
+**Periodic execution with pre-built image:**
+```bash
+docker run -d \
+  --name reddit-stash \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e SCHEDULE_MODE='periodic' \
+  -e SCHEDULE_INTERVAL='7200' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest
+```
+
+##### Option 2: Build Locally
+
+You can also build Reddit Stash locally for isolation and consistent environment across different systems.
 
 **1. Build the Docker image**:
 ```bash
