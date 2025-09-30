@@ -367,6 +367,16 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
 
 🐳 **Pre-built Images Available!** No build required - pull and run directly from GitHub Container Registry.
 
+**📁 Important: File Storage Location**
+
+When running via Docker, files are downloaded to `/app/reddit/` **inside the container**. Without a volume mount, these files are **lost when the container stops**.
+
+To persist your downloaded Reddit content, you **must** mount a volume:
+
+- **Named Volume** (recommended): `-v reddit-data:/app/reddit` - Docker manages storage, data persists across container restarts
+- **Bind Mount** (direct access): `-v $(pwd)/reddit:/app/reddit` - Files stored directly on your host machine at `./reddit/`
+- **NAS Path**: `-v /volume1/reddit-stash:/app/reddit` - Store on your NAS at a specific location
+
 ##### Option 1: Use Pre-built Images (Recommended for NAS/HomeLab)
 
 Pull pre-built multi-platform images (AMD64/ARM64) from GitHub Container Registry:
