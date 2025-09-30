@@ -2,6 +2,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10--3.12-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Workflow-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/features/actions)
+[![Docker](https://img.shields.io/badge/Docker-Available-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://github.com/rhnfzl/reddit-stash/pkgs/container/reddit-stash)
 [![Dropbox](https://img.shields.io/badge/Dropbox-Integration-0061FF?style=for-the-badge&logo=dropbox&logoColor=white)](https://www.dropbox.com/)
 [![Reddit](https://img.shields.io/badge/Reddit-API-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/dev/api/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
@@ -364,177 +365,569 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
 
 #### Docker Installation
 
-You can run Reddit Stash in a Docker container for isolation and consistent environment across different systems.
+🐳 **Pre-built Images Available!** No build required - pull and run directly from GitHub Container Registry.
 
-**1. Build the Docker image**:
+##### Option 1: Use Pre-built Images (Recommended for NAS/HomeLab)
+
+Pull pre-built multi-platform images (AMD64/ARM64) from GitHub Container Registry:
+
 ```bash
-# Build with default Python 3.12
-docker build -t reddit-stash .
+# Pull the latest stable image
+docker pull ghcr.io/rhnfzl/reddit-stash:latest
 
-# Build with specific Python version (optional)
-docker build --build-arg PYTHON_VERSION=3.11 -t reddit-stash .
-docker build --build-arg PYTHON_VERSION=3.10 -t reddit-stash .
-```
-
-**2. Run the container**:
-
-**⚠️ Important: Use single quotes for passwords with special characters**
-If your Reddit password contains special characters like `!`, `&`, `$`, etc., use single quotes to prevent shell interpretation:
-```bash
--e REDDIT_PASSWORD='your_password_with!special_chars'
-```
-
-**Option A: Local-only mode (no Dropbox sync)**
-
-**Single execution** (runs once and exits):
-```bash
-docker run -it \
+# Run with your credentials
+docker run -d \
+  --name reddit-stash \
+  -v reddit-data:/app/reddit \
   -e REDDIT_CLIENT_ID='your_client_id' \
   -e REDDIT_CLIENT_SECRET='your_client_secret' \
   -e REDDIT_USERNAME='your_username' \
   -e REDDIT_PASSWORD='your_password' \
-  -v $(pwd)/reddit:/app/reddit \
-  reddit-stash
+  ghcr.io/rhnfzl/reddit-stash:latest
 ```
 
-**Periodic execution** (runs every 2 hours automatically):
+**Available Image Tags:**
+
+| Tag | Description | Use Case |
+|-----|-------------|----------|
+| `latest` | Latest stable from main branch | Production deployments |
+| `develop` | Development version | Testing new features |
+| `py3.10-latest`, `py3.11-latest`, `py3.12-latest` | Python-specific versions | Specific Python requirements |
+| `v1.0.0` | Semantic version tags | Version pinning |
+| `sha-abc123` | Commit-specific builds | Reproducible deployments |
+
+**Platform Support:**
+- ✅ **AMD64** (x86_64) - Standard x86 systems
+- ✅ **ARM64** - Raspberry Pi, ARM-based NAS devices
+
+**NAS/HomeLab Compatibility:**
+- Synology DSM (Container Manager)
+- QNAP (Container Station)
+- TrueNAS SCALE
+- unRAID (Community Applications)
+- OpenMediaVault (Docker plugin)
+- Proxmox (LXC/Docker)
+- Portainer, Yacht, CasaOS, Dockge
+
+**Periodic execution with pre-built image:**
 ```bash
-docker run -it \
+docker run -d \
+  --name reddit-stash \
   -e REDDIT_CLIENT_ID='your_client_id' \
   -e REDDIT_CLIENT_SECRET='your_client_secret' \
   -e REDDIT_USERNAME='your_username' \
   -e REDDIT_PASSWORD='your_password' \
   -e SCHEDULE_MODE='periodic' \
-  -v $(pwd)/reddit:/app/reddit \
-  reddit-stash
+  -e SCHEDULE_INTERVAL='7200' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest
 ```
 
-**Custom interval** (runs every hour):
+---
+
+#### Docker Compose (Recommended for NAS/HomeLab)
+
+Docker Compose is the recommended deployment method for NAS and HomeLab environments. It provides easier management, configuration persistence, and works seamlessly with Portainer, Yacht, CasaOS, and other GUI tools.
+
+**1. Create docker-compose.yml**
+
+**Basic Setup (Local-only with Periodic Execution):**
+
+```yaml
+version: '3.8'
+
+services:
+  reddit-stash:
+    image: ghcr.io/rhnfzl/reddit-stash:latest
+    container_name: reddit-stash
+    restart: unless-stopped
+    environment:
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - SCHEDULE_MODE=periodic
+      - SCHEDULE_INTERVAL=7200
+    volumes:
+      - reddit-data:/app/reddit
+
+volumes:
+  reddit-data:
+```
+
+**2. Create .env file**
+
+Create a `.env` file in the same directory as your `docker-compose.yml`:
+
+```env
+REDDIT_CLIENT_ID=your_client_id_here
+REDDIT_CLIENT_SECRET=your_client_secret_here
+REDDIT_USERNAME=your_reddit_username
+REDDIT_PASSWORD=your_reddit_password
+```
+
+**3. Run with Docker Compose**
+
 ```bash
-docker run -it \
+# Start the service
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop the service
+docker-compose down
+
+# Update to latest image
+docker-compose pull && docker-compose up -d
+```
+
+**With Dropbox Sync:**
+
+```yaml
+version: '3.8'
+
+services:
+  reddit-stash:
+    image: ghcr.io/rhnfzl/reddit-stash:latest
+    container_name: reddit-stash
+    restart: unless-stopped
+    environment:
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - DROPBOX_APP_KEY=${DROPBOX_APP_KEY}
+      - DROPBOX_APP_SECRET=${DROPBOX_APP_SECRET}
+      - DROPBOX_REFRESH_TOKEN=${DROPBOX_REFRESH_TOKEN}
+      - SCHEDULE_MODE=periodic
+      - SCHEDULE_INTERVAL=7200
+    volumes:
+      - reddit-data:/app/reddit
+
+volumes:
+  reddit-data:
+```
+
+Add to your `.env`:
+```env
+DROPBOX_APP_KEY=your_dropbox_app_key
+DROPBOX_APP_SECRET=your_dropbox_app_secret
+DROPBOX_REFRESH_TOKEN=your_dropbox_refresh_token
+```
+
+**With Imgur API (for Better Rate Limits):**
+
+```yaml
+version: '3.8'
+
+services:
+  reddit-stash:
+    image: ghcr.io/rhnfzl/reddit-stash:latest
+    container_name: reddit-stash
+    restart: unless-stopped
+    environment:
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - IMGUR_CLIENT_ID=${IMGUR_CLIENT_ID}
+      - SCHEDULE_MODE=periodic
+      - SCHEDULE_INTERVAL=7200
+    volumes:
+      - reddit-data:/app/reddit
+
+volumes:
+  reddit-data:
+```
+
+Add to your `.env`:
+```env
+IMGUR_CLIENT_ID=your_imgur_client_id
+```
+
+**Full-Featured Example:**
+
+```yaml
+version: '3.8'
+
+services:
+  reddit-stash:
+    image: ghcr.io/rhnfzl/reddit-stash:latest
+    container_name: reddit-stash
+    restart: unless-stopped
+    environment:
+      # Reddit credentials
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      # Dropbox sync (optional)
+      - DROPBOX_APP_KEY=${DROPBOX_APP_KEY}
+      - DROPBOX_APP_SECRET=${DROPBOX_APP_SECRET}
+      - DROPBOX_REFRESH_TOKEN=${DROPBOX_REFRESH_TOKEN}
+      # Imgur API (optional - for better rate limits)
+      - IMGUR_CLIENT_ID=${IMGUR_CLIENT_ID}
+      # Scheduling
+      - SCHEDULE_MODE=periodic
+      - SCHEDULE_INTERVAL=7200
+    volumes:
+      - reddit-data:/app/reddit
+      # Optional: mount custom settings.ini
+      # - ./settings.ini:/app/settings.ini:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+volumes:
+  reddit-data:
+```
+
+**Using with Portainer:**
+
+1. Go to **Stacks** → **Add stack**
+2. Name your stack (e.g., `reddit-stash`)
+3. Paste one of the compose examples above
+4. Scroll down to **Environment variables** and add your credentials:
+   - `REDDIT_CLIENT_ID` = your_client_id
+   - `REDDIT_CLIENT_SECRET` = your_client_secret
+   - `REDDIT_USERNAME` = your_username
+   - `REDDIT_PASSWORD` = your_password
+   - (Add others as needed)
+5. Click **Deploy the stack**
+
+**Bind Mounts for Specific Paths:**
+
+If you prefer to use a specific directory instead of a named volume, use bind mounts:
+
+```yaml
+volumes:
+  # Named volume (recommended)
+  - reddit-data:/app/reddit
+
+  # OR bind mount to specific path
+  # Synology:
+  # - /volume1/docker/reddit-stash:/app/reddit
+  # unRAID:
+  # - /mnt/user/appdata/reddit-stash:/app/reddit
+  # Generic:
+  # - ./reddit:/app/reddit
+```
+
+---
+
+#### Additional Docker CLI Examples
+
+**With Dropbox Sync (Single Run):**
+
+```bash
+docker run --rm \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e DROPBOX_APP_KEY='your_dropbox_key' \
+  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
+  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest
+```
+
+**With Dropbox Sync (Periodic):**
+
+```bash
+docker run -d \
+  --name reddit-stash \
+  --restart unless-stopped \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e DROPBOX_APP_KEY='your_dropbox_key' \
+  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
+  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
+  -e SCHEDULE_MODE='periodic' \
+  -e SCHEDULE_INTERVAL='7200' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest
+```
+
+**With Imgur API for Better Rate Limits:**
+
+```bash
+docker run -d \
+  --name reddit-stash \
+  --restart unless-stopped \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e IMGUR_CLIENT_ID='your_imgur_client_id' \
+  -e SCHEDULE_MODE='periodic' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest
+```
+
+**With 2FA Authentication:**
+
+If you use Reddit's Two-Factor Authentication, append your 6-digit code to your password:
+
+```bash
+docker run -d \
+  --name reddit-stash \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password:123456' \
+  -e SCHEDULE_MODE='periodic' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest
+```
+
+**With Custom settings.ini:**
+
+```bash
+docker run -d \
+  --name reddit-stash \
+  --restart unless-stopped \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e SCHEDULE_MODE='periodic' \
+  -v reddit-data:/app/reddit \
+  -v /path/to/your/settings.ini:/app/settings.ini:ro \
+  ghcr.io/rhnfzl/reddit-stash:latest
+```
+
+**Custom Interval (e.g., every hour):**
+
+```bash
+docker run -d \
+  --name reddit-stash \
+  --restart unless-stopped \
   -e REDDIT_CLIENT_ID='your_client_id' \
   -e REDDIT_CLIENT_SECRET='your_client_secret' \
   -e REDDIT_USERNAME='your_username' \
   -e REDDIT_PASSWORD='your_password' \
   -e SCHEDULE_MODE='periodic' \
   -e SCHEDULE_INTERVAL='3600' \
-  -v $(pwd)/reddit:/app/reddit \
-  reddit-stash
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest
 ```
 
-**Option B: Dropbox sync mode (full cloud backup)**
+---
 
-**Single execution** (runs once and exits):
+#### Special Operations
+
+**Dropbox Upload Only:**
+
+Upload local content to Dropbox without running the main Reddit scraper:
+
 ```bash
-docker run -it \
+docker run --rm \
+  -e DROPBOX_APP_KEY='your_dropbox_key' \
+  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
+  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest \
+  dropbox_utils.py --upload
+```
+
+**Dropbox Download Only:**
+
+Download content from Dropbox to local storage:
+
+```bash
+docker run --rm \
+  -e DROPBOX_APP_KEY='your_dropbox_key' \
+  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
+  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest \
+  dropbox_utils.py --download
+```
+
+---
+
+#### Volume Management
+
+**Named Volumes (Recommended for NAS):**
+
+Named volumes are portable across different NAS systems and don't require specific path configurations:
+
+```bash
+-v reddit-data:/app/reddit
+```
+
+View volume location:
+```bash
+docker volume inspect reddit-data
+```
+
+**Bind Mounts (Specific Paths):**
+
+Use bind mounts when you need data in a specific directory:
+
+```bash
+# Synology DSM
+-v /volume1/docker/reddit-stash:/app/reddit
+
+# QNAP
+-v /share/Container/reddit-stash:/app/reddit
+
+# TrueNAS SCALE
+-v /mnt/tank/apps/reddit-stash:/app/reddit
+
+# unRAID
+-v /mnt/user/appdata/reddit-stash:/app/reddit
+
+# Generic Linux/macOS
+-v /path/to/reddit:/app/reddit
+-v $(pwd)/reddit:/app/reddit
+```
+
+**Volume Permissions:**
+
+The container runs as UID 1000. If you encounter permission errors with bind mounts:
+
+```bash
+sudo chown -R 1000:1000 /path/to/reddit
+```
+
+---
+
+#### Advanced Configuration
+
+**Resource Limits for NAS Devices:**
+
+Limit CPU and memory usage to prevent overloading your NAS:
+
+**Docker CLI:**
+```bash
+docker run -d \
+  --name reddit-stash \
+  --restart unless-stopped \
+  --memory="512m" \
+  --memory-swap="1g" \
+  --cpus="1.0" \
   -e REDDIT_CLIENT_ID='your_client_id' \
   -e REDDIT_CLIENT_SECRET='your_client_secret' \
   -e REDDIT_USERNAME='your_username' \
   -e REDDIT_PASSWORD='your_password' \
-  -e DROPBOX_APP_KEY='your_dropbox_key' \
-  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
-  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
-  -v $(pwd)/reddit:/app/reddit \
-  reddit-stash
-```
-
-**Periodic execution** (runs every 2 hours with automatic Dropbox sync):
-```bash
-docker run -it \
-  -e REDDIT_CLIENT_ID='your_client_id' \
-  -e REDDIT_CLIENT_SECRET='your_client_secret' \
-  -e REDDIT_USERNAME='your_username' \
-  -e REDDIT_PASSWORD='your_password' \
-  -e DROPBOX_APP_KEY='your_dropbox_key' \
-  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
-  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
   -e SCHEDULE_MODE='periodic' \
-  -v $(pwd)/reddit:/app/reddit \
-  reddit-stash
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest
 ```
 
-**Windows Command Prompt:**
-
-**Local-only (single execution):**
-```cmd
-docker run -it ^
-  -e REDDIT_CLIENT_ID=your_client_id ^
-  -e REDDIT_CLIENT_SECRET=your_client_secret ^
-  -e REDDIT_USERNAME=your_username ^
-  -e REDDIT_PASSWORD=your_password ^
-  -v %cd%/reddit:/app/reddit ^
-  reddit-stash
+**Docker Compose:**
+```yaml
+services:
+  reddit-stash:
+    # ... other config ...
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
 ```
 
-**Local-only (periodic execution):**
-```cmd
-docker run -it ^
-  -e REDDIT_CLIENT_ID=your_client_id ^
-  -e REDDIT_CLIENT_SECRET=your_client_secret ^
-  -e REDDIT_USERNAME=your_username ^
-  -e REDDIT_PASSWORD=your_password ^
-  -e SCHEDULE_MODE=periodic ^
-  -v %cd%/reddit:/app/reddit ^
-  reddit-stash
-```
-
-**Dropbox sync (periodic execution):**
-```cmd
-docker run -it ^
-  -e REDDIT_CLIENT_ID=your_client_id ^
-  -e REDDIT_CLIENT_SECRET=your_client_secret ^
-  -e REDDIT_USERNAME=your_username ^
-  -e REDDIT_PASSWORD=your_password ^
-  -e DROPBOX_APP_KEY=your_dropbox_key ^
-  -e DROPBOX_APP_SECRET=your_dropbox_secret ^
-  -e DROPBOX_REFRESH_TOKEN=your_dropbox_token ^
-  -e SCHEDULE_MODE=periodic ^
-  -v %cd%/reddit:/app/reddit ^
-  reddit-stash
-```
-
-**3. Run the container for Dropbox operations**:
-
-**Upload to Dropbox:**
-```bash
-docker run -it \
-  -e DROPBOX_APP_KEY=your_dropbox_key \
-  -e DROPBOX_APP_SECRET=your_dropbox_secret \
-  -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-  -v $(pwd)/reddit:/app/reddit \
-  reddit-stash dropbox_utils.py --upload
-```
-
-**Download from Dropbox:**
-```bash
-docker run -it \
-  -e DROPBOX_APP_KEY=your_dropbox_key \
-  -e DROPBOX_APP_SECRET=your_dropbox_secret \
-  -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-  -v $(pwd)/reddit:/app/reddit \
-  reddit-stash dropbox_utils.py --download
-```
-
-**4. Docker Compose (Alternative Method)**
-
-For easier management, you can use docker-compose:
+**Monitoring & Logs:**
 
 ```bash
-# Copy the example environment file
-cp .env.example .env
+# View real-time logs
+docker logs -f reddit-stash
 
-# Edit .env with your credentials
-nano .env  # or your preferred editor
+# View last 100 lines
+docker logs --tail 100 reddit-stash
 
-# Run the service
-docker-compose --profile main up
+# View logs since specific time
+docker logs --since 1h reddit-stash
 
-# For one-time execution
-docker-compose --profile oneshot run --rm reddit-stash-oneshot
-
-# For Dropbox operations only
-docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --upload
+# Monitor resource usage
+docker stats reddit-stash
 ```
+
+**Updating the Container:**
+
+```bash
+# Stop and remove old container
+docker stop reddit-stash
+docker rm reddit-stash
+
+# Pull latest image
+docker pull ghcr.io/rhnfzl/reddit-stash:latest
+
+# Recreate with same command or docker-compose up -d
+```
+
+Or with Docker Compose:
+```bash
+docker-compose pull
+docker-compose up -d
+```
+
+---
+
+#### Platform-Specific Deployment Guides
+
+For detailed step-by-step guides specific to your NAS platform, see **[docs/DOCKER_DEPLOYMENT.md](docs/DOCKER_DEPLOYMENT.md)**:
+
+- **Synology DSM** - Container Manager setup
+- **QNAP** - Container Station configuration
+- **TrueNAS SCALE** - Apps deployment
+- **unRAID** - Docker tab and Community Applications
+- **OpenMediaVault** - Docker plugin setup
+- **Proxmox** - LXC container with Docker
+- **Portainer** - Stack deployment
+
+---
+
+##### Option 2: Build Locally
+
+If you prefer to build the Docker image yourself:
+
+**1. Clone and Build:**
+
+```bash
+# Clone the repository
+git clone https://github.com/rhnfzl/reddit-stash.git
+cd reddit-stash
+
+# Build with default Python 3.12
+docker build -t reddit-stash:local .
+
+# Or build with specific Python version
+docker build --build-arg PYTHON_VERSION=3.11 -t reddit-stash:py3.11 .
+docker build --build-arg PYTHON_VERSION=3.10 -t reddit-stash:py3.10 .
+```
+
+**2. Run the Locally Built Image:**
+
+After building, use your local image tag (`reddit-stash:local`) instead of the GitHub Container Registry image (`ghcr.io/rhnfzl/reddit-stash:latest`) in any of the examples from Option 1 above.
+
+**Example:**
+```bash
+docker run -d \
+  --name reddit-stash \
+  --restart unless-stopped \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e SCHEDULE_MODE='periodic' \
+  -v reddit-data:/app/reddit \
+  reddit-stash:local
+```
+
+**For all other usage scenarios** (Dropbox sync, Imgur API, docker-compose, special operations, etc.), refer to the examples in Option 1 above, simply replacing the image name.
+
+---
 
 #### Docker Notes:
 
