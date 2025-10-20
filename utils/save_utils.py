@@ -130,7 +130,7 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
             f.write(f'subreddit: {recovered_data.get("subreddit", "[unknown]")}\n')
             f.write(f'timestamp: {recovered_data.get("created_utc", "unknown")}\n')
             f.write(f'author: {recovered_data.get("author", "[deleted]")}\n')
-            f.write(f'recovered: true\n')
+            f.write('recovered: true\n')
         else:
             # Normal PRAW object
             f.write(f'subreddit: /r/{submission.subreddit.display_name}\n')
@@ -214,7 +214,7 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
             # Handle recovered comment
             recovered_data = comment.recovered_data if hasattr(comment, 'recovered_data') else {}
             f.write(f'Comment by {recovered_data.get("author", "[deleted]")}\n')
-            f.write(f'- **Recovered:** true\n')
+            f.write('- **Recovered:** true\n')
             f.write(f'{recovered_data.get("body", "[Content not available]")}\n\n')
         else:
             # Normal PRAW comment

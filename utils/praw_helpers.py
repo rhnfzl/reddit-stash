@@ -125,7 +125,7 @@ This content was recovered from archival sources because the original was delete
 - **Recovery Date**: {metadata.recovery_date}
 - **Content Quality**: {quality_desc}
 - **Original URL**: {recovery_result.recovered_url}
-{f"- **Cache Hit**: Yes" if metadata.cache_hit else ""}
+{"- **Cache Hit**: Yes" if metadata.cache_hit else ""}
 
 ---
 
@@ -175,7 +175,7 @@ def safe_fetch_items(
         for item in items:
             yield item
 
-    except prawcore.exceptions.NotFound as e:
+    except prawcore.exceptions.NotFound:
         # Batch fetch failed - fall back to one-by-one iteration
         log.warning(
             f"Batch fetch failed with 404 error for {item_type} items. "
@@ -192,7 +192,7 @@ def safe_fetch_items(
 
         # If recovery is enabled, we could try to recover based on context
         if recovery_enabled and recovery_service:
-            log.info(f"Recovery service is enabled but cannot determine specific failed items from batch fetch")
+            log.info("Recovery service is enabled but cannot determine specific failed items from batch fetch")
 
     except prawcore.exceptions.Forbidden as e:
         log.error(
@@ -249,7 +249,7 @@ def safe_fetch_items_one_by_one(
                 last_successful_item = item
                 yield item
 
-            except prawcore.exceptions.NotFound as e:
+            except prawcore.exceptions.NotFound:
                 # Individual item not found (deleted/removed)
                 skipped += 1
                 log.warning(f"Item {count + skipped} not found (404) - attempting recovery")

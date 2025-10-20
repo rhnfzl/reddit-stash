@@ -9,7 +9,7 @@ from utils.save_utils import save_submission, save_comment_and_context  # Import
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
 from utils.path_security import create_safe_path, create_reddit_file_path
-from utils.praw_helpers import safe_fetch_items, safe_fetch_items_one_by_one
+from utils.praw_helpers import safe_fetch_items_one_by_one
 
 
 logger = logging.getLogger(__name__)
