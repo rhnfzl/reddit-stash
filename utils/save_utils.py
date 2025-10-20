@@ -5,6 +5,7 @@ from datetime import datetime
 from praw.models import Submission, Comment
 from utils.time_utilities import lazy_load_comments
 from utils.env_config import get_ignore_tls_errors
+from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
 
 def format_date(timestamp):
     """Format a UTC timestamp into a human-readable date."""
@@ -96,20 +97,53 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
         print(f"Fallback download failed for {image_url}: {e}")
         return None, 0
 
-def save_submission(submission, f, unsave=False, ignore_tls_errors=None):
-    """Save a submission and its metadata, optionally unsaving it after."""
+def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
+    """Save a submission and its metadata, optionally unsaving it after.
+
+    Args:
+        submission: PRAW Submission object or RecoveredItem
+        f: File object to write to
+        unsave: Whether to unsave the submission after saving
+        ignore_tls_errors: Whether to ignore TLS errors during downloads
+        recovery_metadata: RecoveryResult object if this is recovered content
+    """
     try:
+        # Check if this is a recovered item
+        is_recovered = isinstance(submission, RecoveredItem)
+
+        # If recovery_metadata is provided or item is recovered, add recovery banner
+        if recovery_metadata or is_recovered:
+            if is_recovered and hasattr(submission, 'recovery_result'):
+                recovery_metadata = submission.recovery_result
+
+            if recovery_metadata:
+                recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
+                f.write(recovery_banner)
+
         f.write('---\n')  # Start of frontmatter
         f.write(f'id: {submission.id}\n')
-        f.write(f'subreddit: /r/{submission.subreddit.display_name}\n')
-        f.write(f'timestamp: {format_date(submission.created_utc)}\n')
-        f.write(f'author: /u/{submission.author.name if submission.author else "[deleted]"}\n')
-        
-        if submission.link_flair_text:  # Check if flair exists and is not None
+
+        # Handle recovered items differently
+        if is_recovered:
+            # Extract data from recovery result
+            recovered_data = submission.recovered_data if hasattr(submission, 'recovered_data') else {}
+            f.write(f'subreddit: {recovered_data.get("subreddit", "[unknown]")}\n')
+            f.write(f'timestamp: {recovered_data.get("created_utc", "unknown")}\n')
+            f.write(f'author: {recovered_data.get("author", "[deleted]")}\n')
+            f.write(f'recovered: true\n')
+        else:
+            # Normal PRAW object
+            f.write(f'subreddit: /r/{submission.subreddit.display_name}\n')
+            f.write(f'timestamp: {format_date(submission.created_utc)}\n')
+            f.write(f'author: /u/{submission.author.name if submission.author else "[deleted]"}\n')
+
+        if not is_recovered and submission.link_flair_text:  # Check if flair exists and is not None
             f.write(f'flair: {submission.link_flair_text}\n')
-            
-        f.write(f'comments: {submission.num_comments}\n')
-        f.write(f'permalink: https://reddit.com{submission.permalink}\n')
+
+        if not is_recovered:
+            f.write(f'comments: {submission.num_comments}\n')
+            f.write(f'permalink: https://reddit.com{submission.permalink}\n')
+
         f.write('---\n\n')  # End of frontmatter
         f.write(f'# {submission.title}\n\n')
         f.write(f'**Upvotes:** {submission.score} | **Permalink:** [Link](https://reddit.com{submission.permalink})\n\n')
@@ -150,43 +184,74 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None):
     except Exception as e:
         print(f"Error saving submission {submission.id}: {e}")
 
-def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None):
-    """Save a comment, its context, and any child comments."""
+def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
+    """Save a comment, its context, and any child comments.
+
+    Args:
+        comment: PRAW Comment object or RecoveredItem
+        f: File object to write to
+        unsave: Whether to unsave the comment after saving
+        ignore_tls_errors: Whether to ignore TLS errors during downloads
+        recovery_metadata: RecoveryResult object if this is recovered content
+    """
     try:
+        # Check if this is a recovered item
+        is_recovered = isinstance(comment, RecoveredItem)
+
+        # If recovery_metadata is provided or item is recovered, add recovery banner
+        if recovery_metadata or is_recovered:
+            if is_recovered and hasattr(comment, 'recovery_result'):
+                recovery_metadata = comment.recovery_result
+
+            if recovery_metadata:
+                recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
+                f.write(recovery_banner)
+
         # Save the comment itself
         f.write('---\n')  # Start of frontmatter
-        f.write(f'Comment by /u/{comment.author.name if comment.author else "[deleted]"}\n')
-        f.write(f'- **Upvotes:** {comment.score} | **Permalink:** [Link](https://reddit.com{comment.permalink})\n')
-        f.write(f'{comment.body}\n\n')
+
+        if is_recovered:
+            # Handle recovered comment
+            recovered_data = comment.recovered_data if hasattr(comment, 'recovered_data') else {}
+            f.write(f'Comment by {recovered_data.get("author", "[deleted]")}\n')
+            f.write(f'- **Recovered:** true\n')
+            f.write(f'{recovered_data.get("body", "[Content not available]")}\n\n')
+        else:
+            # Normal PRAW comment
+            f.write(f'Comment by /u/{comment.author.name if comment.author else "[deleted]"}\n')
+            f.write(f'- **Upvotes:** {comment.score} | **Permalink:** [Link](https://reddit.com{comment.permalink})\n')
+            f.write(f'{comment.body}\n\n')
+
         f.write('---\n\n')  # End of frontmatter
 
-        # Save the parent context
-        parent = comment.parent()
-        if isinstance(parent, Submission):
-            f.write(f'## Context: Post by /u/{parent.author.name if parent.author else "[deleted]"}\n')
-            f.write(f'- **Title:** {parent.title}\n')
-            f.write(f'- **Upvotes:** {parent.score} | **Permalink:** [Link](https://reddit.com{parent.permalink})\n')
-            if parent.is_self:
-                f.write(f'{parent.selftext}\n\n')
-            else:
-                f.write(f'[Link to post content]({parent.url})\n\n')
+        # Save the parent context (skip for recovered items as we don't have parent info)
+        if not is_recovered:
+            parent = comment.parent()
+            if isinstance(parent, Submission):
+                f.write(f'## Context: Post by /u/{parent.author.name if parent.author else "[deleted]"}\n')
+                f.write(f'- **Title:** {parent.title}\n')
+                f.write(f'- **Upvotes:** {parent.score} | **Permalink:** [Link](https://reddit.com{parent.permalink})\n')
+                if parent.is_self:
+                    f.write(f'{parent.selftext}\n\n')
+                else:
+                    f.write(f'[Link to post content]({parent.url})\n\n')
 
-            # Save the full submission context, including all comments
-            f.write('\n\n## Full Post Context:\n\n')
-            save_submission(parent, f, ignore_tls_errors=ignore_tls_errors)  # Save the parent post context
+                # Save the full submission context, including all comments
+                f.write('\n\n## Full Post Context:\n\n')
+                save_submission(parent, f, ignore_tls_errors=ignore_tls_errors)  # Save the parent post context
 
-        elif isinstance(parent, Comment):
-            f.write(f'## Context: Parent Comment by /u/{parent.author.name if parent.author else "[deleted]"}\n')
-            f.write(f'- **Upvotes:** {parent.score} | **Permalink:** [Link](https://reddit.com{parent.permalink})\n')
-            f.write(f'{parent.body}\n\n')
+            elif isinstance(parent, Comment):
+                f.write(f'## Context: Parent Comment by /u/{parent.author.name if parent.author else "[deleted]"}\n')
+                f.write(f'- **Upvotes:** {parent.score} | **Permalink:** [Link](https://reddit.com{parent.permalink})\n')
+                f.write(f'{parent.body}\n\n')
 
-            # Recursively save the parent comment's context
-            save_comment_and_context(parent, f, ignore_tls_errors=ignore_tls_errors)
+                # Recursively save the parent comment's context
+                save_comment_and_context(parent, f, ignore_tls_errors=ignore_tls_errors)
 
-        # Save child comments if any exist
-        if comment.replies:
-            f.write('\n\n## Child Comments:\n\n')
-            process_comments(comment.replies, f, ignore_tls_errors=ignore_tls_errors)
+            # Save child comments if any exist
+            if comment.replies:
+                f.write('\n\n## Child Comments:\n\n')
+                process_comments(comment.replies, f, ignore_tls_errors=ignore_tls_errors)
 
         # Unsave the comment if requested
         if unsave:

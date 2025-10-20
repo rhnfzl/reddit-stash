@@ -1,6 +1,7 @@
 import os
 import configparser
 import logging
+import prawcore
 from tqdm import tqdm
 from praw.models import Submission, Comment  # Import Submission and Comment
 from utils.log_utils import log_file, save_file_log
@@ -8,6 +9,7 @@ from utils.save_utils import save_submission, save_comment_and_context  # Import
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
 from utils.path_security import create_safe_path, create_reddit_file_path
+from utils.praw_helpers import safe_fetch_items, safe_fetch_items_one_by_one
 
 
 logger = logging.getLogger(__name__)
@@ -81,9 +83,20 @@ def get_existing_files_from_dir(save_directory):
 
 def save_to_file(content, file_path, save_function, existing_files, file_log, save_directory, created_dirs_cache, category="POST", unsave=False, ignore_tls_errors=None):
     """Save content to a file using the specified save function."""
+    from .praw_helpers import RecoveredItem
+
+    # Check if this is a recovered item
+    is_recovered = isinstance(content, RecoveredItem)
+
     file_id = content.id  # Assuming `id` is unique for each Reddit content
-    subreddit_name = content.subreddit.display_name  # Get the subreddit name
-    
+
+    if is_recovered:
+        # For recovered items, get subreddit from recovered_data
+        recovered_data = content.recovered_data if hasattr(content, 'recovered_data') else {}
+        subreddit_name = recovered_data.get('subreddit', 'unknown')
+    else:
+        subreddit_name = content.subreddit.display_name  # Get the subreddit name
+
     # Create the unique key including the content type and category
     unique_key = f"{file_id}-{subreddit_name}-{type(content).__name__}-{category}"
     
@@ -121,12 +134,26 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
         # Get accumulated media size from the tracker
         media_size = getattr(save_submission, '_media_size_tracker', 0)
 
-        # Log the file after saving successfully with the unique key
-        log_file(file_log, unique_key, {  # Use the unique_key constructed in save_to_file
+        # Prepare file info for logging
+        file_info = {
             'subreddit': subreddit_name,
             'type': type(content).__name__,
             'file_path': file_path  # This will be converted to relative in log_file
-        }, save_directory)
+        }
+
+        # Add recovery metadata if this is a recovered item
+        if is_recovered and hasattr(content, 'recovery_result'):
+            recovery_result = content.recovery_result
+            if recovery_result and recovery_result.metadata:
+                file_info['recovered'] = True
+                file_info['recovery_source'] = recovery_result.metadata.source.value
+                file_info['recovery_timestamp'] = recovery_result.metadata.recovery_date
+                file_info['recovery_quality'] = recovery_result.metadata.content_quality.value
+                if recovery_result.recovered_url:
+                    file_info['recovery_url'] = recovery_result.recovered_url
+
+        # Log the file after saving successfully with the unique key
+        log_file(file_log, unique_key, file_info, save_directory)
 
         return False, media_size  # Indicate that the file was saved successfully and return media size
     except Exception as e:
@@ -168,45 +195,95 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
     total_media_size = 0  # Total size of downloaded media files in bytes
 
     if save_type == 'ALL':
-        # Save all user submissions and comments
+        # Save all user submissions and comments with safe fetching
+        try:
+            # Try batch fetch first (fast path)
+            submissions = list(user.submissions.new(limit=1000))
+        except prawcore.exceptions.NotFound:
+            # Batch failed - use one-by-one fetch with recovery
+            logger.warning("Batch fetch of submissions failed with 404, using safe iteration")
+            submissions = safe_fetch_items_one_by_one(user.submissions.new(limit=1000), 'submission')
+
+        try:
+            # Try batch fetch first (fast path)
+            comments = list(user.comments.new(limit=1000))
+        except prawcore.exceptions.NotFound:
+            # Batch failed - use one-by-one fetch with recovery
+            logger.warning("Batch fetch of comments failed with 404, using safe iteration")
+            comments = safe_fetch_items_one_by_one(user.comments.new(limit=1000), 'comment')
+
         processed_count, skipped_count, total_size, total_media_size = save_self_user_activity(
-            list(user.submissions.new(limit=1000)),
-            list(user.comments.new(limit=1000)),
+            submissions, comments,
             save_directory, existing_files, created_dirs_cache,
             processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
 
         # Save all saved items (posts and comments)
+        try:
+            saved_items = list(user.saved(limit=1000))
+        except prawcore.exceptions.NotFound:
+            logger.warning("Batch fetch of saved items failed with 404, using safe iteration")
+            saved_items = safe_fetch_items_one_by_one(user.saved(limit=1000), 'saved')
+
         processed_count, skipped_count, total_size, total_media_size = save_saved_user_activity(
-            list(user.saved(limit=1000)), save_directory, existing_files,
+            saved_items, save_directory, existing_files,
             created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log,
             unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
 
         # Save all upvoted posts and comments
+        try:
+            upvoted_items = list(user.upvoted(limit=1000))
+        except prawcore.exceptions.NotFound:
+            logger.warning("Batch fetch of upvoted items failed with 404, using safe iteration")
+            upvoted_items = safe_fetch_items_one_by_one(user.upvoted(limit=1000), 'upvoted')
+
         processed_count, skipped_count, total_size, total_media_size = save_upvoted_posts_and_comments(
-            list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache,
+            upvoted_items, save_directory, existing_files, created_dirs_cache,
             processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
     
     elif save_type == 'SAVED':
+        try:
+            saved_items = list(user.saved(limit=1000))
+        except prawcore.exceptions.NotFound:
+            logger.warning("Batch fetch of saved items failed with 404, using safe iteration")
+            saved_items = safe_fetch_items_one_by_one(user.saved(limit=1000), 'saved')
+
         processed_count, skipped_count, total_size, total_media_size = save_saved_user_activity(
-            list(user.saved(limit=1000)), save_directory, existing_files,
+            saved_items, save_directory, existing_files,
             created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log,
             unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
-    
+
     elif save_type == 'ACTIVITY':
+        try:
+            submissions = list(user.submissions.new(limit=1000))
+        except prawcore.exceptions.NotFound:
+            logger.warning("Batch fetch of submissions failed with 404, using safe iteration")
+            submissions = safe_fetch_items_one_by_one(user.submissions.new(limit=1000), 'submission')
+
+        try:
+            comments = list(user.comments.new(limit=1000))
+        except prawcore.exceptions.NotFound:
+            logger.warning("Batch fetch of comments failed with 404, using safe iteration")
+            comments = safe_fetch_items_one_by_one(user.comments.new(limit=1000), 'comment')
+
         processed_count, skipped_count, total_size, total_media_size = save_self_user_activity(
-            list(user.submissions.new(limit=1000)),
-            list(user.comments.new(limit=1000)),
+            submissions, comments,
             save_directory, existing_files, created_dirs_cache,
             processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
-        
+
     elif save_type == 'UPVOTED':
+        try:
+            upvoted_items = list(user.upvoted(limit=1000))
+        except prawcore.exceptions.NotFound:
+            logger.warning("Batch fetch of upvoted items failed with 404, using safe iteration")
+            upvoted_items = safe_fetch_items_one_by_one(user.upvoted(limit=1000), 'upvoted')
+
         processed_count, skipped_count, total_size, total_media_size = save_upvoted_posts_and_comments(
-            list(user.upvoted(limit=1000)), save_directory, existing_files, created_dirs_cache,
+            upvoted_items, save_directory, existing_files, created_dirs_cache,
             processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
         )
 
