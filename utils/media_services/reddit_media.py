@@ -408,7 +408,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
             # Check for gallery posts
             if hasattr(submission, 'is_gallery') and submission.is_gallery:
-                if hasattr(submission, 'media_metadata'):
+                if hasattr(submission, 'media_metadata') and submission.media_metadata:
                     for item_id, metadata in submission.media_metadata.items():
                         if 's' in metadata and 'u' in metadata['s']:
                             # Decode URL (Reddit URLs are often HTML encoded)
@@ -421,7 +421,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                             })
 
             # Check for preview images (fallback for external links)
-            if hasattr(submission, 'preview') and 'images' in submission.preview:
+            if hasattr(submission, 'preview') and submission.preview and 'images' in submission.preview:
                 for image in submission.preview['images']:
                     if 'source' in image:
                         preview_url = image['source']['url'].replace('&amp;', '&')
