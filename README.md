@@ -7,6 +7,8 @@
 [![Reddit](https://img.shields.io/badge/Reddit-API-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/dev/api/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
+> **Reddit API Policy Change (November 2025):** Reddit now requires pre-approval to create new API apps. **If you already have API credentials, they still work normally.** New users must apply at [Reddit's API Request Form](https://support.reddithelp.com/hc/en-us/requests/new?ticket_form_id=14868593862164) (expect 2-4 weeks for approval). Alternatively, you can use the [GDPR Export Mode](#gdpr-only-mode-no-api-credentials-needed) to create an index of your saved content without any API credentials. See [Getting API Credentials](#getting-api-credentials) for full details.
+
 **Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox or your local machine. Utilizing GitHub Actions, this script runs every 2 hours during peak hours and twice during off-peak hours, automating the process of archiving your Reddit data in Dropbox after a simple setup.
 
 ## 📋 What You Get
@@ -75,6 +77,8 @@ This gives you clear visibility into:
     - [[Recovery] - Content Recovery System](#recovery---content-recovery-system)
     - [[Retry] - Retry Queue Configuration](#retry---retry-queue-configuration)
   - [Important Configuration Notes](#important-configuration-notes)
+  - [Getting API Credentials](#getting-api-credentials)
+  - [GDPR-Only Mode (No API Credentials Needed)](#gdpr-only-mode-no-api-credentials-needed)
   - [Setting Up Reddit Environment Variables](#setting-up-reddit-environment-variables)
   - [Setting Up Dropbox App](#setting-up-dropbox-app)
   - [Settings Index (Alphabetical)](#settings-index-alphabetical)
@@ -2631,7 +2635,48 @@ export IMGUR_CLIENT_SECRET='your_imgur_client_secret'
 # Leave unset if you don't have Imgur API access - basic downloads will still work
 ```
 
+#### Getting API Credentials
+
+> **Since November 2025**, Reddit's [Responsible Builder Policy](https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy) requires pre-approval before you can create new API apps. Self-service app creation at `reddit.com/prefs/apps` is no longer available for new users.
+
+**If you already have API credentials** (created before November 2025): Your existing `client_id` and `client_secret` continue to work. No action needed.
+
+**If you need new API credentials:**
+
+1. Apply at [Reddit's API Request Form](https://support.reddithelp.com/hc/en-us/requests/new?ticket_form_id=14868593862164)
+2. In your application, mention:
+   - This is for **personal data backup** (non-commercial)
+   - Low request volume (personal use only)
+   - You only access your own account data
+   - No AI training or commercial use
+3. Wait for approval (typically 2-4 weeks)
+4. Once approved, follow the [Setting Up Reddit Environment Variables](#setting-up-reddit-environment-variables) instructions below
+
+**Don't have API credentials?** See [GDPR-Only Mode](#gdpr-only-mode-no-api-credentials-needed) below for an alternative that works without any API access.
+
+#### GDPR-Only Mode (No API Credentials Needed)
+
+If you can't obtain API credentials, you can still create a structured index of your saved Reddit content using Reddit's GDPR data export:
+
+1. **Request your Reddit data** at https://www.reddit.com/settings/data-request (takes 2-30 days)
+2. Download and extract the ZIP file
+3. Place `saved_posts.csv` and `saved_comments.csv` in `{save_directory}/gdpr_data/`
+4. Configure `settings.ini`:
+   ```ini
+   [Settings]
+   process_api = false
+   process_gdpr = true
+   ```
+5. Run the script:
+   ```bash
+   python reddit_stash.py
+   ```
+
+In CSV-only mode, the script creates markdown files with Reddit links for each saved item, organized by subreddit. This gives you a searchable index of your saved content. If you later obtain API credentials, you can re-run with `process_api = true` to fetch full content for each item.
+
 #### Setting Up Reddit Environment Variables
+
+> **Note:** Since November 2025, you must first obtain approval through the [Getting API Credentials](#getting-api-credentials) process above before you can create a Reddit app.
 
 * Create a Reddit app at https://www.reddit.com/prefs/apps or https://old.reddit.com/prefs/apps/
 * Set up the name, select `script`, and provide the `redirect_uri` as per the [PRAW docs](https://praw.readthedocs.io/en/latest/getting_started/authentication.html#password-flow).
@@ -3004,7 +3049,7 @@ docker run --rm --cpus=0.5 -e [...] reddit-stash
 
 ### GDPR Data Processing
 
-The script can process Reddit's GDPR data export to access your complete saved post history. This feature uses PRAW to fetch full content for each saved item in your export.
+The script can process Reddit's GDPR data export to access your complete saved post history. When API credentials are available, it uses PRAW to fetch full content for each saved item. **When API credentials are not available** (e.g., due to the [November 2025 API policy change](#getting-api-credentials)), it runs in CSV-only mode, creating a structured index of your saved content with Reddit links. See [GDPR-Only Mode](#gdpr-only-mode-no-api-credentials-needed) for setup without API credentials.
 
 #### How to Use GDPR Export:
 

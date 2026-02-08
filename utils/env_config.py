@@ -30,7 +30,27 @@ def load_config_and_env():
 
     # Check if any required credentials are still missing
     if not all([client_id, client_secret, username, password]):
-        raise Exception("One or more required credentials for Reddit API are missing.")
+        missing = []
+        if not client_id:
+            missing.append("REDDIT_CLIENT_ID")
+        if not client_secret:
+            missing.append("REDDIT_CLIENT_SECRET")
+        if not username:
+            missing.append("REDDIT_USERNAME")
+        if not password:
+            missing.append("REDDIT_PASSWORD")
+
+        msg = (
+            f"Missing Reddit API credentials: {', '.join(missing)}\n\n"
+            "Since November 2025, Reddit requires pre-approval to create new API apps.\n"
+            "If you need new credentials, apply here (2-4 week wait):\n"
+            "  https://support.reddithelp.com/hc/en-us/requests/new?ticket_form_id=14868593862164\n\n"
+            "Existing credentials (created before Nov 2025) still work normally.\n"
+            "Set credentials via environment variables (REDDIT_CLIENT_ID, etc.) or in settings.ini.\n\n"
+            "Alternative: Set process_api=false and process_gdpr=true in settings.ini\n"
+            "to process your Reddit GDPR export data without API credentials."
+        )
+        raise Exception(msg)
 
     return client_id, client_secret, username, password
 

@@ -41,15 +41,35 @@ def main():
     # Validate directory
     save_directory = validate_and_set_directory(save_directory)
 
-    # Initialize Reddit
-    client_id, client_secret, username, password = load_config_and_env()
-    reddit = praw.Reddit(
-        client_id=client_id,
-        client_secret=client_secret,
-        username=username,
-        password=password,
-        user_agent=f'Reddit Saved Saver by /u/{username}'
-    )
+    # Initialize Reddit API connection (only if API processing is needed)
+    reddit = None
+    if process_api:
+        client_id, client_secret, username, password = load_config_and_env()
+        reddit = praw.Reddit(
+            client_id=client_id,
+            client_secret=client_secret,
+            username=username,
+            password=password,
+            user_agent=f'Reddit Saved Saver by /u/{username}'
+        )
+    elif process_gdpr:
+        # Try to load credentials for GDPR enrichment, but don't fail if missing
+        try:
+            client_id, client_secret, username, password = load_config_and_env()
+            reddit = praw.Reddit(
+                client_id=client_id,
+                client_secret=client_secret,
+                username=username,
+                password=password,
+                user_agent=f'Reddit Saved Saver by /u/{username}'
+            )
+        except Exception:
+            print("No API credentials available. GDPR export will run in CSV-only mode.")
+            reddit = None
+
+    if not process_api and not process_gdpr:
+        print("Both process_api and process_gdpr are disabled. Nothing to do.")
+        return
 
     # Load the log file
     file_log = load_file_log(save_directory)
@@ -70,7 +90,7 @@ def main():
         total_size = api_stats[2]
         total_media_size = api_stats[3] if len(api_stats) > 3 else 0
 
-    # Process GDPR export if enabled
+    # Process GDPR export if enabled (works with or without API credentials)
     if process_gdpr:
         # Initialize tracking sets
         existing_files = set(file_log.keys())
