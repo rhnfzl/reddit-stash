@@ -115,8 +115,11 @@ def create_download_retry_decorator():
         # Log retry attempts
         before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
 
-        # Additional condition check
-        retry_error_callback=lambda retry_state: should_retry_download_error(retry_state.outcome.exception())
+        # Return a proper DownloadResult when all retries are exhausted
+        retry_error_callback=lambda retry_state: DownloadResult(
+            status=DownloadStatus.FAILED,
+            error_message=f"Download failed after retries: {retry_state.outcome.exception()}"
+        )
     )
 
 
