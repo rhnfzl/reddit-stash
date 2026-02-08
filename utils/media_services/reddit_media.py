@@ -9,6 +9,7 @@ Implements the MediaDownloaderProtocol with web-researched best practices.
 import os
 import subprocess
 import tempfile
+from dataclasses import replace
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 
@@ -176,9 +177,8 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
             # Check if ffmpeg is available for audio merging
             if not self._is_ffmpeg_available():
-                # Return video-only result with warning
-                video_result.error_message = "Audio track not merged (ffmpeg not available)"
-                return video_result
+                # Return video-only result with warning (DownloadResult is frozen)
+                return replace(video_result, error_message="Audio track not merged (ffmpeg not available)")
 
             # Try to download audio stream
             audio_url = self._get_audio_url_from_video_url(url)
@@ -204,10 +204,12 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                     )
 
                     if merged_result.is_success:
-                        # Update result with merged file info
-                        video_result.local_path = merged_result.local_path
-                        video_result.bytes_downloaded += audio_result.bytes_downloaded
-                        return video_result
+                        # Create new result with merged file info (DownloadResult is frozen)
+                        return replace(
+                            video_result,
+                            local_path=merged_result.local_path,
+                            bytes_downloaded=video_result.bytes_downloaded + audio_result.bytes_downloaded
+                        )
 
             # If audio merge failed, return video-only result
             return video_result

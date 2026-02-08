@@ -451,7 +451,12 @@ def download_media_file(url: str, save_directory: str, file_id: str) -> Optional
             if extension not in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.webm']:
                 extension = '.jpg'  # Default fallback
         else:
-            extension = '.jpg'  # Default fallback
+            # Domain-aware fallback
+            domain = parsed_url.netloc.lower()
+            if 'v.redd.it' in domain:
+                extension = '.mp4'
+            else:
+                extension = '.jpg'
 
         # Create save path
         filename = f"{file_id}{extension}"

@@ -1,11 +1,17 @@
 import os
+import logging
 import requests
 import urllib3
 from datetime import datetime
+from urllib.parse import urlparse
 from praw.models import Submission, Comment
 from utils.time_utilities import lazy_load_comments
 from utils.env_config import get_ignore_tls_errors
 from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
+from utils.feature_flags import get_media_config
+from utils.media_services.reddit_media import RedditMediaDownloader
+
+logger = logging.getLogger(__name__)
 
 def format_date(timestamp):
     """Format a UTC timestamp into a human-readable date."""
@@ -97,6 +103,71 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
         print(f"Fallback download failed for {image_url}: {e}")
         return None, 0
 
+
+def _is_image_url(url):
+    """Check if a URL points to a downloadable image."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        path = parsed.path.lower()
+
+        # Direct image extensions (including .webp)
+        image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff')
+        if path.endswith(image_extensions):
+            return True
+        # Check extension before query params
+        path_no_query = url.split('?')[0].lower()
+        if any(path_no_query.endswith(ext) for ext in image_extensions):
+            return True
+
+        # Known image hosting domains (even without extension)
+        image_domains = ['i.redd.it', 'i.imgur.com', 'preview.redd.it', 'external-preview.redd.it']
+        if any(domain.endswith(d) for d in image_domains):
+            return True
+
+        return False
+    except Exception:
+        return False
+
+
+def _is_video_url(url):
+    """Check if a URL points to a Reddit video."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        return 'v.redd.it' in domain
+    except Exception:
+        return False
+
+
+def _get_video_download_url(submission):
+    """Extract the actual video stream URL from a PRAW submission.
+
+    Reddit stores the short redirect URL in submission.url (e.g., https://v.redd.it/abc123)
+    but the actual downloadable video stream is in submission.media['reddit_video']['fallback_url'].
+    """
+    try:
+        if hasattr(submission, 'media') and submission.media:
+            reddit_video = submission.media.get('reddit_video', {})
+            fallback_url = reddit_video.get('fallback_url')
+            if fallback_url:
+                return fallback_url
+    except Exception:
+        pass
+    return submission.url
+
+
+def _track_media_size(size):
+    """Track accumulated media download sizes for file_operations.py."""
+    if not hasattr(save_submission, '_media_size_tracker'):
+        save_submission._media_size_tracker = 0
+    save_submission._media_size_tracker += size
+
+
 def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
     """Save a submission and its metadata, optionally unsaving it after.
 
@@ -151,21 +222,76 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
         if submission.is_self:
             f.write(submission.selftext if submission.selftext else '[Deleted Post]')
         else:
-            if submission.url.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                # Download and save the image locally
-                image_path, image_size = download_image(submission.url, os.path.dirname(f.name), submission.id, ignore_tls_errors)
-                if image_path:
-                    f.write(f"![Image]({image_path})\n")
-                    f.write(f"**Original Image URL:** [Link]({submission.url})\n")
-                    # Store media size in a global variable for tracking (will be handled by file_operations.py)
-                    if not hasattr(save_submission, '_media_size_tracker'):
-                        save_submission._media_size_tracker = 0
-                    save_submission._media_size_tracker += image_size
+            media_config = get_media_config()
+            save_dir = os.path.dirname(f.name)
+
+            # --- 1. Gallery posts ---
+            if (not is_recovered
+                    and hasattr(submission, 'is_gallery')
+                    and submission.is_gallery
+                    and media_config.is_albums_enabled()):
+
+                media_urls = RedditMediaDownloader.extract_media_urls_from_submission(submission)
+                gallery_images = [m for m in media_urls if m.get('source') == 'reddit_gallery']
+
+                if gallery_images:
+                    f.write(f"**Gallery ({len(gallery_images)} images)**\n\n")
+                    for idx, media_info in enumerate(gallery_images, 1):
+                        gallery_url = media_info['url']
+                        gallery_id = media_info.get('gallery_id', f'gallery_{idx}')
+                        file_id = f"{submission.id}_{gallery_id}"
+
+                        image_path, image_size = download_image(
+                            gallery_url, save_dir, file_id, ignore_tls_errors
+                        )
+                        if image_path:
+                            f.write(f"![Gallery Image {idx}]({image_path})\n")
+                            _track_media_size(image_size)
+                        else:
+                            f.write(f"![Gallery Image {idx}]({gallery_url})\n")
+                        f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")
+
+                    f.write(f"**Original Gallery URL:** [Link](https://reddit.com{submission.permalink})\n")
                 else:
-                    f.write(f"![Image]({submission.url})\n")  # Fallback to the URL if download fails
+                    f.write(f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n")
+
+            # --- 2. Reddit video (v.redd.it) ---
+            elif _is_video_url(submission.url):
+                if media_config.is_videos_enabled():
+                    video_url = _get_video_download_url(submission)
+                    video_path, video_size = download_image(
+                        video_url, save_dir, submission.id, ignore_tls_errors
+                    )
+                    if video_path:
+                        f.write(f"**Video:** [{os.path.basename(video_path)}]({video_path})\n")
+                        f.write(f"**Original Video URL:** [Link]({submission.url})\n")
+                        _track_media_size(video_size)
+                    else:
+                        f.write(f"**Video:** [Link]({submission.url})\n")
+                else:
+                    f.write(f"**Video (download disabled):** [Link]({submission.url})\n")
+
+            # --- 3. Images (broad detection: i.redd.it, i.imgur.com, preview.redd.it, .webp, etc.) ---
+            elif _is_image_url(submission.url):
+                if media_config.is_images_enabled():
+                    image_path, image_size = download_image(
+                        submission.url, save_dir, submission.id, ignore_tls_errors
+                    )
+                    if image_path:
+                        f.write(f"![Image]({image_path})\n")
+                        f.write(f"**Original Image URL:** [Link]({submission.url})\n")
+                        _track_media_size(image_size)
+                    else:
+                        f.write(f"![Image]({submission.url})\n")
+                else:
+                    f.write(f"![Image]({submission.url})\n")
+
+            # --- 4. YouTube ---
             elif "youtube.com" in submission.url or "youtu.be" in submission.url:
                 video_id = extract_video_id(submission.url)
                 f.write(f"[![Video](https://img.youtube.com/vi/{video_id}/0.jpg)]({submission.url})")
+
+            # --- 5. Everything else (plain URL) ---
             else:
                 f.write(submission.url if submission.url else '[Deleted Post]')
 
