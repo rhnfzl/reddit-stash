@@ -35,8 +35,10 @@ def log_file(log_data, unique_key, file_info, save_directory):
     # Add the file info to the log with the unique key
     log_data[unique_key] = file_info
     
-    # Save the updated log
-    save_file_log(log_data, save_directory)
+    # Periodic checkpoint: save every 50 items to limit data loss on crash
+    # Final save happens in file_operations.py:save_user_activity()
+    if len(log_data) % 50 == 0:
+        save_file_log(log_data, save_directory)
 
 def convert_to_absolute_path(relative_path, save_directory):
     """Convert a relative path from the log back to an absolute path."""

@@ -2,6 +2,7 @@ import os
 import logging
 import requests
 import urllib3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urlparse
 from praw.models import Submission, Comment
@@ -236,17 +237,30 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
                 if gallery_images:
                     f.write(f"**Gallery ({len(gallery_images)} images)**\n\n")
-                    for idx, media_info in enumerate(gallery_images, 1):
-                        gallery_url = media_info['url']
-                        gallery_id = media_info.get('gallery_id', f'gallery_{idx}')
-                        file_id = f"{submission.id}_{gallery_id}"
+                    max_workers = media_config.get_media_config().get('max_concurrent_downloads', 3)
 
-                        image_path, image_size = download_image(
-                            gallery_url, save_dir, file_id, ignore_tls_errors
-                        )
-                        if image_path:
-                            f.write(f"![Gallery Image {idx}]({image_path})\n")
-                            _track_media_size(image_size)
+                    def _download_gallery_item(args):
+                        idx, info = args
+                        gid = info.get('gallery_id', f'gallery_{idx}')
+                        fid = f"{submission.id}_{gid}"
+                        return idx, download_image(info['url'], save_dir, fid, ignore_tls_errors)
+
+                    results = {}
+                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                        futures = {
+                            pool.submit(_download_gallery_item, (i, m)): i
+                            for i, m in enumerate(gallery_images, 1)
+                        }
+                        for future in as_completed(futures):
+                            idx, (path, size) = future.result()
+                            results[idx] = (path, size)
+
+                    for idx in sorted(results):
+                        path, size = results[idx]
+                        gallery_url = gallery_images[idx - 1]['url']
+                        if path:
+                            f.write(f"![Gallery Image {idx}]({path})\n")
+                            _track_media_size(size)
                         else:
                             f.write(f"![Gallery Image {idx}]({gallery_url})\n")
                         f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")

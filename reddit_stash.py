@@ -3,7 +3,7 @@ import configparser
 from utils.file_path_validate import validate_and_set_directory
 from utils.file_operations import save_user_activity
 from utils.env_config import load_config_and_env
-from utils.log_utils import load_file_log
+from utils.log_utils import load_file_log, save_file_log
 from utils.gdpr_processor import process_gdpr_export
 from utils.config_validator import validate_configuration
 from utils.feature_flags import get_feature_summary
@@ -103,6 +103,9 @@ def main():
         total_skipped += gdpr_stats[1]
         total_size += gdpr_stats[2]
         # GDPR processing currently doesn't track media downloads separately
+
+    # Final save of file log to persist any remaining batched entries
+    save_file_log(file_log, save_directory)
 
     # Print final statistics with separate storage reporting
     print(f"\nProcessing completed. {total_processed} items processed, "

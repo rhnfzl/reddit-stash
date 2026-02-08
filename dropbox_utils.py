@@ -1,10 +1,12 @@
 import os
 import re
 import sys
+import threading
 import dropbox
 import requests
 import hashlib
 import configparser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from dropbox.exceptions import ApiError
 from dropbox.files import FileMetadata
@@ -142,6 +144,40 @@ def list_dropbox_files_with_hashes(dbx, dropbox_folder):
         print(f"Failed to list files in Dropbox folder {dropbox_folder}: {err}")
     return file_metadata
 
+DROPBOX_SINGLE_UPLOAD_LIMIT = 150 * 1024 * 1024  # 150MB
+DROPBOX_UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB (matches Dropbox block size)
+
+
+def _upload_file_to_dropbox(dbx, file_path, dropbox_path):
+    """Upload a single file to Dropbox, using chunked upload for large files."""
+    file_size = os.path.getsize(file_path)
+
+    if file_size <= DROPBOX_SINGLE_UPLOAD_LIMIT:
+        with open(file_path, "rb") as f:
+            dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+    else:
+        # Chunked upload session for large files (>150MB)
+        with open(file_path, "rb") as f:
+            chunk = f.read(DROPBOX_UPLOAD_CHUNK_SIZE)
+            session = dbx.files_upload_session_start(chunk)
+            cursor = dropbox.files.UploadSessionCursor(
+                session_id=session.session_id, offset=len(chunk)
+            )
+            commit = dropbox.files.CommitInfo(
+                path=dropbox_path, mode=dropbox.files.WriteMode.overwrite
+            )
+
+            while True:
+                chunk = f.read(DROPBOX_UPLOAD_CHUNK_SIZE)
+                if f.tell() >= file_size:
+                    dbx.files_upload_session_finish(chunk, cursor, commit)
+                    break
+                dbx.files_upload_session_append_v2(chunk, cursor)
+                cursor.offset += len(chunk)
+
+    return file_size
+
+
 def upload_directory_to_dropbox(local_directory, dropbox_folder="/"):
     """Uploads all files in the specified local directory to Dropbox, replacing only changed files."""
     dbx = dropbox.Dropbox(os.getenv('DROPBOX_TOKEN'))
@@ -152,6 +188,7 @@ def upload_directory_to_dropbox(local_directory, dropbox_folder="/"):
     uploaded_count = 0
     uploaded_size = 0
     skipped_count = 0
+    lock = threading.Lock()
 
     # Get a list of all files to upload
     files_to_upload = [
@@ -161,36 +198,38 @@ def upload_directory_to_dropbox(local_directory, dropbox_folder="/"):
         if not file_name.startswith('.')  # Skip hidden files like .DS_Store
     ]
 
-    # Initialize tqdm with the total number of files
-    with tqdm(total=len(files_to_upload), desc="Uploading files to Dropbox") as pbar:
-        for root, file_name in files_to_upload:
-            sanitized_name = sanitize_filename(file_name)
-            file_path = os.path.join(root, file_name)
-            dropbox_path = f"{dropbox_folder}/{os.path.relpath(file_path, local_directory).replace(os.path.sep, '/')}"
+    def _process_file(root_and_name):
+        root, file_name = root_and_name
+        sanitized_name = sanitize_filename(file_name)
+        file_path = os.path.join(root, file_name)
+        dropbox_path = f"{dropbox_folder}/{os.path.relpath(file_path, local_directory).replace(os.path.sep, '/')}"
+        dropbox_path = dropbox_path.replace(file_name, sanitized_name)
 
-            # Adjust for sanitized name
-            dropbox_path = dropbox_path.replace(file_name, sanitized_name)
-
+        # Only hash if file exists on Dropbox (skip hashing for new files)
+        if dropbox_path.lower() in dropbox_files:
             local_content_hash = calculate_local_content_hash(file_path)
+            if dropbox_files[dropbox_path.lower()] == local_content_hash:
+                return 'skipped', 0
 
-            # Check if the file exists and is the same on Dropbox
-            if dropbox_path.lower() in dropbox_files and dropbox_files[dropbox_path.lower()] == local_content_hash:
-                skipped_count += 1
-                pbar.update(1)
-                continue
+        try:
+            size = _upload_file_to_dropbox(dbx, file_path, dropbox_path)
+            return 'uploaded', size
+        except ApiError as e:
+            print(f"Failed to upload {file_path} to Dropbox: {e}")
+            return 'failed', 0
 
-            # Upload the file since it doesn't exist or has changed
-            try:
-                with open(file_path, "rb") as f:
-                    file_size = os.path.getsize(file_path)
-                    dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
-                    uploaded_count += 1
-                    uploaded_size += file_size
-            except ApiError as e:
-                print(f"Failed to upload {file_path} to Dropbox: {e}")
-
-            # Update the progress bar
-            pbar.update(1)
+    with tqdm(total=len(files_to_upload), desc="Uploading files to Dropbox") as pbar:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {pool.submit(_process_file, f): f for f in files_to_upload}
+            for future in as_completed(futures):
+                status, size = future.result()
+                with lock:
+                    if status == 'uploaded':
+                        uploaded_count += 1
+                        uploaded_size += size
+                    elif status == 'skipped':
+                        skipped_count += 1
+                    pbar.update(1)
 
     print(f"Upload completed. {uploaded_count} files uploaded ({uploaded_size / (1024 * 1024):.2f} MB).")
     print(f"{skipped_count} files were skipped (already existed or unchanged).")

@@ -9,6 +9,7 @@ Implements the MediaDownloaderProtocol with web-researched best practices.
 import os
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
@@ -167,52 +168,49 @@ class RedditMediaDownloader(BaseHTTPDownloader):
         Download Reddit hosted video (v.redd.it) with audio merging.
 
         Reddit stores video and audio separately. This method downloads both
-        and attempts to merge them using ffmpeg if available.
+        concurrently and attempts to merge them using ffmpeg if available.
         """
         try:
-            # Download video stream
-            video_result = self.download_file(url, save_path)
-            if not video_result.is_success:
-                return video_result
+            # Check prerequisites before downloading
+            has_ffmpeg = self._is_ffmpeg_available()
+            audio_url = self._get_audio_url_from_video_url(url) if has_ffmpeg else None
 
-            # Check if ffmpeg is available for audio merging
-            if not self._is_ffmpeg_available():
-                # Return video-only result with warning (DownloadResult is frozen)
-                return replace(video_result, error_message="Audio track not merged (ffmpeg not available)")
+            if audio_url:
+                # Download video and audio concurrently
+                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_audio:
+                    temp_audio_path = temp_audio.name
 
-            # Try to download audio stream
-            audio_url = self._get_audio_url_from_video_url(url)
-            if not audio_url:
-                # No audio stream available, return video-only
-                return video_result
+                with temp_files_cleanup(temp_audio_path):
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        video_future = pool.submit(self.download_file, url, save_path)
+                        audio_future = pool.submit(self.download_file, audio_url, temp_audio_path)
+                        video_result = video_future.result()
+                        audio_result = audio_future.result()
 
-            # Download audio to temporary file
-            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_audio:
-                temp_audio_path = temp_audio.name
+                    if not video_result.is_success:
+                        return video_result
 
-            # Use context manager for guaranteed cleanup of temporary files
-            temp_video_path = video_result.local_path if video_result.local_path != save_path else None
-            with temp_files_cleanup(temp_audio_path, temp_video_path):
-                audio_result = self.download_file(audio_url, temp_audio_path)
-
-                if audio_result.is_success:
-                    # Merge video and audio using ffmpeg
-                    merged_result = self._merge_video_audio(
-                        video_result.local_path,
-                        audio_result.local_path,
-                        save_path
-                    )
-
-                    if merged_result.is_success:
-                        # Create new result with merged file info (DownloadResult is frozen)
-                        return replace(
-                            video_result,
-                            local_path=merged_result.local_path,
-                            bytes_downloaded=video_result.bytes_downloaded + audio_result.bytes_downloaded
+                    if audio_result.is_success:
+                        merged_result = self._merge_video_audio(
+                            video_result.local_path,
+                            audio_result.local_path,
+                            save_path
                         )
+                        if merged_result.is_success:
+                            return replace(
+                                video_result,
+                                local_path=merged_result.local_path,
+                                bytes_downloaded=video_result.bytes_downloaded + audio_result.bytes_downloaded
+                            )
 
-            # If audio merge failed, return video-only result
-            return video_result
+                    # Audio failed or merge failed, return video-only
+                    return video_result
+            else:
+                # No audio URL or no ffmpeg, just download video
+                video_result = self.download_file(url, save_path)
+                if video_result.is_success and not has_ffmpeg:
+                    return replace(video_result, error_message="Audio track not merged (ffmpeg not available)")
+                return video_result
 
         except Exception as e:
             return DownloadResult(

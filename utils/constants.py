@@ -7,7 +7,7 @@ Addresses PR feedback regarding hardcoded values.
 """
 
 # Download Configuration
-DOWNLOAD_CHUNK_SIZE = 8192  # 8KB chunks for streaming downloads
+DOWNLOAD_CHUNK_SIZE = 65536  # 64KB chunks for streaming downloads
 DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_CONNECT_TIMEOUT = 5.0
 FFMPEG_TIMEOUT_SECONDS = 300  # 5 minutes for video merging
