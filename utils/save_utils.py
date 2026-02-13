@@ -223,6 +223,11 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
         if submission.is_self:
             f.write(submission.selftext if submission.selftext else '[Deleted Post]')
         else:
+            # Link posts can also have body text (selftext)
+            if hasattr(submission, 'selftext') and submission.selftext:
+                f.write(submission.selftext)
+                f.write('\n\n---\n\n')
+
             media_config = get_media_config()
             save_dir = os.path.dirname(f.name)
 
@@ -374,6 +379,8 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
                 if parent.is_self:
                     f.write(f'{parent.selftext}\n\n')
                 else:
+                    if hasattr(parent, 'selftext') and parent.selftext:
+                        f.write(f'{parent.selftext}\n\n')
                     f.write(f'[Link to post content]({parent.url})\n\n')
 
                 # Save the full submission context, including all comments
@@ -405,62 +412,45 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
         print(f"Error saving comment {comment.id}: {e}")
 
 def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None):
-    """Process all comments with tree-like visual hierarchy without triggering markdown code blocks."""
+    """Process all comments using pure blockquote nesting for hierarchy."""
     for i, comment in enumerate(comments):
         if isinstance(comment, Comment):
-            # Create tree structure using Unicode box drawing characters
-            if depth == 0:
-                tree_prefix = ""
-            elif i == len(comments) - 1:  # Last comment at this level
-                tree_prefix = "└── "
-            else:
-                tree_prefix = "├── "
+            bq = "> " * depth if depth > 0 else ""
 
-            # Add vertical lines for deeper nesting
-            if depth > 0:
-                parent_lines = "│   " * (depth - 1)
-                tree_prefix = parent_lines + tree_prefix
+            # Write comment header
+            author = comment.author.name if comment.author else "[deleted]"
+            f.write(f'\n{bq}**Comment by /u/{author}**\n')
+            f.write(f'{bq}*Upvotes: {comment.score} | [Permalink](https://reddit.com{comment.permalink})*\n\n')
 
-            # Write comment header without problematic indentation
-            f.write(f'\n{tree_prefix}**Comment by /u/{comment.author.name if comment.author else "[deleted]"}**\n')
-            f.write(f'{tree_prefix}*Upvotes: {comment.score} | [Permalink](https://reddit.com{comment.permalink})*\n\n')
-
-            # Process comment body with blockquotes for nested content
+            # Process comment body
             comment_body = comment.body if comment.body else '[deleted]'
 
             # Check for image URLs in the comment body
-            if any(comment.body.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
-                potential_url = comment.body.split()[-1]  # Get the last word in the comment
-                # Only proceed if it looks like a valid URL (has domain and protocol)
+            image_url = None
+            if any(comment_body.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
+                potential_url = comment_body.split()[-1]
                 if potential_url.startswith(('http://', 'https://')) and '.' in potential_url:
                     image_url = potential_url
-                else:
-                    image_url = None  # Skip if it's just a filename
 
-                if image_url:  # Only proceed if we have a valid URL
-                    image_path, image_size = download_image(image_url, os.path.dirname(f.name), comment.id, ignore_tls_errors)
-                    if image_path:
-                        # Apply blockquote formatting for nested images
-                        blockquote_prefix = "> " * max(1, depth) if depth > 0 else ""
-                        f.write(f'{blockquote_prefix}![Image]({image_path})\n')
-                        f.write(f'{blockquote_prefix}*Original Image URL: [Link]({image_url})*\n\n')
-                        # Store media size in a global variable for tracking
-                        if not hasattr(save_submission, '_media_size_tracker'):
-                            save_submission._media_size_tracker = 0
-                        save_submission._media_size_tracker += image_size
-                    else:
-                        blockquote_prefix = "> " * max(1, depth) if depth > 0 else ""
-                        f.write(f'{blockquote_prefix}![Image]({image_url})\n\n')
+            if image_url:
+                # Write any text before the image URL
+                body_before_url = comment_body[:comment_body.rfind(image_url)].strip()
+                if body_before_url:
+                    for line in body_before_url.split('\n'):
+                        f.write(f'{bq}{line}\n')
+                    f.write(f'{bq}\n')
+
+                image_path, image_size = download_image(image_url, os.path.dirname(f.name), comment.id, ignore_tls_errors)
+                if image_path:
+                    f.write(f'{bq}![Image]({image_path})\n')
+                    f.write(f'{bq}*Original Image URL: [Link]({image_url})*\n\n')
+                    _track_media_size(image_size)
+                else:
+                    f.write(f'{bq}![Image]({image_url})\n\n')
             else:
-                # Apply blockquote formatting for nested text content
                 lines = comment_body.split('\n')
                 for line in lines:
-                    if depth > 0:
-                        # Use blockquotes for nested content
-                        blockquote_prefix = "> " * depth
-                        f.write(f'{blockquote_prefix}{line}\n')
-                    else:
-                        f.write(f'{line}\n')
+                    f.write(f'{bq}{line}\n')
                 f.write('\n')
 
             # Recursively process child comments
