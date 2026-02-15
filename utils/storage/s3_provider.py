@@ -6,6 +6,7 @@ BLAKE3 file hashes are stored as S3 user metadata for cross-provider comparison.
 """
 
 import os
+import signal
 import time
 from typing import Dict, List, Optional
 
@@ -202,6 +203,32 @@ class S3StorageProvider:
         self._require_client()
         start = time.time()
 
+        # Block SIGTERM during upload to prevent partial state.
+        # If cancelled mid-upload, we want to either finish cleanly or
+        # skip file_log.json entirely — never upload the log without the data.
+        sigterm_received = False
+        original_handler = signal.getsignal(signal.SIGTERM)
+
+        def _deferred_sigterm(signum, frame):
+            nonlocal sigterm_received
+            sigterm_received = True
+            print("\nSIGTERM received — finishing current upload, will skip file_log.json.")
+
+        signal.signal(signal.SIGTERM, _deferred_sigterm)
+
+        try:
+            return self._do_upload_directory(
+                local_directory, remote_directory, start,
+                lambda: sigterm_received,
+            )
+        finally:
+            signal.signal(signal.SIGTERM, original_handler)
+            if sigterm_received:
+                # Re-raise SIGTERM so the process exits after cleanup
+                os.kill(os.getpid(), signal.SIGTERM)
+
+    def _do_upload_directory(self, local_directory: str, remote_directory: str,
+                             start: float, is_cancelled) -> SyncResult:
         # Build remote hash map from S3 metadata
         remote_hashes: Dict[str, str] = {}
         for info in self.list_files(remote_directory):
@@ -255,11 +282,19 @@ class S3StorageProvider:
                 errors.append(f"{file_path}: {exc}")
 
         for root, fname in regular_files:
+            if is_cancelled():
+                failed += len(regular_files) - (uploaded + skipped + failed)
+                errors.append("Upload interrupted by SIGTERM")
+                break
             _upload_one(root, fname)
 
-        # Upload file_log.json last for safe idempotency
+        # Upload file_log.json ONLY if all regular files succeeded and not cancelled
         if log_entry:
-            _upload_one(*log_entry)
+            if failed > 0 or is_cancelled():
+                print(f"SKIPPING file_log.json upload: {failed} file(s) failed or upload was cancelled.")
+                print("This prevents marking items as processed when their backup files are missing.")
+            else:
+                _upload_one(*log_entry)
 
         elapsed = time.time() - start
         result = SyncResult(
