@@ -33,9 +33,9 @@ class WaybackMachineProvider:
         })
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-        # Wayback Machine API endpoints
-        self.availability_api = "http://archive.org/wayback/available"
-        self.cdx_api = "http://web.archive.org/cdx/search/cdx"
+        # Wayback Machine API endpoints (HTTPS to avoid redirect overhead)
+        self.availability_api = "https://archive.org/wayback/available"
+        self.cdx_api = "https://web.archive.org/cdx/search/cdx"
 
     @rate_limited('wayback_machine', timeout=30)
     def attempt_recovery(self, url: str, prefer_recent: bool = True) -> RecoveryResult:
@@ -155,7 +155,7 @@ class WaybackMachineProvider:
                     original_url = capture[2]
 
                     # Construct wayback URL
-                    wayback_url = f"http://web.archive.org/web/{timestamp}/{original_url}"
+                    wayback_url = f"https://web.archive.org/web/{timestamp}/{original_url}"
 
                     self._logger.debug(f"Found archived version via CDX API: {wayback_url}")
                     return {

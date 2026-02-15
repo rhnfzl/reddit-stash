@@ -242,14 +242,23 @@ class MediaDownloadManager:
                             if recovery_transform.transformed:
                                 self._logger.debug(f"Also transformed recovery URL: {recovery_result.recovered_url} -> {final_recovery_url}")
 
-                            # Re-resolve downloader for recovery URL domain
-                            # (e.g., web.archive.org needs generic downloader, not reddit_media)
-                            recovery_service_name, recovery_downloader = self._get_service_for_url(final_recovery_url)
-                            if not recovery_downloader:
-                                self._logger.warning(f"No suitable downloader for recovered URL: {final_recovery_url}")
+                            # Validate recovered URL security before downloading
+                            recovery_validation = url_validator.validate_url(final_recovery_url)
+                            if not recovery_validation.is_valid:
+                                self._logger.warning(f"Recovered URL failed security validation: {final_recovery_url} — {recovery_validation.issues}")
                                 recovery_download_result = None
                             else:
-                                recovery_download_result = recovery_downloader.download(final_recovery_url, save_path)
+                                if recovery_validation.cleaned_url:
+                                    final_recovery_url = recovery_validation.cleaned_url
+
+                                # Re-resolve downloader for recovery URL domain
+                                # (e.g., web.archive.org needs generic downloader, not reddit_media)
+                                recovery_service_name, recovery_downloader = self._get_service_for_url(final_recovery_url)
+                                if not recovery_downloader:
+                                    self._logger.warning(f"No suitable downloader for recovered URL: {final_recovery_url}")
+                                    recovery_download_result = None
+                                else:
+                                    recovery_download_result = recovery_downloader.download(final_recovery_url, save_path)
                             if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                 self._logger.info(f"Successfully downloaded from recovered URL: {recovery_result.recovered_url}")
                                 # Track both original and recovered URLs as successfully downloaded
@@ -289,17 +298,25 @@ class MediaDownloadManager:
                         if recovery_transform.transformed:
                             self._logger.debug(f"Also transformed recovery URL: {recovery_result.recovered_url} -> {final_recovery_url}")
 
-                        downloader = self._get_service_for_url(final_recovery_url)[1]
-                        if downloader:
-                            recovery_download_result = downloader.download(final_recovery_url, save_path)
-                            if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
-                                self._logger.info(f"Successfully downloaded from recovered URL after exception: {recovery_result.recovered_url}")
-                                # Track both original and recovered URLs as successfully downloaded
-                                self._downloaded_urls[url] = recovery_download_result.local_path
-                                self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
-                                # Mark original URL as successful in retry queue (recovery counts as success)
-                                self._retry_queue.mark_retry_completed(url, success=True)
-                                return recovery_download_result.local_path
+                        # Validate recovered URL security before downloading
+                        url_validator = get_url_validator()
+                        recovery_validation = url_validator.validate_url(final_recovery_url)
+                        if not recovery_validation.is_valid:
+                            self._logger.warning(f"Recovered URL failed security validation: {final_recovery_url} — {recovery_validation.issues}")
+                        else:
+                            if recovery_validation.cleaned_url:
+                                final_recovery_url = recovery_validation.cleaned_url
+                            downloader = self._get_service_for_url(final_recovery_url)[1]
+                            if downloader:
+                                recovery_download_result = downloader.download(final_recovery_url, save_path)
+                                if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
+                                    self._logger.info(f"Successfully downloaded from recovered URL after exception: {recovery_result.recovered_url}")
+                                    # Track both original and recovered URLs as successfully downloaded
+                                    self._downloaded_urls[url] = recovery_download_result.local_path
+                                    self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
+                                    # Mark original URL as successful in retry queue (recovery counts as success)
+                                    self._retry_queue.mark_retry_completed(url, success=True)
+                                    return recovery_download_result.local_path
                 except Exception as recovery_e:
                     self._logger.warning(f"Recovery attempt also failed: {recovery_e}")
 
@@ -321,16 +338,16 @@ class MediaDownloadManager:
             Tuple of (service_name, downloader_instance)
         """
         try:
-            parsed = urlparse(url.lower())
+            parsed = urlparse(url)
             domain = parsed.netloc.lower()
 
             # Reddit media domains — separate circuit breakers per subdomain
             # so video timeouts don't cascade to block image downloads
-            if 'v.redd.it' in domain:
+            if domain.endswith('v.redd.it'):
                 return 'reddit_video', self._reddit_downloader
-            elif 'i.redd.it' in domain:
+            elif domain.endswith('i.redd.it'):
                 return 'reddit_image', self._reddit_downloader
-            elif 'preview.redd.it' in domain or 'external-preview.redd.it' in domain:
+            elif domain.endswith('preview.redd.it') or domain.endswith('external-preview.redd.it'):
                 return 'reddit_preview', self._reddit_downloader
 
             # Imgur domains
