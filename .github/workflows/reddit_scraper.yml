@@ -14,7 +14,7 @@ on:
     # 3. Update both cron expressions below with your calculated UTC times
     
     # Higher frequency during peak hours (8:00-23:00 CEST = 6:00-21:00 UTC)
-    - cron: "0 6-21/2 * * *"  # Every 2 hours during peak hours (converts to 8:00-23:00 CET time in summer)
+    - cron: "0 6-21/3 * * *"  # Every 3 hours during peak hours (converts to 8:00-23:00 CET time in summer)
     
     # Lower frequency during off-peak hours
     - cron: "0 23,3 * * *"    # Twice during off-peak (converts to 1:00 and 5:00 CET time in summer)
