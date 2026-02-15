@@ -10,7 +10,7 @@
 
 > **Reddit API Policy Change (November 2025):** Reddit now requires pre-approval to create new API apps. **If you already have API credentials, they still work normally.** New users must apply at [Reddit's API Request Form](https://support.reddithelp.com/hc/en-us/requests/new?ticket_form_id=14868593862164) (expect 2-4 weeks for approval). Alternatively, you can use the [GDPR Export Mode](#gdpr-only-mode-no-api-credentials-needed) to create an index of your saved content without any API credentials. See [Getting API Credentials](#getting-api-credentials) for full details.
 
-**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox, AWS S3, or your local machine. Utilizing GitHub Actions, this script runs every 2 hours during peak hours and twice during off-peak hours, automating the process of archiving your Reddit data after a simple setup.
+**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox, AWS S3, or your local machine. Utilizing GitHub Actions, this script runs every 3 hours during peak hours and twice during off-peak hours, automating the process of archiving your Reddit data after a simple setup.
 
 ## 📋 What You Get
 
@@ -248,7 +248,7 @@ Before proceeding with any installation method, ensure that you have set the Red
 
 #### GitHub Action Installation (Recommended)
 
-**Note:** Cloud storage is optional. To use Dropbox, see the [Dropbox App setup](#setting-up-dropbox-app). To use AWS S3 instead, see [Setting Up AWS S3](#setting-up-aws-s3). The GitHub Actions workflow runs the script every 2 hours during peak hours (6:00-21:00 UTC) and twice during off-peak hours (23:00 and 3:00 UTC), syncing files to your configured cloud storage. The workflow is defined in `.github/workflows/reddit_scraper.yml`.
+**Note:** Cloud storage is optional. To use Dropbox, see the [Dropbox App setup](#setting-up-dropbox-app). To use AWS S3 instead, see [Setting Up AWS S3](#setting-up-aws-s3). The GitHub Actions workflow runs the script every 3 hours during peak hours (6:00-21:00 UTC) and twice during off-peak hours (23:00 and 3:00 UTC), syncing files to your configured cloud storage. The workflow is defined in `.github/workflows/reddit_scraper.yml`.
 
 1. **Fork this repository**.
 
@@ -279,7 +279,7 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
 - Go to the **Actions** tab > Select the **Reddit Stash Scraper** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your configured cloud storage (Dropbox or S3) or in the Actions artifacts.
 
 4. The workflow runs automatically on a schedule:
-   - Every 2 hours during *peak hours* (6:00-21:00 UTC)
+   - Every 3 hours during *peak hours* (6:00-21:00 UTC)
    - Twice during *off-peak hours* (23:00 and 3:00 UTC)
    - You can adjust these times in the workflow file to match your timezone if needed.
 
@@ -3562,7 +3562,7 @@ A: Reddit only allows you to access your most recent 1000 saved items. This tool
 
 **Q: How often does the automated backup run?**
 A: If you use the GitHub Actions setup, it runs on a schedule:
-- Every 2 hours during peak hours (6:00-21:00 UTC)
+- Every 3 hours during peak hours (6:00-21:00 UTC)
 - Twice during off-peak hours (23:00 and 3:00 UTC)
 
 **Q: Can I run this without GitHub Actions?**  
