@@ -12,6 +12,7 @@ Known Limitations:
 - URL encoding issues common
 """
 
+import hashlib
 import time
 import requests
 import logging
@@ -127,23 +128,17 @@ class RedditPreviewProvider:
             # For external URLs, Reddit might have generated previews
             # These are speculative reconstructions based on Reddit's preview patterns
 
-            # external-preview.redd.it pattern
+            # external-preview.redd.it pattern (single-encoded only)
             encoded_url = quote(url, safe='')
             candidates.extend([
                 f"https://external-preview.redd.it/{encoded_url}",
                 f"https://preview.redd.it/{encoded_url}",
             ])
 
-            # Try with different encoding patterns
-            double_encoded = quote(quote(url, safe=''), safe='')
-            candidates.extend([
-                f"https://external-preview.redd.it/{double_encoded}",
-                f"https://preview.redd.it/{double_encoded}",
-            ])
-
             # If it's an image URL, try common preview patterns
             if self._is_image_url(url):
-                domain_hash = str(hash(urlparse(url).netloc))[-8:]
+                # Use deterministic hash (md5) instead of Python's hash() which varies per-process
+                domain_hash = hashlib.md5(urlparse(url).netloc.encode()).hexdigest()[-8:]
                 candidates.extend([
                     f"https://preview.redd.it/preview-{domain_hash}.jpg",
                     f"https://external-preview.redd.it/preview-{domain_hash}.jpg",
@@ -191,16 +186,10 @@ class RedditPreviewProvider:
                         'status_code': head_response.status_code,
                         'headers': dict(head_response.headers)
                     }
-                elif content_length and int(content_length) > 1000:  # Reasonable content size
-                    # Might be accessible content even if not media
-                    self._logger.debug(f"Found accessible Reddit preview: {url}")
-                    return {
-                        'url': url,
-                        'content_type': content_type,
-                        'content_length': content_length,
-                        'status_code': head_response.status_code,
-                        'headers': dict(head_response.headers)
-                    }
+                elif 'text/html' in content_type:
+                    # Reject HTML error pages regardless of size
+                    self._logger.debug(f"Rejected HTML response from preview URL: {url}")
+                    return None
 
         except requests.exceptions.RequestException as e:
             self._logger.debug(f"Preview URL verification failed for {url}: {e}")

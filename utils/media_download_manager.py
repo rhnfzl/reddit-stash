@@ -8,6 +8,7 @@ Integrates Reddit, Imgur, and generic HTTP downloaders with the existing codebas
 
 import os
 import logging
+import threading
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
@@ -40,8 +41,14 @@ class MediaDownloadManager:
         self._media_config = get_media_config()
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-        # Session-level blacklist to prevent retry loops
-        self._failed_urls = set()
+        # Lock for thread-safe access to URL tracking sets
+        self._url_lock = threading.Lock()
+
+        # Permanent failures (403, 404, security) — never retry in this session
+        self._permanent_failures = set()
+        # Transient failures (timeout, 5xx, rate limit) — retry after threshold
+        self._transient_failures = {}  # {url: failure_count}
+        _TRANSIENT_FAILURE_THRESHOLD = 2
 
         # Session-level URL tracking to prevent duplicate downloads
         self._downloaded_urls = {}  # {url: local_path}
@@ -55,6 +62,29 @@ class MediaDownloadManager:
         # Initialize services if media downloads are enabled
         if self._media_config.is_images_enabled():
             self._initialize_services()
+
+    def _is_permanent_failure(self, error_message: str) -> bool:
+        """Classify whether an error is permanent (don't retry) or transient (may retry)."""
+        if not error_message:
+            return False
+        err_lower = error_message.lower()
+        permanent_patterns = ['404', '403', 'not found', 'forbidden', 'security validation',
+                              'invalid url', 'cannot handle']
+        return any(p in err_lower for p in permanent_patterns)
+
+    def _record_failure(self, url: str, error_message: str) -> None:
+        """Record a URL failure as permanent or transient (thread-safe, call with _url_lock held)."""
+        if self._is_permanent_failure(error_message):
+            self._permanent_failures.add(url)
+        else:
+            count = self._transient_failures.get(url, 0) + 1
+            self._transient_failures[url] = count
+
+    def _should_skip_url(self, url: str) -> bool:
+        """Check if URL should be skipped (thread-safe, call with _url_lock held)."""
+        if url in self._permanent_failures:
+            return True
+        return self._transient_failures.get(url, 0) >= 2
 
     def _initialize_services(self):
         """Initialize all media download services."""
@@ -137,21 +167,20 @@ class MediaDownloadManager:
         if not url or not save_path:
             return None
 
-        # Check session-level blacklist to prevent retry loops
-        if url in self._failed_urls:
-            self._logger.debug(f"Skipping blacklisted URL (failed earlier in session): {url}")
-            return None
+        # Check session-level blacklist and dedup cache (thread-safe)
+        with self._url_lock:
+            if self._should_skip_url(url):
+                self._logger.debug(f"Skipping URL (failed earlier in session): {url}")
+                return None
 
-        # Check if URL was already downloaded in this session
-        if url in self._downloaded_urls:
-            existing_path = self._downloaded_urls[url]
-            if os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
-                self._logger.debug(f"URL already downloaded in this session: {url} -> {existing_path}")
-                return existing_path
-            else:
-                # File no longer exists or is empty, remove from cache and re-download
-                self._logger.debug(f"Cached file no longer valid, re-downloading: {url}")
-                del self._downloaded_urls[url]
+            if url in self._downloaded_urls:
+                existing_path = self._downloaded_urls[url]
+                if os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
+                    self._logger.debug(f"URL already downloaded in this session: {url} -> {existing_path}")
+                    return existing_path
+                else:
+                    self._logger.debug(f"Cached file no longer valid, re-downloading: {url}")
+                    del self._downloaded_urls[url]
 
         try:
             # Apply URL transformation to convert viewer URLs to direct download URLs
@@ -176,8 +205,9 @@ class MediaDownloadManager:
                 self._logger.error(f"Security issues: {validation_result.issues}")
                 self._logger.error(f"Risk level: {validation_result.risk_level}")
 
-                # Add to failed URLs to prevent retrying
-                self._failed_urls.add(url)
+                # Add to permanent failures (security failures never retry)
+                with self._url_lock:
+                    self._record_failure(url, "security validation failed")
 
                 # Add to retry queue with security failure status
                 self._retry_queue.add_failed_url(
@@ -220,7 +250,8 @@ class MediaDownloadManager:
             if result and result.is_success and result.local_path:
                 self._logger.debug(f"Successfully downloaded {url} to {result.local_path}")
                 # Track this URL as successfully downloaded in this session
-                self._downloaded_urls[url] = result.local_path
+                with self._url_lock:
+                    self._downloaded_urls[url] = result.local_path
                 # Mark as successful in retry queue if it was a retry
                 self._retry_queue.mark_retry_completed(url, success=True)
                 return result.local_path
@@ -262,8 +293,9 @@ class MediaDownloadManager:
                             if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                 self._logger.info(f"Successfully downloaded from recovered URL: {recovery_result.recovered_url}")
                                 # Track both original and recovered URLs as successfully downloaded
-                                self._downloaded_urls[url] = recovery_download_result.local_path
-                                self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
+                                with self._url_lock:
+                                    self._downloaded_urls[url] = recovery_download_result.local_path
+                                    self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
                                 # Mark original URL as successful in retry queue (recovery counts as success)
                                 self._retry_queue.mark_retry_completed(url, success=True)
                                 return recovery_download_result.local_path
@@ -275,8 +307,9 @@ class MediaDownloadManager:
                     else:
                         self._logger.debug(f"Content recovery failed: {recovery_result.error_message}")
 
-                # Add to session blacklist to prevent retry loops
-                self._failed_urls.add(url)
+                # Classify and record failure (permanent vs transient)
+                with self._url_lock:
+                    self._record_failure(url, error_msg)
                 # Add to persistent retry queue for cross-run recovery
                 self._retry_queue.add_failed_download(url, error_msg, service_name)
                 return None
@@ -312,16 +345,18 @@ class MediaDownloadManager:
                                 if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                     self._logger.info(f"Successfully downloaded from recovered URL after exception: {recovery_result.recovered_url}")
                                     # Track both original and recovered URLs as successfully downloaded
-                                    self._downloaded_urls[url] = recovery_download_result.local_path
-                                    self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
+                                    with self._url_lock:
+                                        self._downloaded_urls[url] = recovery_download_result.local_path
+                                        self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
                                     # Mark original URL as successful in retry queue (recovery counts as success)
                                     self._retry_queue.mark_retry_completed(url, success=True)
                                     return recovery_download_result.local_path
                 except Exception as recovery_e:
                     self._logger.warning(f"Recovery attempt also failed: {recovery_e}")
 
-            # Add to session blacklist to prevent retry loops
-            self._failed_urls.add(url)
+            # Classify and record failure (permanent vs transient)
+            with self._url_lock:
+                self._record_failure(url, str(e))
             # Add to persistent retry queue for cross-run recovery
             service_name, _ = self._get_service_for_url(url)
             self._retry_queue.add_failed_download(url, str(e), service_name or "unknown")
@@ -404,7 +439,9 @@ class MediaDownloadManager:
                 service_name = retry_item['service_name']
 
                 # Skip if URL is in session blacklist
-                if url in self._failed_urls:
+                with self._url_lock:
+                    is_blacklisted = self._should_skip_url(url)
+                if is_blacklisted:
                     self._logger.debug(f"Skipping retry for blacklisted URL: {url}")
                     stats["skipped"] += 1
                     continue

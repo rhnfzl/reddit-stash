@@ -179,6 +179,14 @@ class SQLiteRetryQueue:
         self.sqlite_manager = get_retry_queue_manager(str(database_path))
         self._initialize_database()
 
+    def _safe_json_loads(self, raw) -> dict:
+        """Safely parse JSON metadata, returning empty dict on failure."""
+        try:
+            return json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            self._logger.debug("Invalid JSON metadata, using empty dict")
+            return {}
+
     def _initialize_database(self) -> None:
         """Initialize SQLite database with proper schema and indexes."""
         with self.sqlite_manager.get_connection() as conn:
@@ -316,7 +324,7 @@ class SQLiteRetryQueue:
                     items = []
                     for row in rows:
                         item_dict = dict(row)
-                        item_dict['metadata'] = json.loads(item_dict['metadata'])
+                        item_dict['metadata'] = self._safe_json_loads(item_dict['metadata'])
                         items.append(item_dict)
 
                     return items
@@ -377,7 +385,7 @@ class SQLiteRetryQueue:
                                 next_retry_at=row[8],
                                 last_attempt_at=row[9],
                                 status=RetryStatus(row[10]),
-                                metadata=json.loads(row[11])
+                                metadata=self._safe_json_loads(row[11])
                             )
 
                             retry_item.increment_retry()
@@ -462,7 +470,7 @@ class SQLiteRetryQueue:
                             max_retries=row[5],
                             priority=row[6],
                             created_at=row[7],
-                            metadata=json.loads(row[11])
+                            metadata=self._safe_json_loads(row[11])
                         )
 
                         self._move_to_dead_letter_queue(conn, retry_item)
@@ -549,7 +557,7 @@ class SQLiteRetryQueue:
                     items = []
                     for row in rows:
                         item_dict = dict(row)
-                        item_dict['metadata'] = json.loads(item_dict['metadata'])
+                        item_dict['metadata'] = self._safe_json_loads(item_dict['metadata'])
                         items.append(item_dict)
 
                     return items

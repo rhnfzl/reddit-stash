@@ -55,7 +55,7 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
             return None, 0
 
     except Exception as e:
-        print(f"Failed to download image from {image_url}: {e}")
+        logger.error(f"Failed to download image from {image_url}: {e}")
         # No fallback - respect rate limiting and service protection
         return None, 0
 
@@ -101,7 +101,7 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
             return image_path, 0
 
     except Exception as e:
-        print(f"Fallback download failed for {image_url}: {e}")
+        logger.error(f"Fallback download failed for {image_url}: {e}")
         return None, 0
 
 
@@ -150,18 +150,19 @@ def _get_video_download_url(submission):
 
     Reddit stores the short redirect URL in submission.url (e.g., https://v.redd.it/abc123)
     but the actual downloadable video stream is in submission.media['reddit_video']['fallback_url'].
+    Since Reddit's 2024 HTTPS migration, some videos only have metadata in secure_media.
     Falls back to constructing a DASH URL from the short v.redd.it URL if metadata is unavailable.
     """
     try:
-        if hasattr(submission, 'media') and submission.media:
-            reddit_video = submission.media.get('reddit_video', {})
-            fallback_url = reddit_video.get('fallback_url')
-            if fallback_url:
-                return fallback_url
-            else:
-                logger.warning(f"submission.media exists but no fallback_url for {submission.id}")
-        else:
-            logger.info(f"No media metadata for video post {submission.id}, constructing DASH URL")
+        for media_attr in ('media', 'secure_media'):
+            media = getattr(submission, media_attr, None)
+            if media:
+                reddit_video = media.get('reddit_video', {})
+                fallback_url = reddit_video.get('fallback_url')
+                if fallback_url:
+                    logger.debug(f"Found fallback_url via submission.{media_attr} for {submission.id}")
+                    return fallback_url
+        logger.info(f"No media/secure_media metadata for video post {submission.id}, constructing DASH URL")
     except Exception as e:
         logger.warning(f"Error extracting fallback_url for {submission.id}: {e}")
 
@@ -375,12 +376,12 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
         if unsave:
             try:
                 submission.unsave()
-                print(f"Unsaved submission: {submission.id}")
+                logger.info(f"Unsaved submission: {submission.id}")
             except Exception as e:
-                print(f"Failed to unsave submission {submission.id}: {e}")
+                logger.warning(f"Failed to unsave submission {submission.id}: {e}")
 
     except Exception as e:
-        print(f"Error saving submission {submission.id}: {e}")
+        logger.error(f"Error saving submission {submission.id}: {e}")
 
 def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
     """Save a comment, its context, and any child comments.
@@ -457,12 +458,12 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
         if unsave:
             try:
                 comment.unsave()
-                print(f"Unsaved comment: {comment.id}")
+                logger.info(f"Unsaved comment: {comment.id}")
             except Exception as e:
-                print(f"Failed to unsave comment {comment.id}: {e}")
+                logger.warning(f"Failed to unsave comment {comment.id}: {e}")
 
     except Exception as e:
-        print(f"Error saving comment {comment.id}: {e}")
+        logger.error(f"Error saving comment {comment.id}: {e}")
 
 def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None):
     """Process all comments using pure blockquote nesting for hierarchy."""

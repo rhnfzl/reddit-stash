@@ -7,6 +7,7 @@ Implements the MediaDownloaderProtocol with web-researched best practices.
 """
 
 import os
+import re
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -210,7 +211,14 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                         audio_result = audio_future.result()
 
                     if not video_result.is_success:
-                        return video_result
+                        # If 404, try alternative DASH quality tiers
+                        if 'DASH_' in url:
+                            error = video_result.error_message or ""
+                            if '404' in error or 'Not Found' in error:
+                                _logger.info("Video DASH quality failed with 404, trying alternatives")
+                                video_result = self._try_dash_qualities(url, save_path)
+                        if not video_result.is_success:
+                            return video_result
 
                     if audio_result.is_success:
                         merged_result = self._merge_video_audio(
@@ -230,6 +238,12 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             else:
                 # No audio URL or no ffmpeg, just download video
                 video_result = self.download_file(url, save_path)
+                # If 404, try alternative DASH quality tiers
+                if not video_result.is_success and 'DASH_' in url:
+                    error = video_result.error_message or ""
+                    if '404' in error or 'Not Found' in error:
+                        _logger.info("Initial DASH quality failed with 404, trying alternatives")
+                        video_result = self._try_dash_qualities(url, save_path)
                 if video_result.is_success and not has_ffmpeg:
                     return replace(video_result, error_message="Audio track not merged (ffmpeg not available)")
                 return video_result
@@ -268,8 +282,8 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             if dash_index is None:
                 return None
 
-            # Try multiple audio filename patterns (newest first)
-            audio_filenames = ['DASH_AUDIO_128.mp4', 'DASH_AUDIO_64.mp4', 'DASH_audio.mp4']
+            # Try multiple audio filename patterns (most common first to minimize HEAD requests)
+            audio_filenames = ['DASH_audio.mp4', 'DASH_AUDIO_128.mp4', 'DASH_AUDIO_64.mp4']
 
             for audio_filename in audio_filenames:
                 candidate_parts = path_parts.copy()
@@ -298,37 +312,53 @@ class RedditMediaDownloader(BaseHTTPDownloader):
         except Exception:
             return None
 
+    def _try_dash_qualities(self, url: str, save_path: str) -> DownloadResult:
+        """Try multiple DASH quality tiers when the initial quality returns 404.
+
+        Replaces DASH_NNN in the URL with progressively lower quality tiers.
+        """
+        import logging
+        _logger = logging.getLogger(__name__)
+
+        qualities = [720, 480, 360, 240]
+        last_result = None
+
+        for quality in qualities:
+            candidate = re.sub(r'DASH_\d+', f'DASH_{quality}', url)
+            if candidate == url:
+                continue  # Already tried this quality
+            _logger.debug(f"Trying DASH quality fallback: DASH_{quality}")
+            result = self.download_file(candidate, save_path)
+            last_result = result
+            if result.is_success:
+                _logger.info(f"DASH quality fallback succeeded at {quality}p")
+                return result
+            error = result.error_message or ""
+            if '404' not in error and 'Not Found' not in error:
+                break  # Non-404 error, stop trying
+
+        return last_result or DownloadResult(
+            status=DownloadStatus.FAILED,
+            error_message="All DASH quality tiers failed"
+        )
+
     def _download_with_reddit_headers(self, url: str, save_path: str) -> DownloadResult:
         """
         Download Reddit images with optimal headers to prevent HTML wrapper pages.
 
         Reddit uses content negotiation - when it sees browser-like Accept headers
         prioritizing text/html, it serves HTML wrapper pages instead of raw images.
-        This method temporarily overrides headers to prioritize image formats.
+        Per-request headers are passed via extra_headers to avoid mutating the shared
+        session (which is unsafe under concurrent ThreadPoolExecutor downloads).
         """
-        # Store original headers
-        original_headers = self._session.headers.copy()
-
-        try:
-            # Set Reddit-optimized headers that prioritize images
-            reddit_headers = {
-                'Accept': 'image/*,*/*;q=0.8',  # Prioritize images, fallback to any content
-                'User-Agent': self.config.user_agent,
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Cache-Control': 'no-cache'
-            }
-
-            # Update session headers temporarily
-            self._session.headers.update(reddit_headers)
-
-            # Perform the download with optimized headers
-            return self.download_file(url, save_path)
-
-        finally:
-            # Always restore original headers
-            self._session.headers.clear()
-            self._session.headers.update(original_headers)
+        reddit_headers = {
+            'Accept': 'image/*,*/*;q=0.8',
+            'User-Agent': self.config.user_agent,
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Cache-Control': 'no-cache'
+        }
+        return self.download_file(url, save_path, extra_headers=reddit_headers)
 
     def _is_ffmpeg_available(self) -> bool:
         """Check if ffmpeg is available in system PATH."""
@@ -479,6 +509,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
         except Exception as e:
             # Log error but don't fail completely
-            print(f"Warning: Error extracting media URLs from submission: {e}")
+            import logging
+            logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
 
         return media_urls
