@@ -174,6 +174,62 @@ class ConfigValidator:
                 f"Install with: pip install {' '.join(missing_deps)}"
             )
 
+    def validate_storage_section(self):
+        """Validate the [Storage] section."""
+        if not self.config_parser.has_section('Storage'):
+            return  # Section is optional
+
+        # Validate provider enum
+        provider = self.config_parser.get('Storage', 'provider', fallback='none').lower()
+        valid_providers = ['none', 'dropbox', 's3']
+        if provider not in valid_providers:
+            self.errors.append(
+                f"Invalid storage provider '{provider}'. Must be one of: {', '.join(valid_providers)}"
+            )
+
+        # S3-specific validation
+        if provider == 's3':
+            bucket = self.config_parser.get('Storage', 's3_bucket', fallback='None')
+            if not bucket or bucket == 'None':
+                self.errors.append(
+                    "S3 provider selected but s3_bucket is not set. "
+                    "Set s3_bucket in [Storage] section or AWS_S3_BUCKET env var."
+                )
+
+            storage_class = self.config_parser.get('Storage', 's3_storage_class', fallback='STANDARD_IA').upper()
+            valid_classes = [
+                'STANDARD', 'STANDARD_IA', 'ONEZONE_IA', 'INTELLIGENT_TIERING',
+                'GLACIER_IR', 'GLACIER', 'DEEP_ARCHIVE',
+            ]
+            if storage_class not in valid_classes:
+                self.errors.append(
+                    f"Invalid s3_storage_class '{storage_class}'. "
+                    f"Must be one of: {', '.join(valid_classes)}"
+                )
+
+            # Check boto3 availability
+            try:
+                __import__('boto3')
+            except ImportError:
+                self.errors.append(
+                    "S3 provider selected but boto3 is not installed. "
+                    "Install with: pip install -r requirements-s3.txt"
+                )
+
+        # Dropbox provider needs credentials
+        if provider == 'dropbox':
+            import os
+            has_creds = all([
+                os.getenv('DROPBOX_REFRESH_TOKEN'),
+                os.getenv('DROPBOX_APP_KEY'),
+                os.getenv('DROPBOX_APP_SECRET'),
+            ])
+            if not has_creds:
+                self.warnings.append(
+                    "Dropbox provider selected but DROPBOX_REFRESH_TOKEN, "
+                    "DROPBOX_APP_KEY, or DROPBOX_APP_SECRET env vars not set."
+                )
+
     def validate_directory_permissions(self):
         """Validate that required directories are writable."""
         save_dir = self.config_parser.get('Settings', 'save_directory', fallback='reddit/')
@@ -204,6 +260,7 @@ class ConfigValidator:
         self.validate_settings_section()
         self.validate_configuration_section()
         self.validate_media_configuration()
+        self.validate_storage_section()
         self.validate_directory_permissions()
 
         return {

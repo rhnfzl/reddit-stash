@@ -184,23 +184,55 @@ def validate_media_config() -> Optional[str]:
     """Validate media configuration and return error if invalid."""
     return get_media_config().validate_config()
 
+def get_storage_summary() -> str:
+    """Get a summary of cloud storage configuration."""
+    try:
+        from utils.storage.factory import load_storage_config
+        from utils.storage.base import StorageProvider
+
+        config = load_storage_config()
+
+        if config.provider == StorageProvider.NONE:
+            return "Cloud storage: DISABLED"
+
+        if config.provider == StorageProvider.DROPBOX:
+            return f"Cloud storage: Dropbox ({config.dropbox_directory})"
+
+        if config.provider == StorageProvider.S3:
+            parts = [f"Cloud storage: S3 (s3://{config.s3_bucket}"]
+            parts.append(f", class={config.s3_storage_class}")
+            if config.s3_endpoint_url:
+                parts.append(f", endpoint={config.s3_endpoint_url}")
+            parts.append(")")
+            return "".join(parts)
+
+        return f"Cloud storage: {config.provider.value}"
+    except Exception:
+        return "Cloud storage: NOT CONFIGURED"
+
+
 def get_feature_summary() -> str:
     """Get a summary of enabled features for logging/debugging."""
     config = get_media_config()
 
+    parts = []
+
     if not config.is_media_enabled():
-        return "Media downloads: DISABLED"
+        parts.append("Media downloads: DISABLED")
+    else:
+        features = []
+        if config.is_images_enabled():
+            features.append("images")
+        if config.is_videos_enabled():
+            features.append("videos")
+        if config.is_audio_enabled():
+            features.append("audio")
+        if config.is_albums_enabled():
+            features.append("albums")
+        if config.is_thumbnails_enabled():
+            features.append("thumbnails")
+        parts.append(f"Media downloads: ENABLED ({', '.join(features)})")
 
-    features = []
-    if config.is_images_enabled():
-        features.append("images")
-    if config.is_videos_enabled():
-        features.append("videos")
-    if config.is_audio_enabled():
-        features.append("audio")
-    if config.is_albums_enabled():
-        features.append("albums")
-    if config.is_thumbnails_enabled():
-        features.append("thumbnails")
+    parts.append(get_storage_summary())
 
-    return f"Media downloads: ENABLED ({', '.join(features)})"
+    return "\n".join(parts)

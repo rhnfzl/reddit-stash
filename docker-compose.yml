@@ -15,6 +15,15 @@ services:
       DROPBOX_APP_KEY: ${DROPBOX_APP_KEY:-}
       DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET:-}
       DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN:-}
+
+      # S3 credentials (optional — or use IAM roles)
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
+      S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
     volumes:
       # Mount local reddit directory for persistent data
       - ./reddit:/app/reddit
@@ -36,13 +45,41 @@ services:
       DROPBOX_APP_KEY: ${DROPBOX_APP_KEY:-}
       DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET:-}
       DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
+      S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
     volumes:
       - ./reddit:/app/reddit
       - ./settings.ini:/app/settings.ini:ro
     profiles:
       - oneshot
 
-  # Service for Dropbox operations only
+  # Service for storage operations only (Dropbox or S3)
+  reddit-stash-storage:
+    build: .
+    container_name: reddit-stash-storage
+    environment:
+      DROPBOX_APP_KEY: ${DROPBOX_APP_KEY:-}
+      DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET:-}
+      DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
+      S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
+    volumes:
+      - ./reddit:/app/reddit
+      - ./settings.ini:/app/settings.ini:ro
+    profiles:
+      - storage
+
+  # Legacy Dropbox-only service (backward compatibility)
   reddit-stash-dropbox:
     build: .
     container_name: reddit-stash-dropbox
@@ -59,5 +96,7 @@ services:
 # 1. Copy .env.example to .env and fill in your credentials
 # 2. Run main service: docker-compose --profile main up
 # 3. Run one-shot: docker-compose --profile oneshot run --rm reddit-stash-oneshot
-# 4. Dropbox upload: docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --upload
-# 5. Dropbox download: docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --download
+# 4. Storage upload: docker-compose --profile storage run --rm reddit-stash-storage python storage_utils.py --upload
+# 5. Storage download: docker-compose --profile storage run --rm reddit-stash-storage python storage_utils.py --download
+# 6. Migrate: docker-compose --profile storage run --rm reddit-stash-storage python storage_utils.py --migrate --source dropbox --target s3 --execute
+# 7. Legacy Dropbox: docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --upload

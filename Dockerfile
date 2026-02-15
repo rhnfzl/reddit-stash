@@ -41,6 +41,8 @@ COPY requirements.txt .
 
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+# Uncomment to enable S3 storage backend:
+# RUN pip install --no-cache-dir -r requirements-s3.txt
 
 # Copy the application code
 COPY . .

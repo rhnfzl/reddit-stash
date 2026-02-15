@@ -72,33 +72,69 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    # Download only the log file from Dropbox
-    - name: Download log file from Dropbox
+    # --- Storage: Download (Dropbox) ---
+    - name: Download from Dropbox
+      if: vars.STORAGE_PROVIDER == 'dropbox' || vars.STORAGE_PROVIDER == ''
       timeout-minutes: 2
       env:
         DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
         DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       run: |
-        python dropbox_utils.py --download  # downloads only the log file
+        python dropbox_utils.py --download
+
+    # --- Storage: Download (S3) ---
+    - name: Install S3 dependencies
+      if: vars.STORAGE_PROVIDER == 's3'
+      run: pip install -r requirements-s3.txt
+
+    - name: Download from S3
+      if: vars.STORAGE_PROVIDER == 's3'
+      timeout-minutes: 5
+      env:
+        STORAGE_PROVIDER: s3
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        S3_STORAGE_CLASS: ${{ vars.S3_STORAGE_CLASS }}
+        # Optional: For OIDC auth, use aws-actions/configure-aws-credentials@v4
+        # with role-to-assume instead of static keys (requires permissions: id-token: write)
+      run: |
+        python storage_utils.py --download
 
     # Process Reddit data
     - name: Run Reddit Stash Script
-      timeout-minutes: 90  # Generous timeout for processing large collections, extensive media downloads, and recovery cascade operations
+      timeout-minutes: 90
       env:
         REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
         REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
         REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
         REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
       run: |
-        python reddit_stash.py  # process the files
+        python reddit_stash.py
 
-    # Upload any changed files to Dropbox
-    - name: Upload updated data to Dropbox
-      timeout-minutes: 50  # Extended timeout for uploading large volumes of media files and markdown content
+    # --- Storage: Upload (Dropbox) ---
+    - name: Upload to Dropbox
+      if: vars.STORAGE_PROVIDER == 'dropbox' || vars.STORAGE_PROVIDER == ''
+      timeout-minutes: 50
       env:
         DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
         DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       run: |
-        python dropbox_utils.py --upload  # uploads only changed files
+        python dropbox_utils.py --upload
+
+    # --- Storage: Upload (S3) ---
+    - name: Upload to S3
+      if: vars.STORAGE_PROVIDER == 's3'
+      timeout-minutes: 50
+      env:
+        STORAGE_PROVIDER: s3
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        S3_STORAGE_CLASS: ${{ vars.S3_STORAGE_CLASS }}
+      run: |
+        python storage_utils.py --upload

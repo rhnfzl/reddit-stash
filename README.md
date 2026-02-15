@@ -1,15 +1,16 @@
-# Reddit Stash: Automatically Save Reddit Posts and Comments to Local or Dropbox
+# Reddit Stash: Automatically Save Reddit Posts and Comments to Local, Dropbox, or S3
 
 [![Python](https://img.shields.io/badge/Python-3.10--3.12-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Workflow-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/features/actions)
 [![Docker](https://img.shields.io/badge/Docker-Available-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://github.com/rhnfzl/reddit-stash/pkgs/container/reddit-stash)
 [![Dropbox](https://img.shields.io/badge/Dropbox-Integration-0061FF?style=for-the-badge&logo=dropbox&logoColor=white)](https://www.dropbox.com/)
+[![AWS S3](https://img.shields.io/badge/AWS_S3-Integration-FF9900?style=for-the-badge&logo=amazons3&logoColor=white)](https://aws.amazon.com/s3/)
 [![Reddit](https://img.shields.io/badge/Reddit-API-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/dev/api/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
 > **Reddit API Policy Change (November 2025):** Reddit now requires pre-approval to create new API apps. **If you already have API credentials, they still work normally.** New users must apply at [Reddit's API Request Form](https://support.reddithelp.com/hc/en-us/requests/new?ticket_form_id=14868593862164) (expect 2-4 weeks for approval). Alternatively, you can use the [GDPR Export Mode](#gdpr-only-mode-no-api-credentials-needed) to create an index of your saved content without any API credentials. See [Getting API Credentials](#getting-api-credentials) for full details.
 
-**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox or your local machine. Utilizing GitHub Actions, this script runs every 2 hours during peak hours and twice during off-peak hours, automating the process of archiving your Reddit data in Dropbox after a simple setup.
+**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox, AWS S3, or your local machine. Utilizing GitHub Actions, this script runs every 2 hours during peak hours and twice during off-peak hours, automating the process of archiving your Reddit data after a simple setup.
 
 ## 📋 What You Get
 
@@ -76,11 +77,14 @@ This gives you clear visibility into:
     - [[Imgur] - Imgur API Configuration](#imgur---imgur-api-configuration)
     - [[Recovery] - Content Recovery System](#recovery---content-recovery-system)
     - [[Retry] - Retry Queue Configuration](#retry---retry-queue-configuration)
+    - [[Storage] - Cloud Storage Backend](#storage---cloud-storage-backend)
   - [Important Configuration Notes](#important-configuration-notes)
   - [Getting API Credentials](#getting-api-credentials)
   - [GDPR-Only Mode (No API Credentials Needed)](#gdpr-only-mode-no-api-credentials-needed)
   - [Setting Up Reddit Environment Variables](#setting-up-reddit-environment-variables)
   - [Setting Up Dropbox App](#setting-up-dropbox-app)
+  - [Setting Up AWS S3](#setting-up-aws-s3)
+  - [Migrating Between Storage Providers](#migrating-between-storage-providers)
   - [Settings Index (Alphabetical)](#settings-index-alphabetical)
 - [Docker Environment Variables](#docker-environment-variables)
 - [Alternative Scheduling: External Cron Setup](#alternative-scheduling-external-cron-setup)
@@ -108,7 +112,8 @@ graph LR
     D -->|ACTIVITY| F[User Posts/Comments]
     D -->|UPVOTED| G[Upvoted Content]
     D -->|ALL| H[All Content Types]
-    C -->|Optional| I[Dropbox Upload]
+    C -->|Optional| I[Cloud Upload]
+    I -->|Dropbox or S3| K[Cloud Storage]
     J[GDPR Export] -->|Optional| B
 ```
 
@@ -125,10 +130,10 @@ graph LR
 
 3. **Storage Options**:
    - Local storage: Content is saved as markdown files on your machine
-   - Cloud storage: Optional integration with Dropbox for backup
+   - Cloud storage: Optional integration with Dropbox or AWS S3 for backup
 
 4. **Deployment Methods**:
-   - **GitHub Actions**: Fully automated with scheduled runs and Dropbox integration
+   - **GitHub Actions**: Fully automated with scheduled runs and cloud storage integration (Dropbox or S3)
    - **Local Installation**: Run manually or schedule with cron jobs on your machine
    - **Docker**: Run in a containerized environment with optional volume mounts
 
@@ -143,7 +148,8 @@ For those who want to get up and running quickly, here's a streamlined process:
 1. Fork this repository.
 2. Set up the required secrets in your GitHub repository:
    - From Reddit: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`
-   - From Dropbox: `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`
+   - For Dropbox storage: `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`
+   - For S3 storage: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET` (and set repository variable `STORAGE_PROVIDER` to `s3`)
 3. Manually trigger the workflow from the Actions tab.
 
 ### Option 2: Local Installation
@@ -176,15 +182,10 @@ For those who want to get up and running quickly, here's a streamlined process:
      -e REDDIT_CLIENT_SECRET=your_client_secret \
      -e REDDIT_USERNAME=your_username \
      -e REDDIT_PASSWORD=your_password \
-     -e DROPBOX_APP_KEY=your_dropbox_key \
-     -e DROPBOX_APP_SECRET=your_dropbox_secret \
-     -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
-     -e IMGUR_CLIENT_ID=your_imgur_client_id \
-     -e IMGUR_CLIENT_SECRET=your_imgur_client_secret \
      -v $(pwd)/reddit:/app/reddit \
      reddit-stash
    ```
-   *Note: IMGUR_CLIENT_ID and IMGUR_CLIENT_SECRET are optional - Imgur API registration is permanently closed, only users with existing applications can use these*
+   *Add cloud storage env vars as needed: Dropbox (`DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`) or S3 (`STORAGE_PROVIDER=s3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`). See [Setting Up Dropbox App](#setting-up-dropbox-app) or [Setting Up AWS S3](#setting-up-aws-s3) for details.*
 
 For detailed setup instructions, continue reading the [Setup](#setup) section.
 
@@ -195,7 +196,7 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 | **Ease of Setup** | ⭐⭐⭐ (Easiest) | ⭐⭐ | ⭐⭐ |
 | **Automation** | ✅ Runs on schedule | ✅ Manual control or cron | ✅ Built-in scheduling support |
 | **Requirements** | GitHub account | Python 3.10-3.12 | Docker |
-| **Data Storage** | Dropbox required | Local or Dropbox | Local or Dropbox |
+| **Data Storage** | Dropbox or S3 | Local, Dropbox, or S3 | Local, Dropbox, or S3 |
 | **Maintenance** | Minimal | More hands-on | Low to Medium |
 | **Privacy** | Credentials in GitHub secrets | Credentials on local machine | Credentials in container |
 | **Best For** | Set & forget users | Power users with customization needs | Containerized environments & flexible scheduling |
@@ -204,7 +205,7 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 
 - 🤖 **Automated Reddit Backup:** Automatically retrieves saved posts and comments from Reddit, even your posts and comments if you set it up.
 - 🔄 **Flexible Storage Options:** Allows for flexible saving options (all activity or only saved items) via `settings.ini`.
-- 📦 **Dropbox Integration:** Downloads and uploads the files to Dropbox for storage.
+- 📦 **Cloud Storage Integration:** Sync your archive to Dropbox or AWS S3 (with Glacier support for low-cost archival).
 - 📝 **Markdown Support:** Saves the content as markdown files.
 - 🔍 **File Deduplication:** Uses intelligent file existence checking to avoid re-downloading content.
 - ⏱️ **Rate Limit Management:** Implements dynamic sleep timers to respect Reddit's API rate limits.
@@ -239,7 +240,7 @@ Beyond text, Reddit Stash can download and preserve images, videos, and other me
 ### Prerequisites
 - ✅ Python 3.10-3.12 (Python 3.12 recommended for best performance)
 - 🔑 Reddit API credentials
-- 📊 A Dropbox account with an API token
+- 📊 A cloud storage account (optional): Dropbox with API token, or an AWS account with S3 access
 
 ### Installation
 
@@ -247,7 +248,7 @@ Before proceeding with any installation method, ensure that you have set the Red
 
 #### GitHub Action Installation (Recommended)
 
-**Note:** The following process requires the [Dropbox App setup](#setting-up-dropbox-app). The GitHub Actions workflow runs the script every 2 hours during peak hours (6:00-21:00 UTC) and twice during off-peak hours (23:00 and 3:00 UTC), uploading the files to Dropbox. The workflow is defined in `.github/workflows/reddit_scraper.yml`.
+**Note:** Cloud storage is optional. To use Dropbox, see the [Dropbox App setup](#setting-up-dropbox-app). To use AWS S3 instead, see [Setting Up AWS S3](#setting-up-aws-s3). The GitHub Actions workflow runs the script every 2 hours during peak hours (6:00-21:00 UTC) and twice during off-peak hours (23:00 and 3:00 UTC), syncing files to your configured cloud storage. The workflow is defined in `.github/workflows/reddit_scraper.yml`.
 
 1. **Fork this repository**.
 
@@ -258,10 +259,15 @@ Before proceeding with any installation method, ensure that you have set the Red
     - `REDDIT_CLIENT_SECRET`
     - `REDDIT_USERNAME`
     - `REDDIT_PASSWORD`
-    For Dropbox Setup
+    For Dropbox cloud storage (optional — see [Setting Up Dropbox App](#setting-up-dropbox-app))
     - `DROPBOX_APP_KEY`
     - `DROPBOX_APP_SECRET`
     - `DROPBOX_REFRESH_TOKEN`
+    For S3 cloud storage (optional — see [Setting Up AWS S3](#setting-up-aws-s3))
+    - `AWS_ACCESS_KEY_ID`
+    - `AWS_SECRET_ACCESS_KEY`
+    - `AWS_S3_BUCKET`
+    - Also set repository **variable** (not secret): `STORAGE_PROVIDER` = `s3`
     For Enhanced Media Downloads (Optional - Imgur API registration is permanently closed)
     - `IMGUR_CLIENT_ID` (only if you already have an existing Imgur application)
     - `IMGUR_CLIENT_SECRET` (only if you already have an existing Imgur application)
@@ -270,7 +276,7 @@ Before proceeding with any installation method, ensure that you have set the Red
 After adding all secrets: ![Repository Secrets](resources/repository_secrets.png).
 
 3. **Manually Trigger the Workflow**:
-- Go to the **Actions** tab > Select the **Reddit Stash Scraper** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your Dropbox.
+- Go to the **Actions** tab > Select the **Reddit Stash Scraper** from the list on the left > Click **Run workflow** > Select the branch `main` > Click the green **Run workflow** button. The workflow will then be triggered, and you can monitor its progress in the Actions tab. Upon successful completion, you should see the Reddit folder in your configured cloud storage (Dropbox or S3) or in the Actions artifacts.
 
 4. The workflow runs automatically on a schedule:
    - Every 2 hours during *peak hours* (6:00-21:00 UTC)
@@ -294,7 +300,10 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     pip install -r requirements.txt
     ```
 
-3. Setup the [Dropbox App setup](#setting-up-dropbox-app). Skip it if you don't want to setup the dropbox and only want to save the file locally in your system.
+3. Set up cloud storage (optional). Choose one:
+   - **Dropbox**: Follow [Setting Up Dropbox App](#setting-up-dropbox-app)
+   - **AWS S3**: Follow [Setting Up AWS S3](#setting-up-aws-s3)
+   - **Local only**: Skip this step if you only want to save files locally on your system.
 
 4. Edit the settings.ini file, here is [how to](#settingsini-file)
 
@@ -306,10 +315,15 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     export REDDIT_CLIENT_SECRET='your_client_secret'
     export REDDIT_USERNAME='your_username'
     export REDDIT_PASSWORD='your_password'
-    # Optional, if you need dropbox locally
+    # Optional: Dropbox cloud storage
     export DROPBOX_APP_KEY='dropbox-app-key'
     export DROPBOX_APP_SECRET='dropbox-secret-key'
     export DROPBOX_REFRESH_TOKEN='dropbox-secret-key'
+    # Optional: AWS S3 cloud storage (instead of Dropbox)
+    export AWS_ACCESS_KEY_ID='your_access_key'
+    export AWS_SECRET_ACCESS_KEY='your_secret_key'
+    export AWS_S3_BUCKET='your-bucket-name'
+    export STORAGE_PROVIDER='s3'
     # Optional, for enhanced Imgur downloading (if you have existing API access)
     export IMGUR_CLIENT_ID='your_imgur_client_id'
     export IMGUR_CLIENT_SECRET='your_imgur_client_secret'
@@ -322,10 +336,15 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     set REDDIT_CLIENT_SECRET='your_client_secret'
     set REDDIT_USERNAME='your_username'
     set REDDIT_PASSWORD='your_password'
-    # Optional, if you need dropbox locally
+    # Optional: Dropbox cloud storage
     set DROPBOX_APP_KEY='dropbox-app-key'
     set DROPBOX_APP_SECRET='dropbox-secret-key'
     set DROPBOX_REFRESH_TOKEN='dropbox-secret-key'
+    # Optional: AWS S3 cloud storage (instead of Dropbox)
+    set AWS_ACCESS_KEY_ID='your_access_key'
+    set AWS_SECRET_ACCESS_KEY='your_secret_key'
+    set AWS_S3_BUCKET='your-bucket-name'
+    set STORAGE_PROVIDER='s3'
     # Optional, for enhanced Imgur downloading (if you have existing API access)
     set IMGUR_CLIENT_ID='your_imgur_client_id'
     set IMGUR_CLIENT_SECRET='your_imgur_client_secret'
@@ -337,9 +356,16 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     echo $REDDIT_CLIENT_SECRET
     echo $REDDIT_USERNAME
     echo $REDDIT_PASSWORD
+    # If using Dropbox:
     echo $DROPBOX_APP_KEY
     echo $DROPBOX_APP_SECRET
     echo $DROPBOX_REFRESH_TOKEN
+    # If using S3:
+    echo $AWS_ACCESS_KEY_ID
+    echo $AWS_SECRET_ACCESS_KEY
+    echo $AWS_S3_BUCKET
+    echo $STORAGE_PROVIDER
+    # If using Imgur:
     echo $IMGUR_CLIENT_ID
     echo $IMGUR_CLIENT_SECRET
     ```
@@ -349,22 +375,23 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     ```
     python reddit_stash.py
     ```
-    To upload to Dropbox (optional):
+    To upload to cloud storage (optional):
     ```
-    python dropbox_utils.py --upload
+    python storage_utils.py --upload     # Works with Dropbox or S3
+    python dropbox_utils.py --upload     # Dropbox-only (legacy)
     ```
     * Subsequent runs, as per your convenience:
-    1. Download from Dropbox (optional):
+    1. Download from cloud storage (optional):
     ```
-    python dropbox_utils.py --download
+    python storage_utils.py --download   # Works with Dropbox or S3
     ```
     2. Process Reddit saved items:
     ```
     python reddit_stash.py
     ```
-    3. Upload to Dropbox (optional):
+    3. Upload to cloud storage (optional):
     ```
-    python dropbox_utils.py --upload
+    python storage_utils.py --upload
     ```
 
 #### Docker Installation
@@ -530,6 +557,43 @@ DROPBOX_APP_SECRET=your_dropbox_app_secret
 DROPBOX_REFRESH_TOKEN=your_dropbox_refresh_token
 ```
 
+**With AWS S3 Sync:**
+
+```yaml
+version: '3.8'
+
+services:
+  reddit-stash:
+    image: ghcr.io/rhnfzl/reddit-stash:latest
+    container_name: reddit-stash
+    restart: unless-stopped
+    environment:
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - STORAGE_PROVIDER=s3
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - SCHEDULE_MODE=periodic
+      - SCHEDULE_INTERVAL=7200
+    volumes:
+      - reddit-data:/app/reddit
+
+volumes:
+  reddit-data:
+```
+
+Add to your `.env`:
+```env
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+AWS_S3_BUCKET=your-bucket-name
+AWS_DEFAULT_REGION=us-east-1
+```
+
 **With Imgur API (for Better Rate Limits):**
 
 ```yaml
@@ -576,10 +640,14 @@ services:
       - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
       - REDDIT_USERNAME=${REDDIT_USERNAME}
       - REDDIT_PASSWORD=${REDDIT_PASSWORD}
-      # Dropbox sync (optional)
+      # Cloud storage — choose Dropbox OR S3 (both optional)
       - DROPBOX_APP_KEY=${DROPBOX_APP_KEY}
       - DROPBOX_APP_SECRET=${DROPBOX_APP_SECRET}
       - DROPBOX_REFRESH_TOKEN=${DROPBOX_REFRESH_TOKEN}
+      # - STORAGE_PROVIDER=s3               # Uncomment for S3
+      # - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      # - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      # - AWS_S3_BUCKET=${AWS_S3_BUCKET}
       # Imgur API (optional - for better rate limits)
       - IMGUR_CLIENT_ID=${IMGUR_CLIENT_ID}
       # Scheduling
@@ -668,6 +736,26 @@ docker run -d \
   ghcr.io/rhnfzl/reddit-stash:latest
 ```
 
+**With AWS S3 Sync (Periodic):**
+
+```bash
+docker run -d \
+  --name reddit-stash \
+  --restart unless-stopped \
+  -e REDDIT_CLIENT_ID='your_client_id' \
+  -e REDDIT_CLIENT_SECRET='your_client_secret' \
+  -e REDDIT_USERNAME='your_username' \
+  -e REDDIT_PASSWORD='your_password' \
+  -e STORAGE_PROVIDER='s3' \
+  -e AWS_ACCESS_KEY_ID='your_access_key' \
+  -e AWS_SECRET_ACCESS_KEY='your_secret_key' \
+  -e AWS_S3_BUCKET='your-bucket-name' \
+  -e SCHEDULE_MODE='periodic' \
+  -e SCHEDULE_INTERVAL='7200' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest
+```
+
 **With Imgur API for Better Rate Limits:**
 
 ```bash
@@ -736,33 +824,57 @@ docker run -d \
 
 #### Special Operations
 
-**Dropbox Upload Only:**
+**Cloud Storage Upload Only (Unified CLI):**
 
-Upload local content to Dropbox without running the main Reddit scraper:
+Upload local content to your configured cloud provider without running the main Reddit scraper:
 
 ```bash
+# Dropbox
 docker run --rm \
   -e DROPBOX_APP_KEY='your_dropbox_key' \
   -e DROPBOX_APP_SECRET='your_dropbox_secret' \
   -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
   -v reddit-data:/app/reddit \
   ghcr.io/rhnfzl/reddit-stash:latest \
-  dropbox_utils.py --upload
+  storage_utils.py --upload
+
+# S3
+docker run --rm \
+  -e STORAGE_PROVIDER='s3' \
+  -e AWS_ACCESS_KEY_ID='your_access_key' \
+  -e AWS_SECRET_ACCESS_KEY='your_secret_key' \
+  -e AWS_S3_BUCKET='your-bucket-name' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest \
+  storage_utils.py --upload
 ```
 
-**Dropbox Download Only:**
+**Cloud Storage Download Only:**
 
-Download content from Dropbox to local storage:
+Download content from your cloud provider to local storage:
 
 ```bash
+# Dropbox
 docker run --rm \
   -e DROPBOX_APP_KEY='your_dropbox_key' \
   -e DROPBOX_APP_SECRET='your_dropbox_secret' \
   -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
   -v reddit-data:/app/reddit \
   ghcr.io/rhnfzl/reddit-stash:latest \
-  dropbox_utils.py --download
+  storage_utils.py --download
+
+# S3
+docker run --rm \
+  -e STORAGE_PROVIDER='s3' \
+  -e AWS_ACCESS_KEY_ID='your_access_key' \
+  -e AWS_SECRET_ACCESS_KEY='your_secret_key' \
+  -e AWS_S3_BUCKET='your-bucket-name' \
+  -v reddit-data:/app/reddit \
+  ghcr.io/rhnfzl/reddit-stash:latest \
+  storage_utils.py --download
 ```
+
+> **Legacy note:** `dropbox_utils.py --upload` and `dropbox_utils.py --download` still work for Dropbox-only use.
 
 ---
 
@@ -939,7 +1051,7 @@ docker run -d \
   reddit-stash:local
 ```
 
-**For all other usage scenarios** (Dropbox sync, Imgur API, docker-compose, special operations, etc.), refer to the examples in Option 1 above, simply replacing the image name.
+**For all other usage scenarios** (Dropbox/S3 sync, Imgur API, docker-compose, special operations, etc.), refer to the examples in Option 1 above, simply replacing the image name.
 
 ---
 
@@ -949,7 +1061,7 @@ docker run -d \
 - **Security**: The container runs as a non-root user for security
 - **Data Persistence**: Data is persisted through a volume mount (`-v $(pwd)/reddit:/app/reddit`) to your local machine
 - **Runtime Configuration**: Environment variables must be provided at runtime
-- **Flexibility**: The container supports running different scripts (main script, dropbox operations)
+- **Flexibility**: The container supports running different scripts (main script, storage operations)
 - **Interactive Mode**: Use `-it` flags for interactive operation with output visible in your terminal
 - **Shell Special Characters**: Always use single quotes around environment variable values to prevent shell interpretation of special characters (!, &, $, etc.)
 - **Execution Modes**:
@@ -961,7 +1073,7 @@ docker run -d \
   - **Graceful shutdown**: Responds to SIGTERM/SIGINT for clean container stops
 - **Two Main Storage Modes**:
   - **Local-only**: Just Reddit credentials, saves to mounted volume
-  - **Dropbox sync**: Full credentials for automatic cloud backup
+  - **Cloud sync**: Dropbox or S3 credentials for automatic cloud backup
 - **Detached Mode**: You can also run in detached mode with `-d` if you prefer:
   ```bash
   docker run -d \
@@ -991,7 +1103,7 @@ cd reddit-stash
 # Build your customized version
 docker build -t reddit-stash .
 
-# Run your custom build
+# Run your custom build (with Dropbox)
 docker run -it \
   -e REDDIT_CLIENT_ID=your_client_id \
   -e REDDIT_CLIENT_SECRET=your_client_secret \
@@ -1000,6 +1112,19 @@ docker run -it \
   -e DROPBOX_APP_KEY=your_dropbox_key \
   -e DROPBOX_APP_SECRET=your_dropbox_secret \
   -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+  -v $(pwd)/reddit:/app/reddit \
+  reddit-stash
+
+# Or with S3
+docker run -it \
+  -e REDDIT_CLIENT_ID=your_client_id \
+  -e REDDIT_CLIENT_SECRET=your_client_secret \
+  -e REDDIT_USERNAME=your_username \
+  -e REDDIT_PASSWORD=your_password \
+  -e STORAGE_PROVIDER=s3 \
+  -e AWS_ACCESS_KEY_ID=your_access_key \
+  -e AWS_SECRET_ACCESS_KEY=your_secret_key \
+  -e AWS_S3_BUCKET=your-bucket-name \
   -v $(pwd)/reddit:/app/reddit \
   reddit-stash
 ```
@@ -1015,7 +1140,7 @@ After completing your chosen installation method, verify that everything is work
 - [ ] All required secrets added to repository settings
 - [ ] Workflow manually triggered at least once
 - [ ] Workflow completes without errors (check Actions tab)
-- [ ] Reddit folder appears in your Dropbox account
+- [ ] Reddit folder appears in your cloud storage (Dropbox account or S3 bucket)
 - [ ] Content files are present and readable
 
 #### For Local Installation:
@@ -1025,14 +1150,14 @@ After completing your chosen installation method, verify that everything is work
 - [ ] Environment variables set correctly
 - [ ] Script runs without errors
 - [ ] Content saved to specified directory
-- [ ] (Optional) Content uploaded to Dropbox if configured
+- [ ] (Optional) Content uploaded to cloud storage (Dropbox or S3) if configured
 
 #### For Docker Installation:
 - [ ] Docker installed and daemon running
 - [ ] Image built successfully
 - [ ] Container runs without errors
 - [ ] Content appears in mounted volume
-- [ ] (Optional) Content uploaded to Dropbox if configured
+- [ ] (Optional) Content uploaded to cloud storage (Dropbox or S3) if configured
 
 ## Configuration
 
@@ -1050,7 +1175,8 @@ Jump to any section or browse the complete settings index:
 | **[Imgur]** | 3 | Imgur API configuration (optional) | [↓ View](#imgur---imgur-api-configuration) |
 | **[Recovery]** | 9 | Content recovery system (4-provider cascade) | [↓ View](#recovery---content-recovery-system) |
 | **[Retry]** | 7 | Retry queue management (exponential backoff) | [↓ View](#retry---retry-queue-configuration) |
-| **Total** | **43 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
+| **[Storage]** | 5 | Cloud storage backend (Dropbox, S3) | [↓ View](#storage---cloud-storage-backend) |
+| **Total** | **48 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
 
 **Quick Tips:**
 - 🔒 **Security First**: Use environment variables for credentials, not settings.ini
@@ -1116,7 +1242,7 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     ```
   - **Notes**:
     - Folder created automatically if it doesn't exist
-    - Only used when Dropbox credentials are configured
+    - Used as the Dropbox folder path or the S3 key prefix (with leading `/` stripped for S3)
     - Syncs file_log.json and all content
 
 * **`save_type`** - What content to download from Reddit
@@ -1212,7 +1338,7 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     ```
   - **Safety Recommendations**:
     1. **First Run**: Keep `false`, verify downloads work correctly
-    2. **Backup**: Ensure `file_log.json` is backed up (Dropbox/Git)
+    2. **Backup**: Ensure `file_log.json` is backed up (Dropbox/S3/Git)
     3. **Test**: Try with `save_type = UPVOTED` first (less critical)
     4. **Enable**: Set to `true` only when confident
     5. **Monitor**: Check logs for "unsave failed" messages
@@ -1828,7 +1954,7 @@ max_daily_storage_mb = 1024           # Daily storage limit in MB
     - Resets on next script run (not calendar day)
   - **Why Use It**:
     - Prevent unexpected storage exhaustion
-    - Control cloud storage costs (Dropbox)
+    - Control cloud storage costs (Dropbox/S3)
     - GitHub Actions storage limits
     - Predictable resource usage
   - **Size Planning Guide**:
@@ -2471,6 +2597,121 @@ Day 8: Item in queue for >7 days → Move to dead letter queue
 
 ---
 
+#### `[Storage]` - Cloud Storage Backend
+
+```ini
+[Storage]
+# Provider: none, dropbox, s3
+provider = none                       # Which cloud storage to use
+# S3 settings (ignored when provider != s3)
+s3_bucket = None                      # Your S3 bucket name
+s3_region = None                      # AWS region (e.g., us-east-1)
+s3_storage_class = STANDARD_IA        # S3 storage class for content files
+s3_endpoint_url = None                # Custom endpoint (MinIO, LocalStack)
+```
+
+#### Storage Settings Explained:
+
+The storage system lets you sync your Reddit archive to a cloud provider. Currently supports **Dropbox** (original) and **AWS S3** (new). You can use either one, or neither (local-only).
+
+* **`provider`** - Which cloud storage backend to use
+  - **Type**: String (enum)
+  - **Default**: `none`
+  - **Valid Values**: `none`, `dropbox`, `s3`
+  - **Behavior**:
+
+    | Value | What It Does | Requirements |
+    |-------|-------------|--------------|
+    | **`none`** | No cloud sync, files stay local | Nothing |
+    | **`dropbox`** | Sync to Dropbox (original behavior) | Dropbox app credentials |
+    | **`s3`** | Sync to AWS S3 bucket | AWS credentials + S3 bucket |
+
+  - **Environment Variable Override**: `STORAGE_PROVIDER`
+  - **Examples**:
+    ```ini
+    provider = none      # Local-only (default)
+    provider = dropbox   # Use Dropbox
+    provider = s3        # Use AWS S3
+    ```
+
+* **`s3_bucket`** - Name of your S3 bucket
+  - **Type**: String
+  - **Default**: `None`
+  - **Required**: Yes, when `provider = s3`
+  - **Rules**:
+    - Bucket must already exist (not auto-created)
+    - Must follow [S3 naming rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html): lowercase, 3-63 characters, no underscores
+    - Must be accessible with your AWS credentials
+  - **Environment Variable Override**: `AWS_S3_BUCKET`
+  - **Examples**:
+    ```ini
+    s3_bucket = my-reddit-archive
+    s3_bucket = backups-2024-reddit
+    ```
+
+* **`s3_region`** - AWS region where your bucket is located
+  - **Type**: String
+  - **Default**: `None` (uses AWS SDK default, typically from `~/.aws/config`)
+  - **Common Values**: `us-east-1`, `us-west-2`, `eu-west-1`, `eu-central-1`, `ap-southeast-1`
+  - **Environment Variable Override**: `AWS_DEFAULT_REGION`
+  - **Examples**:
+    ```ini
+    s3_region = us-east-1        # US East (Virginia) - cheapest
+    s3_region = eu-central-1     # Europe (Frankfurt)
+    s3_region = ap-southeast-1   # Asia Pacific (Singapore)
+    ```
+
+* **`s3_storage_class`** - Storage class for content files (posts, comments, media)
+  - **Type**: String (enum)
+  - **Default**: `STANDARD_IA`
+  - **Environment Variable Override**: `S3_STORAGE_CLASS`
+  - **Available Classes**:
+
+    | Storage Class | Monthly Cost/GB | Min Duration | Best For | Retrieval |
+    |--------------|----------------|--------------|----------|-----------|
+    | **`STANDARD`** | ~$0.023 | None | Frequent access | Free |
+    | **`STANDARD_IA`** | ~$0.0125 | 30 days | Infrequent access (recommended) | $0.01/GB |
+    | **`ONEZONE_IA`** | ~$0.01 | 30 days | Non-critical, infrequent | $0.01/GB |
+    | **`INTELLIGENT_TIERING`** | ~$0.023-$0.004 | None | Unpredictable access | Varies |
+    | **`GLACIER_IR`** | ~$0.004 | 90 days | Rare access, minutes retrieval | $0.03/GB |
+    | **`GLACIER`** | ~$0.0036 | 90 days | Archive, hours retrieval | $0.03/GB |
+    | **`DEEP_ARCHIVE`** | ~$0.00099 | 180 days | Long-term, 12hr retrieval | $0.02/GB |
+
+  - **Important Notes**:
+    - `file_log.json` is **always** stored as `STANDARD` regardless of this setting (it's read every run)
+    - **Glacier classes** (GLACIER_IR, GLACIER, DEEP_ARCHIVE) have minimum storage duration charges. If you re-upload a file before the minimum period, you pay for the full period. Reddit Stash automatically skips uploads when the file hasn't changed to avoid this
+    - All files are encrypted with SSE-S3 (AES-256) at no extra cost
+  - **Recommendations**:
+    ```
+    Just starting out:          STANDARD       (no surprises)
+    Regular use, save money:    STANDARD_IA    (recommended default)
+    Budget-conscious:           ONEZONE_IA     (slightly less durability)
+    Long-term archive:          GLACIER_IR     (cheap, but 90-day minimum)
+    Deep cold storage:          DEEP_ARCHIVE   (cheapest, 180-day minimum)
+    ```
+  - **Examples**:
+    ```ini
+    s3_storage_class = STANDARD_IA       # Best balance of cost and access
+    s3_storage_class = STANDARD          # Safest, no retrieval fees
+    s3_storage_class = GLACIER_IR        # Cheapest for archives you rarely read
+    ```
+
+* **`s3_endpoint_url`** - Custom S3-compatible endpoint URL
+  - **Type**: String (URL)
+  - **Default**: `None` (uses official AWS S3)
+  - **When to Use**: Only for S3-compatible services like MinIO, Wasabi, Backblaze B2, or LocalStack for testing
+  - **Environment Variable Override**: `S3_ENDPOINT_URL`
+  - **SSL**: Automatically disabled for non-`amazonaws.com` endpoints unless the URL starts with `https://`
+  - **Examples**:
+    ```ini
+    s3_endpoint_url = None                        # Default: AWS S3
+    s3_endpoint_url = http://localhost:4566        # LocalStack (testing)
+    s3_endpoint_url = http://192.168.1.100:9000   # Self-hosted MinIO
+    s3_endpoint_url = https://s3.wasabisys.com    # Wasabi
+    ```
+
+---
+
 ### Settings Index (Alphabetical)
 
 Quick alphabetical reference of all 43 settings with links to detailed documentation:
@@ -2496,7 +2737,7 @@ Quick alphabetical reference of all 43 settings with links to detailed documenta
 - **`download_images`** (Boolean, default: true) - Control image downloads | [→ Media Section](#media-settings-explained)
 - **`download_timeout`** (Integer, default: 30) - Per-file download timeout | [→ Media Section](#media-settings-explained)
 - **`download_videos`** (Boolean, default: true) - Control video downloads | [→ Media Section](#media-settings-explained)
-- **`dropbox_directory`** (String, default: /reddit) - Dropbox cloud storage path | [→ Settings Section](#core-settings-explained)
+- **`dropbox_directory`** (String, default: /reddit) - Cloud storage path (Dropbox folder / S3 key prefix) | [→ Settings Section](#core-settings-explained)
 - **`enable_background_cleanup`** (Boolean, default: true) - Automatic cache maintenance | [→ Recovery Section](#recovery-cache-management)
 - **`exponential_base_delay`** (Integer, default: 60) - Exponential backoff base delay | [→ Retry Section](#exponential-backoff-settings)
 - **`ignore_tls_errors`** (Boolean, default: false) - Bypass SSL certificate validation | [→ Settings Section](#core-settings-explained)
@@ -2515,8 +2756,15 @@ Quick alphabetical reference of all 43 settings with links to detailed documenta
 - **`process_api`** (Boolean, default: true) - Fetch content from Reddit API | [→ Settings Section](#core-settings-explained)
 - **`process_gdpr`** (Boolean, default: false) - Process GDPR export files | [→ Settings Section](#core-settings-explained)
 
-#### R-U
+#### P-R
+- **`provider`** (String, default: none) - Cloud storage backend | [→ Storage Section](#storage-settings-explained)
 - **`recover_deleted`** (Boolean, default: true) - Attempt Imgur content recovery | [→ Imgur Section](#imgur-settings-explained)
+
+#### S-U
+- **`s3_bucket`** (String, default: None) - S3 bucket name | [→ Storage Section](#storage-settings-explained)
+- **`s3_endpoint_url`** (String, default: None) - Custom S3-compatible endpoint | [→ Storage Section](#storage-settings-explained)
+- **`s3_region`** (String, default: None) - AWS region | [→ Storage Section](#storage-settings-explained)
+- **`s3_storage_class`** (String, default: STANDARD_IA) - S3 storage class | [→ Storage Section](#storage-settings-explained)
 - **`save_directory`** (String, default: reddit/) - Local save directory | [→ Settings Section](#core-settings-explained)
 - **`save_type`** (String, default: ALL) - What content to download | [→ Settings Section](#core-settings-explained)
 - **`thumbnail_size`** (Integer, default: 800) - Thumbnail dimensions in pixels | [→ Media Section](#media-settings-explained)
@@ -2760,6 +3008,185 @@ For more information about the setup visit [OAuth Guide](https://developers.drop
 
 - Credits for above DROPBOX_REFRESH_TOKEN solution : https://stackoverflow.com/a/71794390/12983596
 
+#### Setting Up AWS S3
+
+AWS S3 provides a cost-effective, highly durable alternative to Dropbox for storing your Reddit archive. Here's a step-by-step guide to set it up:
+
+##### Step 1: Create an AWS Account
+
+If you don't already have one:
+1. Go to [aws.amazon.com](https://aws.amazon.com/) and click **Create an AWS Account**
+2. Follow the signup process (requires email, phone number, and a payment method)
+3. AWS has a generous [Free Tier](https://aws.amazon.com/free/) that includes 5 GB of S3 Standard storage for 12 months
+
+##### Step 2: Create an S3 Bucket
+
+1. Go to the [S3 Console](https://s3.console.aws.amazon.com/s3/home)
+2. Click **Create bucket**
+3. Choose a **globally unique** bucket name (e.g., `my-reddit-archive-2024`)
+   - Must be lowercase, 3-63 characters
+   - Only letters, numbers, and hyphens
+4. Select an **AWS Region** close to you (e.g., `us-east-1` for US East, `eu-central-1` for Europe)
+5. Leave **Block all public access** enabled (your data stays private)
+6. Click **Create bucket**
+
+##### Step 3: Create an IAM User (for API Access)
+
+1. Go to [IAM Console](https://console.aws.amazon.com/iam/home)
+2. Click **Users** → **Create user**
+3. Enter a name like `reddit-stash-bot`
+4. Click **Next** → **Attach policies directly**
+5. Search for and select **AmazonS3FullAccess** (or create a more restrictive policy for just your bucket)
+6. Click **Create user**
+7. Select the user → **Security credentials** tab → **Create access key**
+8. Choose **Application running outside AWS** → **Create access key**
+9. **Save both values** (you won't be able to see the secret key again):
+   - `Access key ID` → this becomes `AWS_ACCESS_KEY_ID`
+   - `Secret access key` → this becomes `AWS_SECRET_ACCESS_KEY`
+
+> **Security tip**: For GitHub Actions, you can use [OIDC federation](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services) instead of static keys for enhanced security (no long-lived secrets).
+
+##### Step 4: Configure Reddit Stash
+
+**Option A: Environment Variables (recommended for GitHub Actions and Docker)**
+
+```bash
+export STORAGE_PROVIDER=s3
+export AWS_S3_BUCKET=my-reddit-archive-2024
+export AWS_DEFAULT_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=AKIA...your_key
+export AWS_SECRET_ACCESS_KEY=your_secret_key
+
+# Optional: storage class (default: STANDARD_IA)
+export S3_STORAGE_CLASS=STANDARD_IA
+```
+
+**Option B: settings.ini (for local installation)**
+
+```ini
+[Storage]
+provider = s3
+s3_bucket = my-reddit-archive-2024
+s3_region = us-east-1
+s3_storage_class = STANDARD_IA
+```
+
+And set your AWS credentials as environment variables (don't put them in settings.ini):
+```bash
+export AWS_ACCESS_KEY_ID=AKIA...your_key
+export AWS_SECRET_ACCESS_KEY=your_secret_key
+```
+
+##### Step 5: Install the S3 Dependency
+
+```bash
+pip install -r requirements-s3.txt
+```
+
+This installs `boto3`, the official AWS SDK for Python.
+
+##### Step 6: Test the Connection
+
+Run a download (even on a fresh bucket, this verifies connectivity):
+```bash
+python storage_utils.py --download
+```
+
+You should see:
+```
+ -- S3 connected: s3://my-reddit-archive-2024 (STANDARD_IA) --
+```
+
+##### Step 7: Run Reddit Stash
+
+Now process your Reddit data and upload to S3:
+```bash
+python reddit_stash.py                # Process Reddit content
+python storage_utils.py --upload      # Upload to S3
+```
+
+##### GitHub Actions Setup
+
+For GitHub Actions, add these secrets to your repository (Settings → Secrets and variables → Actions):
+
+| Secret Name | Value |
+|------------|-------|
+| `AWS_ACCESS_KEY_ID` | Your IAM user access key |
+| `AWS_SECRET_ACCESS_KEY` | Your IAM user secret key |
+| `AWS_DEFAULT_REGION` | Your bucket region (e.g., `us-east-1`) |
+| `AWS_S3_BUCKET` | Your bucket name |
+
+And add this **repository variable** (Settings → Secrets and variables → Actions → Variables tab):
+
+| Variable Name | Value |
+|--------------|-------|
+| `STORAGE_PROVIDER` | `s3` |
+| `S3_STORAGE_CLASS` | `STANDARD_IA` (optional, this is the default) |
+
+The workflow will automatically use S3 instead of Dropbox.
+
+##### Cost Estimate
+
+For a typical Reddit archive (~500 MB of markdown + media):
+
+| Storage Class | Monthly Cost | Annual Cost |
+|--------------|-------------|-------------|
+| STANDARD | ~$0.012 | ~$0.14 |
+| STANDARD_IA | ~$0.006 | ~$0.08 |
+| GLACIER_IR | ~$0.002 | ~$0.02 |
+
+Plus minimal costs for PUT/GET requests (~$0.005/1000 requests). Most users will pay **less than $0.10/month**.
+
+---
+
+#### Migrating Between Storage Providers
+
+If you're switching from Dropbox to S3 (or vice versa), Reddit Stash includes a built-in migration tool that copies all your data between providers.
+
+##### How It Works
+
+1. **Dry-run first** — shows what would be transferred without making changes
+2. **Execute** — downloads everything from source, uploads to target
+
+##### Step-by-Step Migration (Dropbox → S3)
+
+1. **Ensure both providers are configured** with credentials (see setup guides above)
+
+2. **Preview the migration** (dry-run, no data moved):
+   ```bash
+   python storage_utils.py --migrate --source dropbox --target s3
+   ```
+
+   You'll see:
+   ```
+   Migration plan: Dropbox -> AWS S3
+     Files: 1,234
+     Total size: 456.78 MB
+
+   To execute this migration, add --execute:
+     python storage_utils.py --migrate --source dropbox --target s3 --execute
+   ```
+
+3. **Execute the migration**:
+   ```bash
+   python storage_utils.py --migrate --source dropbox --target s3 --execute
+   ```
+
+4. **Update your configuration** to use the new provider:
+   ```ini
+   [Storage]
+   provider = s3
+   ```
+
+##### Migration Notes
+
+- Migration copies **all files** including `file_log.json`, so your deduplication state is preserved
+- Existing files on the target are **not deleted** — migration only adds files
+- For large archives, migration may take a while (all files pass through your machine)
+- You can migrate in either direction: Dropbox → S3, or S3 → Dropbox
+
+---
+
 ## Docker Environment Variables
 
 When using Docker, you can control the scheduling behavior using these additional environment variables:
@@ -2810,7 +3237,7 @@ While Docker's built-in scheduling (`SCHEDULE_MODE=periodic`) is convenient, som
 - You need complex scheduling patterns (weekdays only, multiple times per day, etc.)
 - You prefer containers to start/stop rather than run continuously
 - You want to integrate with existing cron workflows
-- You need different schedules for different operations (main script vs Dropbox uploads)
+- You need different schedules for different operations (main script vs cloud storage uploads)
 
 **Use Built-in Scheduling when:**
 - You want simple, consistent intervals
@@ -2827,9 +3254,9 @@ crontab -e
 
 **2. Add cron jobs for different schedules:**
 
-**Every 2 hours (Reddit data fetch):**
+**Every 2 hours (Reddit data fetch + cloud sync):**
 ```bash
-0 */2 * * * docker run --rm -e REDDIT_CLIENT_ID='your_client_id' -e REDDIT_CLIENT_SECRET='your_client_secret' -e REDDIT_USERNAME='your_username' -e REDDIT_PASSWORD='your_password' -e DROPBOX_APP_KEY='your_dropbox_key' -e DROPBOX_APP_SECRET='your_dropbox_secret' -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' -v /home/user/reddit-data:/app/reddit reddit-stash >> /var/log/reddit-stash.log 2>&1
+0 */2 * * * docker run --rm --env-file /home/user/.reddit-stash.env -v /home/user/reddit-data:/app/reddit reddit-stash >> /var/log/reddit-stash.log 2>&1
 ```
 
 **Daily at 9 AM:**
@@ -2842,9 +3269,13 @@ crontab -e
 0 9,12,15,18 * * 1-5 docker run --rm -e REDDIT_CLIENT_ID='your_client_id' -e REDDIT_CLIENT_SECRET='your_client_secret' -e REDDIT_USERNAME='your_username' -e REDDIT_PASSWORD='your_password' -v /home/user/reddit-data:/app/reddit reddit-stash >> /var/log/reddit-stash.log 2>&1
 ```
 
-**Separate Dropbox upload job (runs 30 minutes after main job):**
+**Separate cloud storage upload job (runs 30 minutes after main job):**
 ```bash
-30 */2 * * * docker run --rm -e DROPBOX_APP_KEY='your_dropbox_key' -e DROPBOX_APP_SECRET='your_dropbox_secret' -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' -v /home/user/reddit-data:/app/reddit reddit-stash dropbox_utils.py --upload >> /var/log/reddit-stash-upload.log 2>&1
+# Dropbox
+30 */2 * * * docker run --rm -e DROPBOX_APP_KEY='your_dropbox_key' -e DROPBOX_APP_SECRET='your_dropbox_secret' -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' -v /home/user/reddit-data:/app/reddit reddit-stash storage_utils.py --upload >> /var/log/reddit-stash-upload.log 2>&1
+
+# S3
+30 */2 * * * docker run --rm -e STORAGE_PROVIDER='s3' -e AWS_ACCESS_KEY_ID='your_key' -e AWS_SECRET_ACCESS_KEY='your_secret' -e AWS_S3_BUCKET='your-bucket' -v /home/user/reddit-data:/app/reddit reddit-stash storage_utils.py --upload >> /var/log/reddit-stash-upload.log 2>&1
 ```
 
 ### Windows Task Scheduler Setup
@@ -2876,9 +3307,15 @@ REDDIT_CLIENT_ID=your_client_id
 REDDIT_CLIENT_SECRET=your_client_secret
 REDDIT_USERNAME=your_username
 REDDIT_PASSWORD=your_password
+# For Dropbox:
 DROPBOX_APP_KEY=your_dropbox_key
 DROPBOX_APP_SECRET=your_dropbox_secret
 DROPBOX_REFRESH_TOKEN=your_dropbox_token
+# For S3 (instead of Dropbox):
+# STORAGE_PROVIDER=s3
+# AWS_ACCESS_KEY_ID=your_access_key
+# AWS_SECRET_ACCESS_KEY=your_secret_key
+# AWS_S3_BUCKET=your-bucket-name
 ```
 
 Then use in cron:
@@ -2892,16 +3329,11 @@ Create `/home/user/run-reddit-stash.sh`:
 ```bash
 #!/bin/bash
 docker run --rm \
-  -e REDDIT_CLIENT_ID='your_client_id' \
-  -e REDDIT_CLIENT_SECRET='your_client_secret' \
-  -e REDDIT_USERNAME='your_username' \
-  -e REDDIT_PASSWORD='your_password' \
-  -e DROPBOX_APP_KEY='your_dropbox_key' \
-  -e DROPBOX_APP_SECRET='your_dropbox_secret' \
-  -e DROPBOX_REFRESH_TOKEN='your_dropbox_token' \
+  --env-file /home/user/.reddit-stash.env \
   -v /home/user/reddit-data:/app/reddit \
   reddit-stash
 ```
+*Uses the `.reddit-stash.env` file from Option 1 above (supports Dropbox or S3 credentials).*
 
 Make it executable and add to cron:
 ```bash
@@ -2926,9 +3358,14 @@ services:
       - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
       - REDDIT_USERNAME=${REDDIT_USERNAME}
       - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      # Cloud storage — choose Dropbox OR S3
       - DROPBOX_APP_KEY=${DROPBOX_APP_KEY}
       - DROPBOX_APP_SECRET=${DROPBOX_APP_SECRET}
       - DROPBOX_REFRESH_TOKEN=${DROPBOX_REFRESH_TOKEN}
+      # - STORAGE_PROVIDER=s3
+      # - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      # - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      # - AWS_S3_BUCKET=${AWS_S3_BUCKET}
     volumes:
       - ./reddit:/app/reddit
     profiles:
@@ -3151,7 +3588,7 @@ When using Reddit Stash, keep these security considerations in mind:
 
 ### API Credentials
 
-- **Never share your Reddit API credentials** or Dropbox tokens with others
+- **Never share your Reddit API credentials**, Dropbox tokens, or AWS access keys with others
 - When using GitHub Actions, your credentials are stored as encrypted secrets
 - For local installations, consider using environment variables instead of hardcoding credentials in the settings file
 - Regularly rotate your API keys and tokens, especially if you suspect they may have been compromised
@@ -3161,7 +3598,7 @@ When using Reddit Stash, keep these security considerations in mind:
 - Reddit Stash downloads and stores all content from saved posts, including links and images
 - Be aware that this may include sensitive or private information if you've saved such content
 - Consider where you're storing the backed-up content and who has access to that location
-- Dropbox encryption provides some protection, but for highly sensitive data, consider additional encryption
+- Cloud storage encryption (Dropbox encryption or S3 SSE-S3) provides some protection, but for highly sensitive data, consider additional encryption
 
 ### GitHub Actions Security
 
