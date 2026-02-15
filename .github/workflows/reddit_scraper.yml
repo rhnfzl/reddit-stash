@@ -114,32 +114,6 @@ jobs:
       run: |
         python storage_utils.py --download
 
-    # --- Bootstrap: One-time migration from Dropbox when S3 is empty ---
-    - name: Bootstrap from Dropbox (one-time migration)
-      if: steps.storage.outputs.provider == 's3'
-      timeout-minutes: 30
-      env:
-        DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-        DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
-        DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-      run: |
-        # Count actual backup files (markdown/media), excluding file_log.json itself
-        backup_count=$(find reddit/ -type f ! -name "file_log.json" ! -name ".*" 2>/dev/null | wc -l | tr -d ' ')
-        echo "Local backup files after S3 download: $backup_count"
-
-        if [ "$backup_count" -eq 0 ] && [ -n "$DROPBOX_REFRESH_TOKEN" ] && [ "$DROPBOX_REFRESH_TOKEN" != "None" ]; then
-          echo "S3 has no backup files and Dropbox credentials available — bootstrapping from Dropbox..."
-          # Force full directory download (not just file_log.json) for migration
-          sed -i 's/^check_type = LOG/check_type = DIR/' settings.ini
-          python dropbox_utils.py --download
-          # Restore original check_type
-          sed -i 's/^check_type = DIR/check_type = LOG/' settings.ini
-          new_count=$(find reddit/ -type f ! -name "file_log.json" ! -name ".*" 2>/dev/null | wc -l | tr -d ' ')
-          echo "Bootstrap complete. Downloaded $new_count files from Dropbox. Data will be uploaded to S3 at the end of this run."
-        else
-          echo "Skipping bootstrap: S3 already has $backup_count backup files or no Dropbox credentials."
-        fi
-
     # Process Reddit data
     - name: Run Reddit Stash Script
       timeout-minutes: 90
