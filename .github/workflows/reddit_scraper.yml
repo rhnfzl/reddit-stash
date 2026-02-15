@@ -114,6 +114,23 @@ jobs:
       run: |
         python storage_utils.py --download
 
+    # --- Bootstrap: One-time migration from Dropbox when S3 is empty ---
+    - name: Bootstrap from Dropbox (one-time migration)
+      if: steps.storage.outputs.provider == 's3'
+      timeout-minutes: 10
+      env:
+        DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+        DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+        DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      run: |
+        if [ ! -f "reddit/file_log.json" ] && [ -n "$DROPBOX_REFRESH_TOKEN" ] && [ "$DROPBOX_REFRESH_TOKEN" != "None" ]; then
+          echo "S3 bucket is empty and Dropbox credentials available — bootstrapping from Dropbox..."
+          python dropbox_utils.py --download
+          echo "Bootstrap complete. Data will be uploaded to S3 at the end of this run."
+        else
+          echo "Skipping bootstrap: S3 already has data or no Dropbox credentials."
+        fi
+
     # Process Reddit data
     - name: Run Reddit Stash Script
       timeout-minutes: 90
