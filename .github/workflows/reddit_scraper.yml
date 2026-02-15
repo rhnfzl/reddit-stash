@@ -41,6 +41,21 @@ jobs:
       with:
         extra_args: --only-verified
 
+    # Verify all entry-point scripts exist before spending time on setup
+    - name: Verify critical scripts exist
+      run: |
+        missing=0
+        for script in reddit_stash.py dropbox_utils.py storage_utils.py; do
+          if [ ! -f "$script" ]; then
+            echo "::error::Missing critical script: $script"
+            missing=$((missing + 1))
+          fi
+        done
+        if [ $missing -gt 0 ]; then
+          exit 1
+        fi
+        echo "All critical scripts verified."
+
     # Create 6-month refresh key for dependency cache invalidation
     - name: Create semi-annual cache key
       id: cache-key
