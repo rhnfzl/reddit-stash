@@ -72,15 +72,22 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    # --- Debug: Check storage provider ---
-    - name: Debug storage provider
+    # --- Determine storage provider ---
+    - name: Detect storage provider
+      id: storage
+      env:
+        STORAGE_PROVIDER: ${{ secrets.STORAGE_PROVIDER }}
       run: |
-        echo "STORAGE_PROVIDER value: '${{ vars.STORAGE_PROVIDER }}'"
-        echo "Length: $(echo -n '${{ vars.STORAGE_PROVIDER }}' | wc -c)"
+        if [ "$STORAGE_PROVIDER" = "s3" ]; then
+          echo "provider=s3" >> $GITHUB_OUTPUT
+        else
+          echo "provider=dropbox" >> $GITHUB_OUTPUT
+        fi
+        echo "Using storage provider: $(cat $GITHUB_OUTPUT | grep provider | cut -d= -f2)"
 
     # --- Storage: Download (Dropbox) ---
     - name: Download from Dropbox
-      if: vars.STORAGE_PROVIDER == 'dropbox' || vars.STORAGE_PROVIDER == ''
+      if: steps.storage.outputs.provider != 's3'
       timeout-minutes: 2
       env:
         DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
@@ -91,11 +98,11 @@ jobs:
 
     # --- Storage: Download (S3) ---
     - name: Install S3 dependencies
-      if: vars.STORAGE_PROVIDER == 's3'
+      if: steps.storage.outputs.provider == 's3'
       run: pip install -r requirements-s3.txt
 
     - name: Download from S3
-      if: vars.STORAGE_PROVIDER == 's3'
+      if: steps.storage.outputs.provider == 's3'
       timeout-minutes: 5
       env:
         STORAGE_PROVIDER: s3
@@ -103,9 +110,7 @@ jobs:
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
         AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-        S3_STORAGE_CLASS: ${{ vars.S3_STORAGE_CLASS }}
-        # Optional: For OIDC auth, use aws-actions/configure-aws-credentials@v4
-        # with role-to-assume instead of static keys (requires permissions: id-token: write)
+        S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
       run: |
         python storage_utils.py --download
 
@@ -122,7 +127,7 @@ jobs:
 
     # --- Storage: Upload (Dropbox) ---
     - name: Upload to Dropbox
-      if: vars.STORAGE_PROVIDER == 'dropbox' || vars.STORAGE_PROVIDER == ''
+      if: steps.storage.outputs.provider != 's3'
       timeout-minutes: 50
       env:
         DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
@@ -133,7 +138,7 @@ jobs:
 
     # --- Storage: Upload (S3) ---
     - name: Upload to S3
-      if: vars.STORAGE_PROVIDER == 's3'
+      if: steps.storage.outputs.provider == 's3'
       timeout-minutes: 50
       env:
         STORAGE_PROVIDER: s3
@@ -141,6 +146,6 @@ jobs:
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
         AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-        S3_STORAGE_CLASS: ${{ vars.S3_STORAGE_CLASS }}
+        S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
       run: |
         python storage_utils.py --upload
