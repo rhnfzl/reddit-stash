@@ -72,6 +72,12 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    # --- Debug: Check storage provider ---
+    - name: Debug storage provider
+      run: |
+        echo "STORAGE_PROVIDER value: '${{ vars.STORAGE_PROVIDER }}'"
+        echo "Length: $(echo -n '${{ vars.STORAGE_PROVIDER }}' | wc -c)"
+
     # --- Storage: Download (Dropbox) ---
     - name: Download from Dropbox
       if: vars.STORAGE_PROVIDER == 'dropbox' || vars.STORAGE_PROVIDER == ''
