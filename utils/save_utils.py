@@ -150,6 +150,7 @@ def _get_video_download_url(submission):
 
     Reddit stores the short redirect URL in submission.url (e.g., https://v.redd.it/abc123)
     but the actual downloadable video stream is in submission.media['reddit_video']['fallback_url'].
+    Falls back to constructing a DASH URL from the short v.redd.it URL if metadata is unavailable.
     """
     try:
         if hasattr(submission, 'media') and submission.media:
@@ -157,8 +158,25 @@ def _get_video_download_url(submission):
             fallback_url = reddit_video.get('fallback_url')
             if fallback_url:
                 return fallback_url
+            else:
+                logger.warning(f"submission.media exists but no fallback_url for {submission.id}")
+        else:
+            logger.info(f"No media metadata for video post {submission.id}, constructing DASH URL")
+    except Exception as e:
+        logger.warning(f"Error extracting fallback_url for {submission.id}: {e}")
+
+    # Construct DASH URL from short v.redd.it URL as last resort
+    try:
+        parsed = urlparse(submission.url)
+        if 'v.redd.it' in parsed.netloc:
+            video_id = parsed.path.strip('/')
+            if video_id:
+                dash_url = f"https://v.redd.it/{video_id}/DASH_720.mp4"
+                logger.info(f"Using constructed DASH URL: {dash_url}")
+                return dash_url
     except Exception:
         pass
+
     return submission.url
 
 
@@ -169,7 +187,111 @@ def _track_media_size(size):
     save_submission._media_size_tracker += size
 
 
-def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
+def _save_submission_media(submission, f, is_recovered, media_config, save_dir, ignore_tls_errors, context_mode):
+    """Handle media detection and download for a submission's link post.
+
+    Extracted to allow context_mode wrapping with try-except in save_submission().
+    """
+    # --- 1. Gallery posts ---
+    if (not is_recovered
+            and hasattr(submission, 'is_gallery')
+            and submission.is_gallery
+            and media_config.is_albums_enabled()):
+
+        media_urls = RedditMediaDownloader.extract_media_urls_from_submission(submission)
+        gallery_images = [m for m in media_urls if m.get('source') == 'reddit_gallery']
+
+        if gallery_images:
+            f.write(f"**Gallery ({len(gallery_images)} images)**\n\n")
+            max_workers = media_config.get_media_config().get('max_concurrent_downloads', 3)
+
+            def _download_gallery_item(args):
+                idx, info = args
+                gid = info.get('gallery_id', f'gallery_{idx}')
+                fid = f"{submission.id}_{gid}"
+                return idx, download_image(info['url'], save_dir, fid, ignore_tls_errors)
+
+            results = {}
+            if context_mode:
+                # In context mode, download sequentially and stop on first failure
+                for i, m in enumerate(gallery_images, 1):
+                    idx, (path, size) = _download_gallery_item((i, m))
+                    results[idx] = (path, size)
+                    if not path:
+                        logger.info(f"Context mode: gallery image {idx} failed, skipping rest")
+                        break
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {
+                        pool.submit(_download_gallery_item, (i, m)): i
+                        for i, m in enumerate(gallery_images, 1)
+                    }
+                    for future in as_completed(futures):
+                        idx, (path, size) = future.result()
+                        results[idx] = (path, size)
+
+            for idx in sorted(results):
+                path, size = results[idx]
+                gallery_url = gallery_images[idx - 1]['url']
+                if path:
+                    f.write(f"![Gallery Image {idx}]({path})\n")
+                    _track_media_size(size)
+                else:
+                    f.write(f"![Gallery Image {idx}]({gallery_url})\n")
+                f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")
+
+            # Write remaining undownloaded images as URL links
+            for idx in range(len(results) + 1, len(gallery_images) + 1):
+                gallery_url = gallery_images[idx - 1]['url']
+                f.write(f"![Gallery Image {idx}]({gallery_url})\n")
+                f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")
+
+            f.write(f"**Original Gallery URL:** [Link](https://reddit.com{submission.permalink})\n")
+        else:
+            f.write(f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n")
+
+    # --- 2. Reddit video (v.redd.it) ---
+    elif _is_video_url(submission.url):
+        if media_config.is_videos_enabled():
+            video_url = _get_video_download_url(submission)
+            video_path, video_size = download_image(
+                video_url, save_dir, submission.id, ignore_tls_errors
+            )
+            if video_path:
+                f.write(f"**Video:** [{os.path.basename(video_path)}]({video_path})\n")
+                f.write(f"**Original Video URL:** [Link]({submission.url})\n")
+                _track_media_size(video_size)
+            else:
+                f.write(f"**Video:** [Link]({submission.url})\n")
+        else:
+            f.write(f"**Video (download disabled):** [Link]({submission.url})\n")
+
+    # --- 3. Images (broad detection: i.redd.it, i.imgur.com, preview.redd.it, .webp, etc.) ---
+    elif _is_image_url(submission.url):
+        if media_config.is_images_enabled():
+            image_path, image_size = download_image(
+                submission.url, save_dir, submission.id, ignore_tls_errors
+            )
+            if image_path:
+                f.write(f"![Image]({image_path})\n")
+                f.write(f"**Original Image URL:** [Link]({submission.url})\n")
+                _track_media_size(image_size)
+            else:
+                f.write(f"![Image]({submission.url})\n")
+        else:
+            f.write(f"![Image]({submission.url})\n")
+
+    # --- 4. YouTube ---
+    elif "youtube.com" in submission.url or "youtu.be" in submission.url:
+        video_id = extract_video_id(submission.url)
+        f.write(f"[![Video](https://img.youtube.com/vi/{video_id}/0.jpg)]({submission.url})")
+
+    # --- 5. Everything else (plain URL) ---
+    else:
+        f.write(submission.url if submission.url else '[Deleted Post]')
+
+
+def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None, context_mode=False):
     """Save a submission and its metadata, optionally unsaving it after.
 
     Args:
@@ -178,6 +300,8 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
         unsave: Whether to unsave the submission after saving
         ignore_tls_errors: Whether to ignore TLS errors during downloads
         recovery_metadata: RecoveryResult object if this is recovered content
+        context_mode: When True (comment context), media downloads fail fast
+            and fall back to URL links instead of retrying
     """
     try:
         # Check if this is a recovered item
@@ -231,88 +355,17 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
             media_config = get_media_config()
             save_dir = os.path.dirname(f.name)
 
-            # --- 1. Gallery posts ---
-            if (not is_recovered
-                    and hasattr(submission, 'is_gallery')
-                    and submission.is_gallery
-                    and media_config.is_albums_enabled()):
-
-                media_urls = RedditMediaDownloader.extract_media_urls_from_submission(submission)
-                gallery_images = [m for m in media_urls if m.get('source') == 'reddit_gallery']
-
-                if gallery_images:
-                    f.write(f"**Gallery ({len(gallery_images)} images)**\n\n")
-                    max_workers = media_config.get_media_config().get('max_concurrent_downloads', 3)
-
-                    def _download_gallery_item(args):
-                        idx, info = args
-                        gid = info.get('gallery_id', f'gallery_{idx}')
-                        fid = f"{submission.id}_{gid}"
-                        return idx, download_image(info['url'], save_dir, fid, ignore_tls_errors)
-
-                    results = {}
-                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                        futures = {
-                            pool.submit(_download_gallery_item, (i, m)): i
-                            for i, m in enumerate(gallery_images, 1)
-                        }
-                        for future in as_completed(futures):
-                            idx, (path, size) = future.result()
-                            results[idx] = (path, size)
-
-                    for idx in sorted(results):
-                        path, size = results[idx]
-                        gallery_url = gallery_images[idx - 1]['url']
-                        if path:
-                            f.write(f"![Gallery Image {idx}]({path})\n")
-                            _track_media_size(size)
-                        else:
-                            f.write(f"![Gallery Image {idx}]({gallery_url})\n")
-                        f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")
-
-                    f.write(f"**Original Gallery URL:** [Link](https://reddit.com{submission.permalink})\n")
+            # In context_mode (comment parent), wrap media in try-except
+            # to fail fast and fall back to URL links
+            try:
+                _save_submission_media(submission, f, is_recovered, media_config,
+                                      save_dir, ignore_tls_errors, context_mode)
+            except Exception as media_err:
+                if context_mode:
+                    logger.info(f"Context mode media fallback for {submission.id}: {media_err}")
+                    f.write(f"**Media:** [Link]({submission.url})\n")
                 else:
-                    f.write(f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n")
-
-            # --- 2. Reddit video (v.redd.it) ---
-            elif _is_video_url(submission.url):
-                if media_config.is_videos_enabled():
-                    video_url = _get_video_download_url(submission)
-                    video_path, video_size = download_image(
-                        video_url, save_dir, submission.id, ignore_tls_errors
-                    )
-                    if video_path:
-                        f.write(f"**Video:** [{os.path.basename(video_path)}]({video_path})\n")
-                        f.write(f"**Original Video URL:** [Link]({submission.url})\n")
-                        _track_media_size(video_size)
-                    else:
-                        f.write(f"**Video:** [Link]({submission.url})\n")
-                else:
-                    f.write(f"**Video (download disabled):** [Link]({submission.url})\n")
-
-            # --- 3. Images (broad detection: i.redd.it, i.imgur.com, preview.redd.it, .webp, etc.) ---
-            elif _is_image_url(submission.url):
-                if media_config.is_images_enabled():
-                    image_path, image_size = download_image(
-                        submission.url, save_dir, submission.id, ignore_tls_errors
-                    )
-                    if image_path:
-                        f.write(f"![Image]({image_path})\n")
-                        f.write(f"**Original Image URL:** [Link]({submission.url})\n")
-                        _track_media_size(image_size)
-                    else:
-                        f.write(f"![Image]({submission.url})\n")
-                else:
-                    f.write(f"![Image]({submission.url})\n")
-
-            # --- 4. YouTube ---
-            elif "youtube.com" in submission.url or "youtu.be" in submission.url:
-                video_id = extract_video_id(submission.url)
-                f.write(f"[![Video](https://img.youtube.com/vi/{video_id}/0.jpg)]({submission.url})")
-
-            # --- 5. Everything else (plain URL) ---
-            else:
-                f.write(submission.url if submission.url else '[Deleted Post]')
+                    raise
 
         f.write('\n\n## Comments:\n\n')
         lazy_comments = lazy_load_comments(submission)
@@ -385,7 +438,7 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
 
                 # Save the full submission context, including all comments
                 f.write('\n\n## Full Post Context:\n\n')
-                save_submission(parent, f, ignore_tls_errors=ignore_tls_errors)  # Save the parent post context
+                save_submission(parent, f, ignore_tls_errors=ignore_tls_errors, context_mode=True)
 
             elif isinstance(parent, Comment):
                 f.write(f'## Context: Parent Comment by /u/{parent.author.name if parent.author else "[deleted]"}\n')

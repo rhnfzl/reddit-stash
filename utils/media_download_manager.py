@@ -59,12 +59,21 @@ class MediaDownloadManager:
     def _initialize_services(self):
         """Initialize all media download services."""
         try:
-            # Initialize Reddit media downloader
+            # Initialize Reddit media downloader with per-subdomain circuit breakers
+            # so video timeouts don't cascade to block image downloads
             self._reddit_downloader = RedditMediaDownloader()
-            rate_limit_manager.register_service_from_config(
-                'reddit_media',
-                self._reddit_downloader.config
-            )
+            from .error_isolation import CircuitBreakerConfig
+            for reddit_service in ('reddit_video', 'reddit_image', 'reddit_preview'):
+                rate_limit_manager.register_service_from_config(
+                    reddit_service,
+                    self._reddit_downloader.config
+                )
+                self._service_manager.register_service(reddit_service, CircuitBreakerConfig(
+                    failure_threshold=5,
+                    recovery_timeout=60.0,
+                    success_threshold=3,
+                    timeout=45.0
+                ))
 
             # Initialize Imgur downloader
             self._imgur_downloader = ImgurMediaDownloader()
@@ -233,7 +242,14 @@ class MediaDownloadManager:
                             if recovery_transform.transformed:
                                 self._logger.debug(f"Also transformed recovery URL: {recovery_result.recovered_url} -> {final_recovery_url}")
 
-                            recovery_download_result = downloader.download(final_recovery_url, save_path)
+                            # Re-resolve downloader for recovery URL domain
+                            # (e.g., web.archive.org needs generic downloader, not reddit_media)
+                            recovery_service_name, recovery_downloader = self._get_service_for_url(final_recovery_url)
+                            if not recovery_downloader:
+                                self._logger.warning(f"No suitable downloader for recovered URL: {final_recovery_url}")
+                                recovery_download_result = None
+                            else:
+                                recovery_download_result = recovery_downloader.download(final_recovery_url, save_path)
                             if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                 self._logger.info(f"Successfully downloaded from recovered URL: {recovery_result.recovered_url}")
                                 # Track both original and recovered URLs as successfully downloaded
@@ -308,11 +324,14 @@ class MediaDownloadManager:
             parsed = urlparse(url.lower())
             domain = parsed.netloc.lower()
 
-            # Reddit media domains
-            if any(domain.endswith(reddit_domain) for reddit_domain in [
-                'i.redd.it', 'v.redd.it', 'preview.redd.it', 'external-preview.redd.it'
-            ]):
-                return 'reddit_media', self._reddit_downloader
+            # Reddit media domains — separate circuit breakers per subdomain
+            # so video timeouts don't cascade to block image downloads
+            if 'v.redd.it' in domain:
+                return 'reddit_video', self._reddit_downloader
+            elif 'i.redd.it' in domain:
+                return 'reddit_image', self._reddit_downloader
+            elif 'preview.redd.it' in domain or 'external-preview.redd.it' in domain:
+                return 'reddit_preview', self._reddit_downloader
 
             # Imgur domains
             elif any(domain.endswith(imgur_domain) for imgur_domain in [

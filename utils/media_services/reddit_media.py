@@ -169,8 +169,30 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
         Reddit stores video and audio separately. This method downloads both
         concurrently and attempts to merge them using ffmpeg if available.
+
+        Short redirect URLs (no DASH_ in path) are detected and attempted once;
+        on 403 they fail immediately without retries.
         """
+        import logging
+        _logger = logging.getLogger(__name__)
+
         try:
+            # Detect short v.redd.it redirect URLs (e.g., https://v.redd.it/abc123)
+            # These lack a DASH_ segment and usually 403 on direct access
+            parsed = urlparse(url)
+            is_short_url = 'DASH_' not in parsed.path
+
+            if is_short_url:
+                _logger.info(f"Short v.redd.it URL detected (no DASH_ segment): {url}")
+                # Attempt a single download — if 403, fail immediately
+                video_result = self.download_file(url, save_path)
+                if not video_result.is_success:
+                    error = video_result.error_message or ""
+                    if '403' in error or 'Forbidden' in error:
+                        _logger.warning(f"Short v.redd.it URL returned 403, failing fast: {url}")
+                    return video_result
+                return video_result
+
             # Check prerequisites before downloading
             has_ffmpeg = self._is_ffmpeg_available()
             audio_url = self._get_audio_url_from_video_url(url) if has_ffmpeg else None
@@ -222,32 +244,56 @@ class RedditMediaDownloader(BaseHTTPDownloader):
         """
         Generate audio URL from video URL.
 
-        Reddit stores audio at the same base URL but with 'DASH_audio.mp4' filename.
+        Reddit stores audio at the same base URL but with different filenames
+        depending on upload era:
+        - Post-July 2023: DASH_AUDIO_128.mp4 (high quality) or DASH_AUDIO_64.mp4
+        - Pre-July 2023: DASH_audio.mp4
+
+        Returns the first audio URL that responds successfully, or None.
         """
+        import logging
+        _logger = logging.getLogger(__name__)
+
         try:
-            # Parse video URL
             parsed = urlparse(video_url)
             path_parts = parsed.path.split('/')
 
-            # Find the video filename (usually ends with resolution like DASH_1080.mp4)
+            # Find the video filename index (e.g., DASH_1080.mp4)
+            dash_index = None
             for i, part in enumerate(path_parts):
                 if 'DASH_' in part and '.mp4' in part:
-                    # Replace with audio filename
-                    path_parts[i] = 'DASH_audio.mp4'
+                    dash_index = i
                     break
-            else:
-                # If no DASH filename found, can't generate audio URL
+
+            if dash_index is None:
                 return None
 
-            # Reconstruct URL
-            audio_path = '/'.join(path_parts)
-            audio_url = f"{parsed.scheme}://{parsed.netloc}{audio_path}"
+            # Try multiple audio filename patterns (newest first)
+            audio_filenames = ['DASH_AUDIO_128.mp4', 'DASH_AUDIO_64.mp4', 'DASH_audio.mp4']
 
-            # Preserve query parameters
-            if parsed.query:
-                audio_url += f"?{parsed.query}"
+            for audio_filename in audio_filenames:
+                candidate_parts = path_parts.copy()
+                candidate_parts[dash_index] = audio_filename
+                audio_path = '/'.join(candidate_parts)
+                audio_url = f"{parsed.scheme}://{parsed.netloc}{audio_path}"
+                if parsed.query:
+                    audio_url += f"?{parsed.query}"
 
-            return audio_url
+                # HEAD request to check if audio file exists
+                try:
+                    resp = self._session.head(
+                        audio_url,
+                        timeout=(3.0, 5.0),
+                        allow_redirects=True
+                    )
+                    if resp.status_code == 200:
+                        _logger.debug(f"Found audio track: {audio_filename}")
+                        return audio_url
+                except Exception:
+                    continue
+
+            _logger.debug(f"No audio track found for video: {video_url}")
+            return None
 
         except Exception:
             return None
