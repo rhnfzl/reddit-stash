@@ -149,7 +149,7 @@ For those who want to get up and running quickly, here's a streamlined process:
 2. Set up the required secrets in your GitHub repository:
    - From Reddit: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`
    - For Dropbox storage: `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`
-   - For S3 storage: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET` (and set repository variable `STORAGE_PROVIDER` to `s3`)
+   - For S3 storage: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`, `STORAGE_PROVIDER` (set to `s3`)
 3. Manually trigger the workflow from the Actions tab.
 
 ### Option 2: Local Installation
@@ -267,7 +267,7 @@ Before proceeding with any installation method, ensure that you have set the Red
     - `AWS_ACCESS_KEY_ID`
     - `AWS_SECRET_ACCESS_KEY`
     - `AWS_S3_BUCKET`
-    - Also set repository **variable** (not secret): `STORAGE_PROVIDER` = `s3`
+    - `STORAGE_PROVIDER` = `s3`
     For Enhanced Media Downloads (Optional - Imgur API registration is permanently closed)
     - `IMGUR_CLIENT_ID` (only if you already have an existing Imgur application)
     - `IMGUR_CLIENT_SECRET` (only if you already have an existing Imgur application)
@@ -3116,10 +3116,10 @@ For GitHub Actions, add these secrets to your repository (Settings → Secrets a
 | `AWS_DEFAULT_REGION` | Your bucket region (e.g., `us-east-1`) |
 | `AWS_S3_BUCKET` | Your bucket name |
 
-And add this **repository variable** (Settings → Secrets and variables → Actions → Variables tab):
+Also add these **secrets** (same Secrets tab):
 
-| Variable Name | Value |
-|--------------|-------|
+| Secret Name | Value |
+|------------|-------|
 | `STORAGE_PROVIDER` | `s3` |
 | `S3_STORAGE_CLASS` | `STANDARD_IA` (optional, this is the default) |
 
