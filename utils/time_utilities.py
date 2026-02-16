@@ -3,13 +3,15 @@ import random
 import logging
 import prawcore
 
+from utils.constants import DYNAMIC_SLEEP_BASE_SECONDS, DYNAMIC_SLEEP_MAX_SECONDS
+
 def exponential_backoff(attempt: int) -> None:
     """Implement exponential backoff with jitter."""
     wait_time = min(120, (2 ** attempt) + random.uniform(0, 1))
     logging.info(f"Retrying in {wait_time:.2f} seconds...")
     time.sleep(wait_time)
 
-def dynamic_sleep(content_length, request_failures=0, max_sleep_time=2):
+def dynamic_sleep(content_length, request_failures=0, max_sleep_time=DYNAMIC_SLEEP_MAX_SECONDS):
     """
     Dynamically adjust sleep time based on content length and other factors.
     PRAW handles Reddit API rate limiting internally, so this primarily
@@ -20,7 +22,7 @@ def dynamic_sleep(content_length, request_failures=0, max_sleep_time=2):
     :param max_sleep_time: Maximum sleep time allowed (optional).
     :return: Sleep time in seconds.
     """
-    base_sleep_time = 0.05
+    base_sleep_time = DYNAMIC_SLEEP_BASE_SECONDS
 
     # Mild scaling factor
     sleep_time = base_sleep_time + 0.01 * (content_length // 10000)

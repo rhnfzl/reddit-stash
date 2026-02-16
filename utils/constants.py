@@ -102,6 +102,17 @@ MAX_URL_LENGTH = 2048
 MIN_URL_LENGTH = 10
 URL_VALIDATION_TIMEOUT = 5.0  # Timeout for URL validation checks
 
+# Processing Pipeline
+DYNAMIC_SLEEP_BASE_SECONDS = 0.005  # Courtesy delay between items (PRAW handles API rate limiting)
+DYNAMIC_SLEEP_MAX_SECONDS = 0.5  # Cap on adaptive sleep time
+FILE_LOG_CHECKPOINT_INTERVAL = 200  # Save file_log.json every N items (trade-off: crash loss vs I/O)
+
+# Trusted Media Domains (skip URL validation for these)
+TRUSTED_MEDIA_DOMAINS = frozenset({
+    'i.redd.it', 'v.redd.it', 'preview.redd.it',
+    'external-preview.redd.it', 'i.imgur.com',
+})
+
 # Development and Testing
 ENABLE_PERFORMANCE_METRICS = False
 ENABLE_DETAILED_LOGGING = False

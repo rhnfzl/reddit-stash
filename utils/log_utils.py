@@ -1,6 +1,8 @@
 import os
 import json
 
+from utils.constants import FILE_LOG_CHECKPOINT_INTERVAL
+
 def get_log_file_path(save_directory):
     """Return the path to the log file inside the save_directory."""
     return os.path.join(save_directory, 'file_log.json')
@@ -35,9 +37,9 @@ def log_file(log_data, unique_key, file_info, save_directory):
     # Add the file info to the log with the unique key
     log_data[unique_key] = file_info
     
-    # Periodic checkpoint: save every 50 items to limit data loss on crash
+    # Periodic checkpoint: save every N items to limit data loss on crash
     # Final save happens in file_operations.py:save_user_activity()
-    if len(log_data) % 50 == 0:
+    if len(log_data) % FILE_LOG_CHECKPOINT_INTERVAL == 0:
         save_file_log(log_data, save_directory)
 
 def convert_to_absolute_path(relative_path, save_directory):

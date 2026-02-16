@@ -37,6 +37,7 @@ jobs:
       timeout-minutes: 1
 
     - name: TruffleHog OSS
+      if: github.event_name != 'schedule'
       uses: trufflesecurity/trufflehog@main
       with:
         extra_args: --only-verified
