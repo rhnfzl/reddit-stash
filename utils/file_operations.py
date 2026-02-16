@@ -1,11 +1,13 @@
 import os
 import configparser
 import logging
+import threading
 import prawcore
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
-from praw.models import Submission, Comment  # Import Submission and Comment
+from praw.models import Submission, Comment
 from utils.log_utils import log_file, save_file_log
-from utils.save_utils import save_submission, save_comment_and_context  # Import common functions
+from utils.save_utils import save_submission, save_comment_and_context, _reset_media_tracker, _get_media_size
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
 from utils.path_security import create_safe_path, create_reddit_file_path
@@ -13,6 +15,9 @@ from utils.praw_helpers import safe_fetch_items_one_by_one
 
 
 logger = logging.getLogger(__name__)
+
+# Lock protecting concurrent access to created_dirs_cache (check-then-create pattern)
+_dir_cache_lock = threading.Lock()
 
 # Dynamically determine the path to the root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -117,22 +122,21 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
             raise ValueError(f"Cannot create safe directory path: {path_result.issues}")
 
     sub_dir = path_result.safe_path
-    if sub_dir not in created_dirs_cache:
-        os.makedirs(sub_dir, exist_ok=True)
-        created_dirs_cache.add(sub_dir)
-    
+    with _dir_cache_lock:
+        if sub_dir not in created_dirs_cache:
+            os.makedirs(sub_dir, exist_ok=True)
+            created_dirs_cache.add(sub_dir)
+
     # Proceed with saving the file
     try:
         # Reset media size tracker before saving
-        from .save_utils import save_submission
-        if hasattr(save_submission, '_media_size_tracker'):
-            delattr(save_submission, '_media_size_tracker')
+        _reset_media_tracker()
 
         with open(file_path, 'w', encoding="utf-8") as f:
             save_function(content, f, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
 
         # Get accumulated media size from the tracker
-        media_size = getattr(save_submission, '_media_size_tracker', 0)
+        media_size = _get_media_size()
 
         # Prepare file info for logging
         file_info = {
@@ -170,14 +174,204 @@ def handle_dynamic_sleep(item):
         dynamic_sleep(0)  # Minimal or no sleep for other types of posts
 
 
-def save_user_activity(reddit, save_directory, file_log, unsave=False):
-    """Save user's posts, comments, saved items, and upvoted content."""
-    user = reddit.user.me()
+def _clone_reddit(reddit):
+    """Create a new PRAW Reddit instance with same credentials for thread-safe parallel use.
 
-    # Load the ignore_tls_errors setting
+    PRAW's Reddit instance is NOT thread-safe (shares a single requests.Session).
+    Each thread needs its own instance with separate OAuth token and rate limit budget.
+    """
+    import praw
+    return praw.Reddit(
+        client_id=reddit.config.client_id,
+        client_secret=reddit.config.client_secret,
+        username=reddit.config.username,
+        password=reddit.config.password,
+        user_agent=reddit.config.user_agent,
+    )
+
+
+def _fetch_items(reddit_instance, fetch_method_name, limit, label):
+    """Fetch items from a PRAW user endpoint with batch-then-one-by-one fallback.
+
+    Uses its own PRAW instance for thread-safe parallel fetching.
+    """
+    user = reddit_instance.user.me()
+    if fetch_method_name in ('submissions', 'comments'):
+        listing = getattr(user, fetch_method_name)
+        items_iter = listing.new(limit=limit)
+    else:
+        items_iter = getattr(user, fetch_method_name)(limit=limit)
+
+    try:
+        return list(items_iter)
+    except prawcore.exceptions.NotFound:
+        logger.warning(f"Batch fetch of {label} failed with 404, using safe iteration")
+        if fetch_method_name in ('submissions', 'comments'):
+            listing = getattr(user, fetch_method_name)
+            items_iter = listing.new(limit=limit)
+        else:
+            items_iter = getattr(user, fetch_method_name)(limit=limit)
+        return safe_fetch_items_one_by_one(items_iter, label)
+
+
+def _merge_results(*results):
+    """Merge (processed, skipped, size, media_size) tuples from parallel threads."""
+    processed = sum(r[0] for r in results)
+    skipped = sum(r[1] for r in results)
+    size = sum(r[2] for r in results)
+    media_size = sum(r[3] for r in results)
+    return processed, skipped, size, media_size
+
+
+def _process_submissions_batch(submissions, save_directory, existing_files, created_dirs_cache,
+                               file_log, ignore_tls_errors, category="POST", unsave=False,
+                               tqdm_desc="Processing Submissions", tqdm_position=0):
+    """Process a batch of submissions in a single thread.
+
+    Returns (processed_count, skipped_count, total_size, total_media_size).
+    """
+    processed_count = 0
+    skipped_count = 0
+    total_size = 0
+    total_media_size = 0
+
+    for submission in tqdm(submissions, desc=tqdm_desc, position=tqdm_position, leave=True):
+        path_result = create_reddit_file_path(
+            save_directory, submission.subreddit.display_name, category, submission.id
+        )
+        if not path_result.is_safe:
+            logger.error(f"Unsafe path for submission {submission.id}: {path_result.issues}")
+            continue
+
+        file_path = path_result.safe_path
+        save_result, media_size = save_to_file(
+            submission, file_path, save_submission, existing_files, file_log,
+            save_directory, created_dirs_cache, category=category,
+            unsave=unsave, ignore_tls_errors=ignore_tls_errors
+        )
+        if save_result:
+            skipped_count += 1
+            continue
+
+        processed_count += 1
+        total_media_size += media_size
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            pass
+        handle_dynamic_sleep(submission)
+
+    return processed_count, skipped_count, total_size, total_media_size
+
+
+def _process_comments_batch(comments, save_directory, existing_files, created_dirs_cache,
+                            file_log, ignore_tls_errors, category="COMMENT", unsave=False,
+                            tqdm_desc="Processing Comments", tqdm_position=1):
+    """Process a batch of comments in a single thread.
+
+    Returns (processed_count, skipped_count, total_size, total_media_size).
+    """
+    processed_count = 0
+    skipped_count = 0
+    total_size = 0
+    total_media_size = 0
+
+    for comment in tqdm(comments, desc=tqdm_desc, position=tqdm_position, leave=True):
+        path_result = create_reddit_file_path(
+            save_directory, comment.subreddit.display_name, category, comment.id
+        )
+        if not path_result.is_safe:
+            logger.error(f"Unsafe path for comment {comment.id}: {path_result.issues}")
+            continue
+
+        file_path = path_result.safe_path
+        save_result, media_size = save_to_file(
+            comment, file_path, save_comment_and_context, existing_files, file_log,
+            save_directory, created_dirs_cache, category=category,
+            unsave=unsave, ignore_tls_errors=ignore_tls_errors
+        )
+        if save_result:
+            skipped_count += 1
+            continue
+
+        processed_count += 1
+        total_media_size += media_size
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            pass
+        handle_dynamic_sleep(comment)
+
+    return processed_count, skipped_count, total_size, total_media_size
+
+
+def _process_mixed_items(items, save_directory, existing_files, created_dirs_cache,
+                         file_log, ignore_tls_errors, sub_category="SAVED_POST",
+                         comment_category="SAVED_COMMENT", unsave=False,
+                         tqdm_desc="Processing Items", tqdm_position=0):
+    """Process mixed submissions and comments in a single thread.
+
+    Items from one PRAW fetch share the same reddit instance, so they must be
+    processed in one thread to avoid concurrent access to the shared session.
+
+    Returns (processed_count, skipped_count, total_size, total_media_size).
+    """
+    processed_count = 0
+    skipped_count = 0
+    total_size = 0
+    total_media_size = 0
+
+    for item in tqdm(items, desc=tqdm_desc, position=tqdm_position, leave=True):
+        if isinstance(item, Submission):
+            category = sub_category
+            save_fn = save_submission
+        elif isinstance(item, Comment):
+            category = comment_category
+            save_fn = save_comment_and_context
+        else:
+            continue
+
+        path_result = create_reddit_file_path(
+            save_directory, item.subreddit.display_name, category, item.id
+        )
+        if not path_result.is_safe:
+            logger.error(f"Unsafe path for item {item.id}: {path_result.issues}")
+            continue
+
+        file_path = path_result.safe_path
+        save_result, media_size = save_to_file(
+            item, file_path, save_fn, existing_files, file_log,
+            save_directory, created_dirs_cache, category=category,
+            unsave=unsave, ignore_tls_errors=ignore_tls_errors
+        )
+        if save_result:
+            skipped_count += 1
+            continue
+
+        processed_count += 1
+        total_media_size += media_size
+        try:
+            if os.path.exists(file_path):
+                total_size += os.path.getsize(file_path)
+        except OSError:
+            pass
+        handle_dynamic_sleep(item)
+
+    return processed_count, skipped_count, total_size, total_media_size
+
+
+def save_user_activity(reddit, save_directory, file_log, unsave=False):
+    """Save user's posts, comments, saved items, and upvoted content.
+
+    Uses parallel fetching and processing when possible:
+    - ALL mode: 4 parallel fetches, then 4 parallel processing threads
+    - ACTIVITY mode: 2 parallel fetches, then 2 parallel processing threads
+    - SAVED/UPVOTED mode: 1 fetch, then 2 parallel processing threads (subs + comments)
+    """
     ignore_tls_errors = get_ignore_tls_errors()
 
-    # Determine how to check for existing files based on check_type
     if check_type == 'LOG':
         print("Check type is LOG. Using JSON log to find existing files.")
         existing_files = get_existing_files_from_log(file_log)
@@ -189,252 +383,103 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
 
     created_dirs_cache = set()
 
-    processed_count = 0  # Counter for processed items
-    skipped_count = 0  # Counter for skipped items
-    total_size = 0  # Total size of processed markdown data in bytes
-    total_media_size = 0  # Total size of downloaded media files in bytes
+    shared_args = dict(
+        save_directory=save_directory, existing_files=existing_files,
+        created_dirs_cache=created_dirs_cache, file_log=file_log,
+        ignore_tls_errors=ignore_tls_errors,
+    )
 
     if save_type == 'ALL':
-        # Save all user submissions and comments with safe fetching
-        try:
-            # Try batch fetch first (fast path)
-            submissions = list(user.submissions.new(limit=1000))
-        except prawcore.exceptions.NotFound:
-            # Batch failed - use one-by-one fetch with recovery
-            logger.warning("Batch fetch of submissions failed with 404, using safe iteration")
-            submissions = safe_fetch_items_one_by_one(user.submissions.new(limit=1000), 'submission')
+        # Phase 1: Parallel fetching — 4 threads, each with its own PRAW instance
+        endpoints = [
+            ('submissions', 'submission'),
+            ('comments', 'comment'),
+            ('saved', 'saved'),
+            ('upvoted', 'upvoted'),
+        ]
+        fetched = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {}
+            for method, label in endpoints:
+                r = _clone_reddit(reddit)
+                futures[label] = pool.submit(_fetch_items, r, method, 1000, label)
+            for label, future in futures.items():
+                fetched[label] = future.result()
 
-        try:
-            # Try batch fetch first (fast path)
-            comments = list(user.comments.new(limit=1000))
-        except prawcore.exceptions.NotFound:
-            # Batch failed - use one-by-one fetch with recovery
-            logger.warning("Batch fetch of comments failed with 404, using safe iteration")
-            comments = safe_fetch_items_one_by_one(user.comments.new(limit=1000), 'comment')
+        submissions = fetched['submission']
+        comments = fetched['comment']
+        saved_items = fetched['saved']
+        upvoted_items = fetched['upvoted']
 
-        processed_count, skipped_count, total_size, total_media_size = save_self_user_activity(
-            submissions, comments,
-            save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
-        )
+        # Phase 2: Parallel processing — 4 threads, one per fetch source
+        # Items from each fetch share a PRAW instance, so each source must stay
+        # in one thread. saved/upvoted are processed as mixed-type batches.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f1 = pool.submit(
+                _process_submissions_batch, submissions,
+                category="POST", tqdm_desc="Submissions", tqdm_position=0, **shared_args
+            )
+            f2 = pool.submit(
+                _process_comments_batch, comments,
+                category="COMMENT", tqdm_desc="Comments", tqdm_position=1, **shared_args
+            )
+            f3 = pool.submit(
+                _process_mixed_items, saved_items,
+                sub_category="SAVED_POST", comment_category="SAVED_COMMENT",
+                unsave=unsave, tqdm_desc="Saved Items", tqdm_position=2, **shared_args
+            )
+            f4 = pool.submit(
+                _process_mixed_items, upvoted_items,
+                sub_category="UPVOTE_POST", comment_category="UPVOTE_COMMENT",
+                tqdm_desc="Upvoted Items", tqdm_position=3, **shared_args
+            )
+            results = [f.result() for f in [f1, f2, f3, f4]]
 
-        # Save all saved items (posts and comments)
-        try:
-            saved_items = list(user.saved(limit=1000))
-        except prawcore.exceptions.NotFound:
-            logger.warning("Batch fetch of saved items failed with 404, using safe iteration")
-            saved_items = safe_fetch_items_one_by_one(user.saved(limit=1000), 'saved')
-
-        processed_count, skipped_count, total_size, total_media_size = save_saved_user_activity(
-            saved_items, save_directory, existing_files,
-            created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log,
-            unsave=unsave, ignore_tls_errors=ignore_tls_errors
-        )
-
-        # Save all upvoted posts and comments
-        try:
-            upvoted_items = list(user.upvoted(limit=1000))
-        except prawcore.exceptions.NotFound:
-            logger.warning("Batch fetch of upvoted items failed with 404, using safe iteration")
-            upvoted_items = safe_fetch_items_one_by_one(user.upvoted(limit=1000), 'upvoted')
-
-        processed_count, skipped_count, total_size, total_media_size = save_upvoted_posts_and_comments(
-            upvoted_items, save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
-        )
-    
-    elif save_type == 'SAVED':
-        try:
-            saved_items = list(user.saved(limit=1000))
-        except prawcore.exceptions.NotFound:
-            logger.warning("Batch fetch of saved items failed with 404, using safe iteration")
-            saved_items = safe_fetch_items_one_by_one(user.saved(limit=1000), 'saved')
-
-        processed_count, skipped_count, total_size, total_media_size = save_saved_user_activity(
-            saved_items, save_directory, existing_files,
-            created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log,
-            unsave=unsave, ignore_tls_errors=ignore_tls_errors
-        )
+        # Phase 3: Merge all counters
+        processed_count, skipped_count, total_size, total_media_size = _merge_results(*results)
 
     elif save_type == 'ACTIVITY':
-        try:
-            submissions = list(user.submissions.new(limit=1000))
-        except prawcore.exceptions.NotFound:
-            logger.warning("Batch fetch of submissions failed with 404, using safe iteration")
-            submissions = safe_fetch_items_one_by_one(user.submissions.new(limit=1000), 'submission')
+        # Parallel fetch: submissions + comments
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            r1 = _clone_reddit(reddit)
+            r2 = _clone_reddit(reddit)
+            f_sub = pool.submit(_fetch_items, r1, 'submissions', 1000, 'submission')
+            f_com = pool.submit(_fetch_items, r2, 'comments', 1000, 'comment')
+            submissions = f_sub.result()
+            comments = f_com.result()
 
-        try:
-            comments = list(user.comments.new(limit=1000))
-        except prawcore.exceptions.NotFound:
-            logger.warning("Batch fetch of comments failed with 404, using safe iteration")
-            comments = safe_fetch_items_one_by_one(user.comments.new(limit=1000), 'comment')
+        # Parallel processing: submissions + comments
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(
+                _process_submissions_batch, submissions,
+                category="POST", tqdm_desc="Submissions", tqdm_position=0, **shared_args
+            )
+            f2 = pool.submit(
+                _process_comments_batch, comments,
+                category="COMMENT", tqdm_desc="Comments", tqdm_position=1, **shared_args
+            )
+            processed_count, skipped_count, total_size, total_media_size = _merge_results(
+                f1.result(), f2.result()
+            )
 
-        processed_count, skipped_count, total_size, total_media_size = save_self_user_activity(
-            submissions, comments,
-            save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
+    elif save_type == 'SAVED':
+        saved_items = _fetch_items(reddit, 'saved', 1000, 'saved')
+        processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
+            saved_items, sub_category="SAVED_POST", comment_category="SAVED_COMMENT",
+            unsave=unsave, tqdm_desc="Saved Items", **shared_args
         )
 
     elif save_type == 'UPVOTED':
-        try:
-            upvoted_items = list(user.upvoted(limit=1000))
-        except prawcore.exceptions.NotFound:
-            logger.warning("Batch fetch of upvoted items failed with 404, using safe iteration")
-            upvoted_items = safe_fetch_items_one_by_one(user.upvoted(limit=1000), 'upvoted')
-
-        processed_count, skipped_count, total_size, total_media_size = save_upvoted_posts_and_comments(
-            upvoted_items, save_directory, existing_files, created_dirs_cache,
-            processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors
+        upvoted_items = _fetch_items(reddit, 'upvoted', 1000, 'upvoted')
+        processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
+            upvoted_items, sub_category="UPVOTE_POST", comment_category="UPVOTE_COMMENT",
+            tqdm_desc="Upvoted Items", **shared_args
         )
 
-    # Save the updated file log
+    else:
+        raise ValueError(f"Unknown save_type: {save_type}")
+
+    # Save the updated file log (all threads are done at this point)
     save_file_log(file_log, save_directory)
-
-    return processed_count, skipped_count, total_size, total_media_size
-
-
-def save_self_user_activity(submissions, comments, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors=None):
-    """Save all user posts and comments."""
-    for submission in tqdm(submissions, desc="Processing Users Submissions"):
-        # Use secure path creation to prevent directory traversal
-        path_result = create_reddit_file_path(
-            save_directory, submission.subreddit.display_name, "POST", submission.id
-        )
-        if not path_result.is_safe:
-            logger.error(f"Unsafe path for submission {submission.id}: {path_result.issues}")
-            continue
-
-        file_path = path_result.safe_path
-        save_result, media_size = save_to_file(submission, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, category="POST", ignore_tls_errors=ignore_tls_errors)
-        if save_result:
-            skipped_count += 1
-            continue
-
-        # Only count file size if file was actually saved successfully
-        processed_count += 1
-        total_media_size += media_size  # Add media size from downloads
-        try:
-            if os.path.exists(file_path):
-                total_size += os.path.getsize(file_path)
-        except OSError:
-            # File doesn't exist or can't be accessed, skip size calculation
-            pass
-        handle_dynamic_sleep(submission)  # Call the refactored sleep function
-
-    for comment in tqdm(comments, desc="Processing Users Comments"):
-        # Use secure path creation to prevent directory traversal
-        path_result = create_reddit_file_path(
-            save_directory, comment.subreddit.display_name, "COMMENT", comment.id
-        )
-        if not path_result.is_safe:
-            logger.error(f"Unsafe path for comment {comment.id}: {path_result.issues}")
-            continue
-
-        file_path = path_result.safe_path
-        save_result, media_size = save_to_file(comment, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, category="COMMENT", ignore_tls_errors=ignore_tls_errors)
-        if save_result:
-            skipped_count += 1
-            continue
-
-        # Only count file size if file was actually saved successfully
-        processed_count += 1
-        total_media_size += media_size  # Add media size from downloads
-        try:
-            if os.path.exists(file_path):
-                total_size += os.path.getsize(file_path)
-        except OSError:
-            # File doesn't exist or can't be accessed, skip size calculation
-            pass
-        handle_dynamic_sleep(comment)  # Call the refactored sleep function
-
-    return processed_count, skipped_count, total_size, total_media_size
-
-def save_saved_user_activity(saved_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log, unsave=False, ignore_tls_errors=None):
-    """Save only saved user posts and comments."""
-    for item in tqdm(saved_items, desc="Processing Saved Items"):
-        if isinstance(item, Submission):
-            # Use secure path creation to prevent directory traversal
-            path_result = create_reddit_file_path(
-                save_directory, item.subreddit.display_name, "SAVED_POST", item.id
-            )
-            if not path_result.is_safe:
-                logger.error(f"Unsafe path for saved submission {item.id}: {path_result.issues}")
-                continue
-
-            file_path = path_result.safe_path
-            save_result, media_size = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, category="SAVED_POST", unsave=unsave, ignore_tls_errors=ignore_tls_errors)
-            if save_result:
-                skipped_count += 1
-                continue
-        elif isinstance(item, Comment):
-            # Use secure path creation to prevent directory traversal
-            path_result = create_reddit_file_path(
-                save_directory, item.subreddit.display_name, "SAVED_COMMENT", item.id
-            )
-            if not path_result.is_safe:
-                logger.error(f"Unsafe path for saved comment {item.id}: {path_result.issues}")
-                continue
-
-            file_path = path_result.safe_path
-            save_result, media_size = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, category="SAVED_COMMENT", unsave=unsave, ignore_tls_errors=ignore_tls_errors)
-            if save_result:
-                skipped_count += 1
-                continue
-
-        # Only count file size if file was actually saved successfully
-        processed_count += 1
-        total_media_size += media_size  # Add media size from downloads
-        try:
-            if os.path.exists(file_path):
-                total_size += os.path.getsize(file_path)
-        except OSError:
-            # File doesn't exist or can't be accessed, skip size calculation
-            pass
-        handle_dynamic_sleep(item)
-
-    return processed_count, skipped_count, total_size, total_media_size
-
-def save_upvoted_posts_and_comments(upvoted_items, save_directory, existing_files, created_dirs_cache, processed_count, skipped_count, total_size, total_media_size, file_log, ignore_tls_errors=None):
-    """Save only upvoted user posts and comments."""
-    for item in tqdm(upvoted_items, desc="Processing Upvoted Items"):
-        if isinstance(item, Submission):
-            # Use secure path creation to prevent directory traversal
-            path_result = create_reddit_file_path(
-                save_directory, item.subreddit.display_name, "UPVOTE_POST", item.id
-            )
-            if not path_result.is_safe:
-                logger.error(f"Unsafe path for upvoted submission {item.id}: {path_result.issues}")
-                continue
-
-            file_path = path_result.safe_path
-            save_result, media_size = save_to_file(item, file_path, save_submission, existing_files, file_log, save_directory, created_dirs_cache, category="UPVOTE_POST", ignore_tls_errors=ignore_tls_errors)
-            if save_result:
-                skipped_count += 1
-                continue
-        elif isinstance(item, Comment):
-            # Use secure path creation to prevent directory traversal
-            path_result = create_reddit_file_path(
-                save_directory, item.subreddit.display_name, "UPVOTE_COMMENT", item.id
-            )
-            if not path_result.is_safe:
-                logger.error(f"Unsafe path for upvoted comment {item.id}: {path_result.issues}")
-                continue
-
-            file_path = path_result.safe_path
-            save_result, media_size = save_to_file(item, file_path, save_comment_and_context, existing_files, file_log, save_directory, created_dirs_cache, category="UPVOTE_COMMENT", ignore_tls_errors=ignore_tls_errors)
-            if save_result:
-                skipped_count += 1
-                continue
-
-        # Only count file size if file was actually saved successfully
-        processed_count += 1
-        total_media_size += media_size  # Add media size from downloads
-        try:
-            if os.path.exists(file_path):
-                total_size += os.path.getsize(file_path)
-        except OSError:
-            # File doesn't exist or can't be accessed, skip size calculation
-            pass
-        handle_dynamic_sleep(item)
 
     return processed_count, skipped_count, total_size, total_media_size

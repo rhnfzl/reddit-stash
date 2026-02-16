@@ -1,6 +1,7 @@
 import os
 import logging
 import requests
+import threading
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -13,6 +14,9 @@ from utils.feature_flags import get_media_config
 from utils.media_services.reddit_media import RedditMediaDownloader
 
 logger = logging.getLogger(__name__)
+
+# Thread-local storage for media size tracking (replaces function attribute hack)
+_media_size_local = threading.local()
 
 def format_date(timestamp):
     """Format a UTC timestamp into a human-readable date."""
@@ -182,10 +186,20 @@ def _get_video_download_url(submission):
 
 
 def _track_media_size(size):
-    """Track accumulated media download sizes for file_operations.py."""
-    if not hasattr(save_submission, '_media_size_tracker'):
-        save_submission._media_size_tracker = 0
-    save_submission._media_size_tracker += size
+    """Track accumulated media download sizes per-thread."""
+    if not hasattr(_media_size_local, 'size'):
+        _media_size_local.size = 0
+    _media_size_local.size += size
+
+
+def _reset_media_tracker():
+    """Reset the per-thread media size tracker to zero."""
+    _media_size_local.size = 0
+
+
+def _get_media_size():
+    """Get the accumulated media size for the current thread."""
+    return getattr(_media_size_local, 'size', 0)
 
 
 def _save_submission_media(submission, f, is_recovered, media_config, save_dir, ignore_tls_errors, context_mode):
