@@ -247,13 +247,9 @@ class S3StorageProvider:
 
     def _do_upload_directory(self, local_directory: str, remote_directory: str,
                              start: float, is_cancelled) -> SyncResult:
-        # Build remote hash map from S3 metadata
-        remote_hashes: Dict[str, str] = {}
-        for info in self.list_files(remote_directory):
-            # Fetch BLAKE3 from head_object metadata
-            detailed = self.get_file_info(info.remote_path)
-            if detailed and detailed.content_hash:
-                remote_hashes[info.remote_path] = detailed.content_hash
+        # Build a set of known remote keys (cheap — no HEAD requests).
+        # BLAKE3 hash is fetched lazily per-file only when a remote key exists.
+        remote_keys = {info.remote_path for info in self.list_files(remote_directory)}
 
         files = [
             (root, fname)
@@ -278,7 +274,8 @@ class S3StorageProvider:
             for root, fname in regular_files
         )
 
-        print(f"S3 upload: {total_files} files ({_fmt_size(total_bytes)}) to process")
+        print(f"S3 upload: {total_files} files ({_fmt_size(total_bytes)}) to process, "
+              f"{len(remote_keys)} remote files")
 
         uploaded = 0
         skipped = 0
@@ -298,11 +295,13 @@ class S3StorageProvider:
 
             local_hash = compute_file_hash(file_path)
 
-            # Skip if remote has identical content
-            if remote_key in remote_hashes and hashes_match(remote_hashes[remote_key], local_hash):
-                skipped += 1
-                bytes_processed += file_size
-                return
+            # Only HEAD the remote file if it exists — avoids N+1 queries
+            if remote_key in remote_keys:
+                remote_info = self.get_file_info(remote_key)
+                if remote_info and remote_info.content_hash and hashes_match(remote_info.content_hash, local_hash):
+                    skipped += 1
+                    bytes_processed += file_size
+                    return
 
             try:
                 info = self.upload_file(file_path, remote_key)
