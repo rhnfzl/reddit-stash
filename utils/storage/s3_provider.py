@@ -390,8 +390,16 @@ class S3StorageProvider:
 
         remote_files = self.list_files(remote_directory)
         total_files = len(remote_files)
-        total_bytes = sum(f.size_bytes for f in remote_files)
 
+        # Nothing in remote storage — return immediately
+        if total_files == 0:
+            print("S3 download: no remote files to download")
+            elapsed = time.time() - start
+            result = SyncResult(elapsed_seconds=elapsed)
+            print(f"S3 download complete: {result.summary()}")
+            return result
+
+        total_bytes = sum(f.size_bytes for f in remote_files)
         print(f"S3 download: {total_files} files ({_fmt_size(total_bytes)}) to process")
 
         downloaded = 0
@@ -408,7 +416,9 @@ class S3StorageProvider:
             rel_path = info.remote_path[prefix_len:]
             local_path = os.path.join(local_directory, rel_path)
 
-            # Skip if local file matches remote hash
+            # Skip if local file already exists and matches remote hash.
+            # HEAD is only called when the local file exists (common in Docker/local mode,
+            # never in GHA where the directory starts empty).
             if os.path.exists(local_path):
                 remote_info = self.get_file_info(info.remote_path)
                 if remote_info and remote_info.content_hash:
