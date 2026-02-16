@@ -12,6 +12,8 @@
 
 **Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox, AWS S3, or your local machine. Utilizing GitHub Actions, this script runs every 3 hours during peak hours and twice during off-peak hours, automating the process of archiving your Reddit data after a simple setup.
 
+> **Looking for search & AI chat?** Check out [reddit-stash-insights](https://github.com/rhnfzl/reddit-stash-insights) — a companion tool that adds semantic search and RAG chat to your Reddit archive.
+
 ## 📋 What You Get
 
 When Reddit Stash runs successfully, your saved content is organized by subreddit in a clean folder structure and stored as markdown files:
