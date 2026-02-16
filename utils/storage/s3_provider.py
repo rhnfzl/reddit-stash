@@ -247,10 +247,6 @@ class S3StorageProvider:
 
     def _do_upload_directory(self, local_directory: str, remote_directory: str,
                              start: float, is_cancelled) -> SyncResult:
-        # Build a set of known remote keys (cheap — no HEAD requests).
-        # BLAKE3 hash is fetched lazily per-file only when a remote key exists.
-        remote_keys = {info.remote_path for info in self.list_files(remote_directory)}
-
         files = [
             (root, fname)
             for root, _dirs, fnames in os.walk(local_directory)
@@ -267,12 +263,38 @@ class S3StorageProvider:
             else:
                 regular_files.append((root, fname))
 
-        # Pre-compute total size for progress reporting
         total_files = len(regular_files)
+
+        # Nothing to upload — just sync file_log.json and return
+        if total_files == 0:
+            print("S3 upload: no content files to upload")
+            uploaded = 0
+            if log_entry:
+                try:
+                    self.upload_file(
+                        os.path.join(log_entry[0], log_entry[1]),
+                        f"{remote_directory.strip('/')}/file_log.json"
+                        if remote_directory.strip("/") else "file_log.json",
+                    )
+                    uploaded = 1
+                    print("  file_log.json synced")
+                except Exception as exc:
+                    elapsed = time.time() - start
+                    return SyncResult(failed=1, elapsed_seconds=elapsed, errors=[str(exc)])
+            elapsed = time.time() - start
+            result = SyncResult(uploaded=uploaded, elapsed_seconds=elapsed)
+            print(f"S3 upload complete: {result.summary()}")
+            return result
+
+        # Pre-compute total size for progress reporting
         total_bytes = sum(
             os.path.getsize(os.path.join(root, fname))
             for root, fname in regular_files
         )
+
+        # Build a set of known remote keys — only needed when there are files to compare.
+        # BLAKE3 hash is fetched lazily per-file only when a remote key exists.
+        remote_keys = {info.remote_path for info in self.list_files(remote_directory)}
 
         print(f"S3 upload: {total_files} files ({_fmt_size(total_bytes)}) to process, "
               f"{len(remote_keys)} remote files")
