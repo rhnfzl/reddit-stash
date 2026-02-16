@@ -137,6 +137,9 @@ jobs:
         REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
         REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
         REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+        STORAGE_PROVIDER: ${{ secrets.STORAGE_PROVIDER }}
+        AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
       run: |
         python reddit_stash.py
 
