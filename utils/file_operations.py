@@ -161,7 +161,13 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
 
         return False, media_size  # Indicate that the file was saved successfully and return media size
     except Exception as e:
-        print(f"Failed to save {file_path}: {e}")
+        logger.error(f"Failed to save {file_path}: {e}")
+        # Clean up partial file so it's not left as corrupt content
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except OSError:
+            pass
         return False, 0  # Indicate that the file could not be saved, no media size
 
 def handle_dynamic_sleep(item):

@@ -396,6 +396,7 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
     except Exception as e:
         logger.error(f"Error saving submission {submission.id}: {e}")
+        raise
 
 def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
     """Save a comment, its context, and any child comments.
@@ -478,6 +479,7 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
 
     except Exception as e:
         logger.error(f"Error saving comment {comment.id}: {e}")
+        raise
 
 def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None):
     """Process all comments using pure blockquote nesting for hierarchy."""
