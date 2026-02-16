@@ -44,6 +44,24 @@ def _ensure_boto3():
         _TransferConfig = TransferConfig
 
 
+def _fmt_size(nbytes: int) -> str:
+    """Format byte count as human-readable size."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(nbytes) < 1024:
+            return f"{nbytes:.1f} {unit}"
+        nbytes /= 1024
+    return f"{nbytes:.1f} TB"
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format seconds as human-readable duration."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes}m{secs:02d}s"
+
+
 class S3StorageProvider:
     """AWS S3 implementation of StorageProviderProtocol."""
 
@@ -253,15 +271,27 @@ class S3StorageProvider:
             else:
                 regular_files.append((root, fname))
 
+        # Pre-compute total size for progress reporting
+        total_files = len(regular_files)
+        total_bytes = sum(
+            os.path.getsize(os.path.join(root, fname))
+            for root, fname in regular_files
+        )
+
+        print(f"S3 upload: {total_files} files ({_fmt_size(total_bytes)}) to process")
+
         uploaded = 0
         skipped = 0
         failed = 0
         bytes_transferred = 0
+        bytes_processed = 0
         errors: List[str] = []
+        last_progress_time = time.time()
 
-        def _upload_one(root: str, fname: str):
-            nonlocal uploaded, skipped, failed, bytes_transferred
+        def _upload_one(root: str, fname: str, show_progress: bool = True):
+            nonlocal uploaded, skipped, failed, bytes_transferred, bytes_processed, last_progress_time
             file_path = os.path.join(root, fname)
+            file_size = os.path.getsize(file_path)
             rel = os.path.relpath(file_path, local_directory).replace(os.sep, "/")
             prefix = remote_directory.strip("/")
             remote_key = f"{prefix}/{rel}" if prefix else rel
@@ -271,15 +301,36 @@ class S3StorageProvider:
             # Skip if remote has identical content
             if remote_key in remote_hashes and hashes_match(remote_hashes[remote_key], local_hash):
                 skipped += 1
+                bytes_processed += file_size
                 return
 
             try:
                 info = self.upload_file(file_path, remote_key)
                 uploaded += 1
                 bytes_transferred += info.size_bytes
+                bytes_processed += file_size
             except Exception as exc:
                 failed += 1
+                bytes_processed += file_size
                 errors.append(f"{file_path}: {exc}")
+
+            # Print progress every 10 seconds or on every file if fewer than 20
+            if show_progress:
+                now = time.time()
+                done = uploaded + skipped + failed
+                if total_files <= 20 or (now - last_progress_time) >= 10 or done == total_files:
+                    last_progress_time = now
+                    pct = (done / total_files * 100) if total_files else 100
+                    elapsed = now - start
+                    eta = ""
+                    if done > 0 and done < total_files:
+                        eta_secs = (elapsed / done) * (total_files - done)
+                        eta = f" | ETA: ~{_fmt_duration(eta_secs)}"
+                    print(
+                        f"  [{done}/{total_files}] {pct:.0f}% | "
+                        f"{_fmt_size(bytes_transferred)} uploaded, "
+                        f"{skipped} skipped, {failed} failed{eta}"
+                    )
 
         for root, fname in regular_files:
             if is_cancelled():
@@ -294,7 +345,7 @@ class S3StorageProvider:
                 print(f"SKIPPING file_log.json upload: {failed} file(s) failed or upload was cancelled.")
                 print("This prevents marking items as processed when their backup files are missing.")
             else:
-                _upload_one(*log_entry)
+                _upload_one(*log_entry, show_progress=False)
 
         elapsed = time.time() - start
         result = SyncResult(
@@ -305,7 +356,7 @@ class S3StorageProvider:
             elapsed_seconds=elapsed,
             errors=errors,
         )
-        print(f"S3 upload: {result.summary()}")
+        print(f"S3 upload complete: {result.summary()}")
         return result
 
     def download_directory(self, remote_directory: str, local_directory: str,
@@ -317,12 +368,17 @@ class S3StorageProvider:
             return self._download_log_only(remote_directory, local_directory, start)
 
         remote_files = self.list_files(remote_directory)
+        total_files = len(remote_files)
+        total_bytes = sum(f.size_bytes for f in remote_files)
+
+        print(f"S3 download: {total_files} files ({_fmt_size(total_bytes)}) to process")
 
         downloaded = 0
         skipped = 0
         failed = 0
         bytes_transferred = 0
         errors: List[str] = []
+        last_progress_time = time.time()
 
         prefix = remote_directory.strip("/")
         prefix_len = len(prefix) + 1 if prefix else 0
@@ -348,6 +404,23 @@ class S3StorageProvider:
                 failed += 1
                 errors.append(f"{info.remote_path}: {exc}")
 
+            # Progress reporting
+            now = time.time()
+            done = downloaded + skipped + failed
+            if total_files <= 20 or (now - last_progress_time) >= 10 or done == total_files:
+                last_progress_time = now
+                pct = (done / total_files * 100) if total_files else 100
+                elapsed_so_far = now - start
+                eta = ""
+                if done > 0 and done < total_files:
+                    eta_secs = (elapsed_so_far / done) * (total_files - done)
+                    eta = f" | ETA: ~{_fmt_duration(eta_secs)}"
+                print(
+                    f"  [{done}/{total_files}] {pct:.0f}% | "
+                    f"{_fmt_size(bytes_transferred)} downloaded, "
+                    f"{skipped} skipped, {failed} failed{eta}"
+                )
+
         elapsed = time.time() - start
         result = SyncResult(
             downloaded=downloaded,
@@ -357,7 +430,7 @@ class S3StorageProvider:
             elapsed_seconds=elapsed,
             errors=errors,
         )
-        print(f"S3 download: {result.summary()}")
+        print(f"S3 download complete: {result.summary()}")
         return result
 
     def get_provider_name(self) -> str:
