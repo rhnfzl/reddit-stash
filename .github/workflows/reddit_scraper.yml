@@ -138,7 +138,7 @@ jobs:
         REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
         REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
         REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
-        IMGUR_CLIENT_ID: ${{ secrets.IMGUR_CLIENT_ID }}
+        IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
         STORAGE_PROVIDER: ${{ secrets.STORAGE_PROVIDER }}
         AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
