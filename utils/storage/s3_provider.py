@@ -490,6 +490,16 @@ class S3StorageProvider:
                 bytes_transferred=info.size_bytes,
                 elapsed_seconds=time.time() - start,
             )
+        except self._s3.exceptions.ClientError as exc:
+            if exc.response["Error"]["Code"] == "404":
+                print("No existing log file in S3 — starting fresh.")
+                return SyncResult(elapsed_seconds=time.time() - start)
+            print(f"Failed to download log file from S3: {exc}")
+            return SyncResult(
+                failed=1,
+                elapsed_seconds=time.time() - start,
+                errors=[str(exc)],
+            )
         except Exception as exc:
             print(f"Failed to download log file from S3: {exc}")
             return SyncResult(

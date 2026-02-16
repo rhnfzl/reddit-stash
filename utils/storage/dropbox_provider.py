@@ -373,6 +373,16 @@ class DropboxStorageProvider:
                 bytes_transferred=meta.size,
                 elapsed_seconds=time.time() - start,
             )
+        except _ApiError as exc:
+            if exc.error.is_path() and exc.error.get_path().is_not_found():
+                print("No existing log file in Dropbox — starting fresh.")
+                return SyncResult(elapsed_seconds=time.time() - start)
+            print(f"Failed to download log file: {exc}")
+            return SyncResult(
+                failed=1,
+                elapsed_seconds=time.time() - start,
+                errors=[str(exc)],
+            )
         except Exception as exc:
             print(f"Failed to download log file: {exc}")
             return SyncResult(
