@@ -411,32 +411,37 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
         saved_items = fetched['saved']
         upvoted_items = fetched['upvoted']
 
-        # Phase 2: Parallel processing — 4 threads, one per fetch source
-        # Items from each fetch share a PRAW instance, so each source must stay
-        # in one thread. saved/upvoted are processed as mixed-type batches.
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        # Phase 2: Parallel processing — 2 concurrent threads to stay within
+        # Reddit's per-user rate limit (all PRAW clones share the same user's
+        # 100 req/min budget). Process in two batches of 2.
+        with ThreadPoolExecutor(max_workers=2) as pool:
             f1 = pool.submit(
                 _process_submissions_batch, submissions,
                 category="POST", tqdm_desc="Submissions", tqdm_position=0, **shared_args
             )
             f2 = pool.submit(
-                _process_comments_batch, comments,
-                category="COMMENT", tqdm_desc="Comments", tqdm_position=1, **shared_args
-            )
-            f3 = pool.submit(
                 _process_mixed_items, saved_items,
                 sub_category="SAVED_POST", comment_category="SAVED_COMMENT",
-                unsave=unsave, tqdm_desc="Saved Items", tqdm_position=2, **shared_args
+                unsave=unsave, tqdm_desc="Saved Items", tqdm_position=1, **shared_args
+            )
+            results_batch1 = [f.result() for f in [f1, f2]]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f3 = pool.submit(
+                _process_comments_batch, comments,
+                category="COMMENT", tqdm_desc="Comments", tqdm_position=0, **shared_args
             )
             f4 = pool.submit(
                 _process_mixed_items, upvoted_items,
                 sub_category="UPVOTE_POST", comment_category="UPVOTE_COMMENT",
-                tqdm_desc="Upvoted Items", tqdm_position=3, **shared_args
+                tqdm_desc="Upvoted Items", tqdm_position=1, **shared_args
             )
-            results = [f.result() for f in [f1, f2, f3, f4]]
+            results_batch2 = [f.result() for f in [f3, f4]]
 
         # Phase 3: Merge all counters
-        processed_count, skipped_count, total_size, total_media_size = _merge_results(*results)
+        processed_count, skipped_count, total_size, total_media_size = _merge_results(
+            *results_batch1, *results_batch2
+        )
 
     elif save_type == 'ACTIVITY':
         # Parallel fetch: submissions + comments
