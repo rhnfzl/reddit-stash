@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import tempfile
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Optional, Dict, Any, List
@@ -63,10 +64,11 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 'i.redd.it',
                 'v.redd.it',
                 'preview.redd.it',
-                'external-preview.redd.it'
+                'external-preview.redd.it',
+                'reddit.com'  # Added to allow handling of wrapped redirect pages
             ]
 
-            return any(domain.endswith(reddit_domain) for reddit_domain in reddit_domains)
+            return any(reddit_domain in domain for reddit_domain in reddit_domains)
 
         except Exception:
             return False
@@ -77,6 +79,13 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             return None
 
         try:
+            # Clean URL if it's a redirect wrapper
+            if "reddit.com/media?url=" in url:
+                parsed_url = urllib.parse.urlparse(url)
+                extracted = urllib.parse.parse_qs(parsed_url.query).get('url')
+                if extracted:
+                    url = extracted[0]
+
             # Respect rate limiting
             self._respect_rate_limit()
 
@@ -109,6 +118,13 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
     def download(self, url: str, save_path: str) -> DownloadResult:
         """Download Reddit media with appropriate handling for different types."""
+        # FIX: Intercept and unwrap nested web URLs before choosing a downloader route
+        if "reddit.com/media?url=" in url:
+            parsed_url = urllib.parse.urlparse(url)
+            extracted = urllib.parse.parse_qs(parsed_url.query).get('url')
+            if extracted:
+                url = extracted[0]
+
         if not self.can_handle(url):
             return DownloadResult(
                 status=DownloadStatus.INVALID_URL,
