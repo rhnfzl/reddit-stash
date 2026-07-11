@@ -50,7 +50,7 @@ class URLTransformer:
 
             # GitHub blob to raw
             (
-                r'github\.com/([^/]+)/([^/]+)/blob/(.+)',
+                r'github\.com(?::\d+)?/([^/]+)/([^/]+)/blob/(.+)',
                 self._transform_github_blob,
                 'GitHub',
                 'Converts blob viewer to raw file access'
@@ -112,9 +112,9 @@ class URLTransformer:
                 'Converts viewer page to direct image access'
             ),
 
-            # ImgBB to direct
+            # ImgBB to direct (real share URLs use the ibb.co short domain)
             (
-                r'imgbb\.com/([^/]+)$',
+                r'ibb\.co/([^/]+)$',
                 self._transform_imgbb,
                 'ImgBB',
                 'Converts viewer page to direct image access'
