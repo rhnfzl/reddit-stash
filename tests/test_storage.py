@@ -382,6 +382,60 @@ class TestDropboxStorageProvider(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 provider.connect()
 
+    def test_upload_skips_log_when_a_content_file_fails(self):
+        provider = self._make_provider()
+        provider._dbx = MagicMock()
+        provider._max_workers = 1
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            post_path = os.path.join(temp_dir, "post.md")
+            log_path = os.path.join(temp_dir, "file_log.json")
+            for path in (post_path, log_path):
+                with open(path, "w", encoding="utf-8") as output_file:
+                    output_file.write("content")
+
+            uploaded_paths = []
+
+            def upload(local_path, remote_path):
+                uploaded_paths.append((local_path, remote_path))
+                if local_path == post_path:
+                    raise RuntimeError("network failure")
+                return os.path.getsize(local_path)
+
+            with patch.object(provider, "list_files", return_value=[]):
+                with patch.object(provider, "_raw_upload", side_effect=upload):
+                    result = provider.upload_directory(temp_dir, "/reddit")
+
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.uploaded, 0)
+        self.assertEqual([path for path, _ in uploaded_paths], [post_path])
+
+    def test_uploads_log_after_content_files_succeed(self):
+        provider = self._make_provider()
+        provider._dbx = MagicMock()
+        provider._max_workers = 1
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            post_path = os.path.join(temp_dir, "post.md")
+            log_path = os.path.join(temp_dir, "file_log.json")
+            for path in (post_path, log_path):
+                with open(path, "w", encoding="utf-8") as output_file:
+                    output_file.write("content")
+
+            uploaded_paths = []
+
+            def upload(local_path, remote_path):
+                uploaded_paths.append((local_path, remote_path))
+                return os.path.getsize(local_path)
+
+            with patch.object(provider, "list_files", return_value=[]):
+                with patch.object(provider, "_raw_upload", side_effect=upload):
+                    result = provider.upload_directory(temp_dir, "/reddit")
+
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.uploaded, 2)
+        self.assertEqual([path for path, _ in uploaded_paths], [post_path, log_path])
+
 
 # ---------------------------------------------------------------
 # Migration
