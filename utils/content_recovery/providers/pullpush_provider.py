@@ -16,12 +16,15 @@ API Documentation: https://pullpush.io/
 import time
 import requests
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Iterable
 from urllib.parse import urlparse
 import re
 
 from ..recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
-from ...rate_limiter import rate_limited
+from ...rate_limiter import rate_limited, rate_limit_manager
+
+
+PULLPUSH_BATCH_SIZE = 100
 
 
 class PullPushProvider:
@@ -181,6 +184,48 @@ class PullPushProvider:
             self._logger.debug(f"Submission search failed: {e}")
 
         return None
+
+    def fetch_metadata_by_ids(self, content_type: str, ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch a bounded batch of archived post or comment records by ID."""
+        endpoint = {
+            'posts': self.submission_endpoint,
+            'comments': self.comment_endpoint,
+        }.get(content_type)
+        if not endpoint:
+            raise ValueError(f'Unsupported PullPush content type: {content_type}')
+
+        unique_ids = list(dict.fromkeys(str(item_id) for item_id in ids if item_id))
+        records = {}
+
+        for start in range(0, len(unique_ids), PULLPUSH_BATCH_SIZE):
+            batch = unique_ids[start:start + PULLPUSH_BATCH_SIZE]
+            if not rate_limit_manager.acquire('pullpush_io', timeout=self.timeout):
+                self._logger.warning('PullPush metadata lookup deferred by the rate limiter')
+                break
+
+            try:
+                response = self.session.get(
+                    endpoint,
+                    params={'ids': ','.join(batch), 'size': len(batch)},
+                    timeout=self.timeout,
+                )
+                rate_limit_manager.report_response('pullpush_io', response.status_code)
+                response.raise_for_status()
+                payload = response.json()
+            except (requests.exceptions.RequestException, ValueError) as error:
+                self._logger.warning(f'PullPush metadata lookup failed: {error}')
+                continue
+
+            data = payload.get('data', []) if isinstance(payload, dict) else []
+            if not isinstance(data, list):
+                self._logger.warning('PullPush returned an unexpected response shape')
+                continue
+
+            for record in data:
+                if isinstance(record, dict) and record.get('id'):
+                    records[str(record['id'])] = record
+
+        return records
 
     def _search_comment(self, comment_id: str) -> Optional[Dict[str, Any]]:
         """Search for a Reddit comment by ID."""

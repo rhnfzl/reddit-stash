@@ -15,6 +15,7 @@ from datetime import datetime
 class RecoverySource(Enum):
     """Enumeration of content recovery sources."""
     WAYBACK_MACHINE = "wayback_machine"
+    ARCTIC_SHIFT = "arctic_shift"
     PULLPUSH_IO = "pullpush_io"
     REDDIT_PREVIEWS = "reddit_previews"
     REVEDDIT = "reveddit"

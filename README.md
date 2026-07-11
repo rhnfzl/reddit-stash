@@ -213,7 +213,7 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 - ⏱️ **Rate Limit Management:** Implements dynamic sleep timers to respect Reddit's API rate limits.
 - 🔒 **GDPR Data Processing:** Optional processing of Reddit's GDPR export data.
 - 🖼️ **Enhanced Media Downloads:** Download images, videos, and other media with dramatically improved success rates (~80% vs previous ~10%), featuring intelligent fallback systems and modern web compatibility.
-- 🔄 **Content Recovery System:** 4-provider cascade for failed downloads (Wayback Machine, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs.
+- 🔄 **Content Recovery System:** 5-provider cascade for failed downloads and archived Reddit text (Wayback Machine, Arctic Shift, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs.
 
 ## 🎯 Why Use Reddit Stash
 
@@ -1173,18 +1173,18 @@ Jump to any section or browse the complete settings index:
 |---------|----------------|---------|---------|
 | **[Settings]** | 8 | Core behavior (save paths, types, file checking) | [↓ View](#settings---core-application-behavior) |
 | **[Configuration]** | 4 | Reddit API credentials (use env vars!) | [↓ View](#configuration---reddit-api-credentials) |
-| **[Media]** | 12 | Media download controls (images, videos, albums) | [↓ View](#media---advanced-media-download-system) |
+| **[Media]** | 14 | Media download controls (images, videos, albums) | [↓ View](#media---advanced-media-download-system) |
 | **[Imgur]** | 3 | Imgur API configuration (optional) | [↓ View](#imgur---imgur-api-configuration) |
-| **[Recovery]** | 9 | Content recovery system (4-provider cascade) | [↓ View](#recovery---content-recovery-system) |
+| **[Recovery]** | 11 | Content recovery system (5-provider cascade) | [↓ View](#recovery---content-recovery-system) |
 | **[Retry]** | 7 | Retry queue management (exponential backoff) | [↓ View](#retry---retry-queue-configuration) |
 | **[Storage]** | 5 | Cloud storage backend (Dropbox, S3) | [↓ View](#storage---cloud-storage-backend) |
-| **Total** | **48 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
+| **Total** | **52 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
 
 **Quick Tips:**
 - 🔒 **Security First**: Use environment variables for credentials, not settings.ini
 - ⚡ **Performance**: `check_type=LOG`, `max_concurrent_downloads=3-5`
 - 💾 **Storage**: Configure `max_image_size`, `max_video_size`, `max_daily_storage_mb`
-- 🔄 **Recovery**: Enable all 4 providers for best deleted content recovery
+- 🔄 **Recovery**: Enable all 5 providers for best deleted content recovery
 - 📖 **Full Docs**: Each setting includes type, defaults, examples, and trade-offs
 
 ---
@@ -1365,9 +1365,10 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     - Expected files: `saved_posts.csv`, `saved_comments.csv`
   - **How It Works**:
     1. Reads post/comment IDs from CSV files
-    2. Fetches full content via Reddit API (one API call per item)
-    3. Saves with `GDPR_POST_` or `GDPR_COMMENT_` prefix
-    4. Respects rate limits (same 100 req/min as normal processing)
+    2. Fetches full content via Reddit API when credentials are available
+    3. In CSV-only mode, batches IDs through Arctic Shift and uses PullPush for archive records Arctic Shift does not return
+    4. Saves with `GDPR_POST_` or `GDPR_COMMENT_` prefix
+    5. Respects API and archive rate limits
   - **GDPR Export Process**:
     1. Visit https://www.reddit.com/settings/data-request
     2. Request data (takes 2-30 days to process)
@@ -1376,8 +1377,8 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     5. Place in `{save_directory}/gdpr_data/`
   - **Performance Impact**:
     - Processes AFTER regular API content
-    - Each item requires separate API call
-    - 1000 GDPR items ≈ 10-15 additional minutes
+    - API mode makes one Reddit API call per item
+    - CSV-only mode batches up to 500 IDs per archive request
   - **Deduplication**: Items already in log are skipped (no duplicates)
   - **Examples**:
     ```ini
@@ -2113,8 +2114,9 @@ recover_deleted = true                 # Attempt recovery of deleted content
 
 ```ini
 [Recovery]
-# Recovery providers (4-provider cascade)
+# Recovery providers (5-provider cascade)
 use_wayback_machine = true             # Internet Archive Wayback Machine
+use_arctic_shift = true                # Archived Reddit posts and comments
 use_pushshift_api = true               # PullPush.io (Pushshift successor) 
 use_reddit_previews = true             # Reddit's preview/thumbnail system
 use_reveddit_api = true                # Reveddit deleted content recovery
@@ -2132,7 +2134,7 @@ enable_background_cleanup = true       # Automatic cache maintenance
 
 #### Content Recovery Explained:
 
-Reddit Stash includes a sophisticated 4-provider cascade system that attempts to recover deleted, removed, or unavailable content.
+Reddit Stash includes a 5-provider cascade that attempts to recover deleted, removed, or unavailable content.
 
 #### Recovery Provider Settings:
 
@@ -2150,6 +2152,17 @@ Reddit Stash includes a sophisticated 4-provider cascade system that attempts to
     ```ini
     use_wayback_machine = true   # Enable (recommended)
     use_wayback_machine = false  # Disable to save time
+    ```
+
+* **`use_arctic_shift`** - Use Arctic Shift for archived Reddit post and comment text
+  - **Type**: Boolean
+  - **Default**: `true`
+  - **Use Case**: Recovers archived Reddit text for CSV-only GDPR exports and deleted Reddit permalinks
+  - **Note**: Archived titles and post/comment bodies are included in CSV-only Markdown exports. No media file is downloaded.
+  - **Examples**:
+    ```ini
+    use_arctic_shift = true   # Enable archive-backed text recovery
+    use_arctic_shift = false  # Disable third-party archive lookups
     ```
 
 * **`use_pushshift_api`** - Use PullPush.io (Pushshift successor)
@@ -2716,7 +2729,7 @@ The storage system lets you sync your Reddit archive to a cloud provider. Curren
 
 ### Settings Index (Alphabetical)
 
-Quick alphabetical reference of all 43 settings with links to detailed documentation:
+Quick alphabetical reference of all 52 settings with links to detailed documentation:
 
 #### A-C
 - **`base_retry_delay_high`** (Integer, default: 5) - High-priority retry delay | [→ Retry Section](#priority-based-delay-settings)
@@ -2772,6 +2785,7 @@ Quick alphabetical reference of all 43 settings with links to detailed documenta
 - **`thumbnail_size`** (Integer, default: 800) - Thumbnail dimensions in pixels | [→ Media Section](#media-settings-explained)
 - **`timeout_seconds`** (Integer, default: 10) - Per-provider recovery timeout | [→ Recovery Section](#recovery-performance-settings)
 - **`unsave_after_download`** (Boolean, default: false) - Auto-unsave after download | [→ Settings Section](#core-settings-explained)
+- **`use_arctic_shift`** (Boolean, default: true) - Use Arctic Shift archive provider | [→ Recovery Section](#recovery-provider-settings)
 - **`use_pushshift_api`** (Boolean, default: true) - Use PullPush.io provider | [→ Recovery Section](#recovery-provider-settings)
 - **`use_reddit_previews`** (Boolean, default: true) - Use Reddit preview system | [→ Recovery Section](#recovery-provider-settings)
 - **`use_reveddit_api`** (Boolean, default: true) - Use Reveddit provider | [→ Recovery Section](#recovery-provider-settings)
@@ -2922,7 +2936,7 @@ If you can't obtain API credentials, you can still create a structured index of 
    python reddit_stash.py
    ```
 
-In CSV-only mode, the script creates markdown files with Reddit links for each saved item, organized by subreddit. This gives you a searchable index of your saved content. If you later obtain API credentials, you can re-run with `process_api = true` to fetch full content for each item.
+In CSV-only mode, the script creates Markdown files with Reddit links for each saved item, organized by subreddit. It also adds archived titles and post or comment bodies from Arctic Shift when available, with PullPush as a fallback. No media file is downloaded from archive text. If you later obtain API credentials, you can re-run with `process_api = true` to fetch full content for each item.
 
 #### Setting Up Reddit Environment Variables
 
@@ -3521,16 +3535,17 @@ The script can process Reddit's GDPR data export to access your complete saved p
    ```
 
 #### Technical Details:
-- Uses PRAW's built-in rate limiting
+- Uses PRAW's built-in rate limiting when API credentials are available
+- Uses Arctic Shift batches and PullPush fallback for archived CSV-only text
 - Processes both submissions and comments
 - Maintains consistent file naming with "GDPR_" prefix
 - Integrates with existing file logging system
-- Handles API errors and retries gracefully
+- Handles API and archive errors gracefully
 
 #### Important Notes:
-- GDPR processing runs after regular API processing
-- Each item requires a separate API call to fetch full content
-- Rate limits are shared with regular API processing
+- GDPR processing runs after regular API processing when API mode is enabled
+- API mode fetches each item separately, while CSV-only mode batches archive IDs
+- API rate limits are shared with regular API processing
 - Large exports may take significant time to process
 - Duplicate items are automatically skipped via file logging
 
@@ -3628,7 +3643,7 @@ Feel free to open issues or submit pull requests if you have any improvements or
 Have an idea for improving Reddit Stash? Feel free to suggest it in the issues or contribute a pull request!
 
 **✅ Recently Implemented:**
-- **Content Recovery System** - 4-provider cascade for failed downloads (Wayback Machine, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs
+- **Content Recovery System** - 5-provider cascade for failed downloads and archived Reddit text (Wayback Machine, Arctic Shift, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs
 - **Advanced Media Download System** - Modern web compatibility with HTTP/2 support and browser impersonation
 - **Comprehensive Rate Limiting** - Multi-layer rate limiting with provider-specific limits and intelligent backoff
 

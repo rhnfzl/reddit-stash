@@ -18,6 +18,7 @@ from .recovery_metadata import (
 from .cache_manager import RecoveryCacheManager
 from .providers import (
     WaybackMachineProvider,
+    ArcticShiftProvider,
     PullPushProvider,
     RedditPreviewProvider,
     RevedditProvider
@@ -67,6 +68,10 @@ class ContentRecoveryService:
         if recovery_config.get('use_wayback_machine', True):
             self.providers[RecoverySource.WAYBACK_MACHINE] = WaybackMachineProvider(timeout)
             self._logger.debug("Initialized Wayback Machine provider")
+
+        if recovery_config.get('use_arctic_shift', True):
+            self.providers[RecoverySource.ARCTIC_SHIFT] = ArcticShiftProvider(timeout)
+            self._logger.debug("Initialized Arctic Shift provider")
 
         if recovery_config.get('use_pushshift_api', True):
             self.providers[RecoverySource.PULLPUSH_IO] = PullPushProvider(timeout)
@@ -158,7 +163,8 @@ class ContentRecoveryService:
                 RecoveryQuality.METADATA_ONLY: 0,
             }
             provider_priorities = {
-                RecoverySource.WAYBACK_MACHINE: 4,
+                RecoverySource.WAYBACK_MACHINE: 5,
+                RecoverySource.ARCTIC_SHIFT: 4,
                 RecoverySource.PULLPUSH_IO: 3,
                 RecoverySource.REDDIT_PREVIEWS: 2,
                 RecoverySource.REVEDDIT: 1,
@@ -214,6 +220,7 @@ class ContentRecoveryService:
         # Define provider order (most reliable first)
         provider_order = [
             RecoverySource.WAYBACK_MACHINE,    # Most reliable, no rate limits
+            RecoverySource.ARCTIC_SHIFT,        # Current Reddit text archive
             RecoverySource.PULLPUSH_IO,        # Good for Reddit content
             RecoverySource.REDDIT_PREVIEWS,    # Lower quality but sometimes works
             RecoverySource.REVEDDIT            # Specific to moderator deletions
@@ -267,7 +274,8 @@ class ContentRecoveryService:
         """Collect parallel recovery results and select the highest-quality result."""
 
         provider_priorities = {
-            RecoverySource.WAYBACK_MACHINE: 4,
+            RecoverySource.WAYBACK_MACHINE: 5,
+            RecoverySource.ARCTIC_SHIFT: 4,
             RecoverySource.PULLPUSH_IO: 3,
             RecoverySource.REDDIT_PREVIEWS: 2,
             RecoverySource.REVEDDIT: 1,

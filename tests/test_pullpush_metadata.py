@@ -27,7 +27,39 @@ class _FailingDownloader:
         )
 
 
+class _Response:
+    def __init__(self, data):
+        self._data = data
+        self.status_code = 200
+        self.headers = {}
+
+    def json(self):
+        return self._data
+
+    def raise_for_status(self):
+        return None
+
+
+class _Session:
+    def __init__(self):
+        self.headers = {}
+        self.calls = []
+
+    def get(self, url, params, timeout):
+        self.calls.append((url, params, timeout))
+        return _Response({'data': [{'id': 'abc123', 'title': 'Archived title'}]})
+
+
 class TestPullPushMetadataRecovery(unittest.TestCase):
+    def test_batch_metadata_lookup_returns_records_by_id(self):
+        provider = PullPushProvider()
+        provider.session = _Session()
+
+        records = provider.fetch_metadata_by_ids('posts', ['abc123'])
+
+        self.assertEqual(records['abc123']['title'], 'Archived title')
+        self.assertEqual(provider.session.calls[0][1]['ids'], 'abc123')
+
     def test_archived_submission_is_successful_metadata_without_media_url(self):
         provider = PullPushProvider()
         pullpush_data = {

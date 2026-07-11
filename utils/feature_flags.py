@@ -109,6 +109,7 @@ class MediaFeatureConfig:
         """Get content recovery configuration."""
         return {
             'use_wayback_machine': self.config_parser.getboolean('Recovery', 'use_wayback_machine', fallback=True),
+            'use_arctic_shift': self.config_parser.getboolean('Recovery', 'use_arctic_shift', fallback=True),
             'use_pushshift_api': self.config_parser.getboolean('Recovery', 'use_pushshift_api', fallback=True),
             'use_reddit_previews': self.config_parser.getboolean('Recovery', 'use_reddit_previews', fallback=True),
             'use_reveddit_api': self.config_parser.getboolean('Recovery', 'use_reveddit_api', fallback=False),
