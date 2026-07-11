@@ -60,6 +60,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
         )
         self._current_client_index = 0
         self._client_lock = threading.Lock()
+        self._last_api_retry_after = 60
 
     def can_handle(self, url: str) -> bool:
         """Check if this service can handle the given URL."""
@@ -195,6 +196,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             self._rotate_client_id()
 
         rate_limit_manager.report_response(self.config.name.lower(), 429, retry_seconds)
+        self._last_api_retry_after = retry_seconds
         return None
 
     def _get_metadata_direct_api(self, imgur_id: str, media_type: str, original_url: str) -> Optional[MediaMetadata]:
@@ -295,7 +297,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
                     error_message="Imgur API rate limit exceeded (all client IDs exhausted)",
-                    retry_after=60
+                    retry_after=self._last_api_retry_after,
                 )
 
             if response.status_code == 404:
@@ -431,7 +433,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
                     error_message="Imgur rate limit exceeded (all client IDs exhausted)",
-                    retry_after=60
+                    retry_after=self._last_api_retry_after,
                 )
 
             response.raise_for_status()

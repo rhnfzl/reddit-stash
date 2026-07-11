@@ -58,6 +58,20 @@ class TestImgurDirectApi(unittest.TestCase):
         final_limited.close.assert_called_once_with()
         report.assert_called_once_with('imgur', 429, 45)
 
+    def test_api_download_preserves_final_retry_after_value(self):
+        downloader = ImgurMediaDownloader(
+            ServiceConfig(name='Imgur', api_keys={'client_ids': ['client-id']})
+        )
+        rate_limited = Mock(status_code=429, headers={'Retry-After': '45'})
+
+        with patch.object(downloader, '_respect_rate_limit'):
+            with patch.object(downloader._session, 'get', return_value=rate_limited):
+                with patch('utils.media_services.imgur_media.rate_limit_manager.report_response'):
+                    result = downloader._download_image_via_api('abc123', '/tmp/image.jpg')
+
+        self.assertEqual(result.status, DownloadStatus.RATE_LIMITED)
+        self.assertEqual(result.retry_after, 45)
+
     def test_configured_image_download_uses_direct_api(self):
         downloader = ImgurMediaDownloader(
             ServiceConfig(name='Imgur', api_keys={'client_ids': ['client-id']})
