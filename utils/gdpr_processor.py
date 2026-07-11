@@ -289,6 +289,20 @@ def _fetch_from_archive(ids, content_type, archive_client, archive_fallback=None
     return normalized_records
 
 
+def _fetch_reddit_items(reddit, item_ids, fullname_prefix):
+    """Fetch GDPR items in Reddit's 100-item fullnames batches."""
+    items = {}
+    normalized_ids = [_archive_id(item_id) for item_id in item_ids]
+    for start in range(0, len(normalized_ids), 100):
+        batch_ids = normalized_ids[start:start + 100]
+        try:
+            for item in reddit.info(fullnames=[f'{fullname_prefix}_{item_id}' for item_id in batch_ids]):
+                items[str(item.id)] = item
+        except Exception as error:
+            logger.warning('GDPR batch lookup failed: %s', error)
+    return items
+
+
 def process_gdpr_export(
     reddit,
     save_directory,
@@ -329,6 +343,7 @@ def process_gdpr_export(
             _fetch_from_archive(df['id'].tolist(), 'posts', archive_client, archive_fallback)
             if csv_only_mode else {}
         )
+        reddit_posts = _fetch_reddit_items(reddit, df['id'].tolist(), 't3') if not csv_only_mode else {}
 
         for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing GDPR Posts"):
             try:
@@ -347,8 +362,8 @@ def process_gdpr_export(
                         processed_count += count
                         total_size += size
                 else:
-                    # Get full submission data using the ID
-                    submission = reddit.submission(id=row['id'])
+                    item_id = _archive_id(row['id'])
+                    submission = reddit_posts.get(item_id) or reddit.submission(id=item_id)
                     # Use secure path creation to prevent directory traversal
                     path_result = create_reddit_file_path(
                         save_directory, submission.subreddit.display_name, "GDPR_POST", submission.id
@@ -392,6 +407,7 @@ def process_gdpr_export(
             _fetch_from_archive(df['id'].tolist(), 'comments', archive_client, archive_fallback)
             if csv_only_mode else {}
         )
+        reddit_comments = _fetch_reddit_items(reddit, df['id'].tolist(), 't1') if not csv_only_mode else {}
 
         for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing GDPR Comments"):
             try:
@@ -410,8 +426,8 @@ def process_gdpr_export(
                         processed_count += count
                         total_size += size
                 else:
-                    # Get full comment data using the ID
-                    comment = reddit.comment(id=row['id'])
+                    item_id = _archive_id(row['id'])
+                    comment = reddit_comments.get(item_id) or reddit.comment(id=item_id)
                     # Use secure path creation to prevent directory traversal
                     path_result = create_reddit_file_path(
                         save_directory, comment.subreddit.display_name, "GDPR_COMMENT", comment.id

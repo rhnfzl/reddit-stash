@@ -24,6 +24,12 @@ class TestGdprExportProcessing(unittest.TestCase):
             csv.DictWriter(export_file, fieldnames=['id']).writeheader()
             csv.DictWriter(export_file, fieldnames=['id']).writerow({'id': item_id})
 
+    def _write_export_rows(self, filename, item_ids):
+        with (self.gdpr_directory / filename).open('w', newline='', encoding='utf-8') as export_file:
+            writer = csv.DictWriter(export_file, fieldnames=['id'])
+            writer.writeheader()
+            writer.writerows({'id': item_id} for item_id in item_ids)
+
     def _reddit_item(self, item_id, *, is_submission):
         item = Mock()
         item.id = item_id
@@ -41,7 +47,7 @@ class TestGdprExportProcessing(unittest.TestCase):
     def test_saved_submission_tuple_result_is_unpacked(self):
         self._write_export('saved_posts.csv', 'post123')
         reddit = Mock()
-        reddit.submission.return_value = self._reddit_item('post123', is_submission=True)
+        reddit.info.return_value = [self._reddit_item('post123', is_submission=True)]
 
         with patch('utils.gdpr_processor.save_to_file', return_value=(False, 0)):
             with patch('utils.gdpr_processor.os.path.getsize', return_value=42):
@@ -49,11 +55,12 @@ class TestGdprExportProcessing(unittest.TestCase):
                     processed, skipped, total_size = self._process(reddit)
 
         self.assertEqual((processed, skipped, total_size), (1, 0, 42))
+        reddit.submission.assert_not_called()
 
     def test_saved_comment_tuple_result_is_unpacked(self):
         self._write_export('saved_comments.csv', 'comment123')
         reddit = Mock()
-        reddit.comment.return_value = self._reddit_item('comment123', is_submission=False)
+        reddit.info.return_value = [self._reddit_item('comment123', is_submission=False)]
 
         with patch('utils.gdpr_processor.save_to_file', return_value=(False, 0)):
             with patch('utils.gdpr_processor.os.path.getsize', return_value=42):
@@ -61,11 +68,12 @@ class TestGdprExportProcessing(unittest.TestCase):
                     processed, skipped, total_size = self._process(reddit)
 
         self.assertEqual((processed, skipped, total_size), (1, 0, 42))
+        reddit.comment.assert_not_called()
 
     def test_already_saved_submission_is_skipped(self):
         self._write_export('saved_posts.csv', 'post123')
         reddit = Mock()
-        reddit.submission.return_value = self._reddit_item('post123', is_submission=True)
+        reddit.info.return_value = [self._reddit_item('post123', is_submission=True)]
 
         with patch('utils.gdpr_processor.save_to_file', return_value=(True, 0)):
             with patch('utils.gdpr_processor.dynamic_sleep') as sleep:
@@ -73,6 +81,23 @@ class TestGdprExportProcessing(unittest.TestCase):
 
         self.assertEqual((processed, skipped, total_size), (0, 1, 0))
         sleep.assert_not_called()
+
+    def test_saved_posts_are_fetched_in_one_info_batch(self):
+        self._write_export_rows('saved_posts.csv', ['post123', 'post456'])
+        reddit = Mock()
+        reddit.info.return_value = [
+            self._reddit_item('post123', is_submission=True),
+            self._reddit_item('post456', is_submission=True),
+        ]
+
+        with patch('utils.gdpr_processor.save_to_file', return_value=(False, 0)):
+            with patch('utils.gdpr_processor.os.path.getsize', return_value=42):
+                with patch('utils.gdpr_processor.dynamic_sleep'):
+                    processed, skipped, total_size = self._process(reddit)
+
+        self.assertEqual((processed, skipped, total_size), (2, 0, 84))
+        reddit.info.assert_called_once_with(fullnames=['t3_post123', 't3_post456'])
+        reddit.submission.assert_not_called()
 
 
 if __name__ == '__main__':
