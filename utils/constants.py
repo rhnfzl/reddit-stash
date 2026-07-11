@@ -93,6 +93,15 @@ VALID_AUDIO_EXTENSIONS = {
     '.mp3', '.m4a', '.wav', '.ogg', '.flac'
 }
 
+# Incremental Fetch
+# Reddit listings are newest-first, so new items cluster at the front. During a
+# fetch we stop paginating once we have seen this many CONSECUTIVE already-saved
+# items. A streak that long means we are past the recently-touched region; the
+# rest of the listing is older and already backed up. This is intentionally
+# larger than Reddit's 100-item page so a handful of re-saved/re-voted old items
+# (which jump to the front) can never hide a genuinely new item behind them.
+EARLY_STOP_KNOWN_STREAK = 100
+
 # User Agent
 DEFAULT_USER_AGENT = "Reddit Stash Media Downloader/1.0"
 CHROME_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"

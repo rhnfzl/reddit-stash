@@ -130,7 +130,7 @@ class ConfigValidator:
         # Note: We don't validate Reddit credentials here since env_config.py handles that
         # with proper environment variable fallbacks. Just check format.
 
-        config_keys = ['client_id', 'client_secret', 'username', 'password']
+        config_keys = ['client_id', 'client_secret', 'username', 'password', 'refresh_token']
         for key in config_keys:
             value = self.config_parser.get('Configuration', key, fallback=None)
             if value and value.isspace():

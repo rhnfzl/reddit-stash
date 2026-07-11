@@ -12,6 +12,7 @@ from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
 from utils.path_security import create_safe_path, create_reddit_file_path
 from utils.praw_helpers import safe_fetch_items_one_by_one
+from utils.constants import EARLY_STOP_KNOWN_STREAK
 
 
 logger = logging.getLogger(__name__)
@@ -187,19 +188,73 @@ def _clone_reddit(reddit):
     Each thread needs its own instance with separate OAuth token and rate limit budget.
     """
     import praw
-    return praw.Reddit(
-        client_id=reddit.config.client_id,
-        client_secret=reddit.config.client_secret,
-        username=reddit.config.username,
-        password=reddit.config.password,
-        user_agent=reddit.config.user_agent,
-    )
+    kwargs = {
+        'client_id': reddit.config.client_id,
+        'client_secret': reddit.config.client_secret,
+        'user_agent': reddit.config.user_agent,
+    }
+    refresh_token = getattr(reddit.config, 'refresh_token', None)
+    if refresh_token:
+        kwargs['refresh_token'] = refresh_token
+    else:
+        kwargs['username'] = reddit.config.username
+        kwargs['password'] = reddit.config.password
+    return praw.Reddit(**kwargs)
 
 
-def _fetch_items(reddit_instance, fetch_method_name, limit, label):
+# Maps each fetch endpoint's returned item types to the unique-key category used
+# when saving, so incremental fetch can recognize already-saved items. Must stay
+# in sync with the category / sub_category / comment_category values passed to the
+# processors in save_user_activity below.
+_FETCH_CATEGORY_MAPS = {
+    'submission': {'Submission': 'POST'},
+    'comment': {'Comment': 'COMMENT'},
+    'saved': {'Submission': 'SAVED_POST', 'Comment': 'SAVED_COMMENT'},
+    'upvoted': {'Submission': 'UPVOTE_POST', 'Comment': 'UPVOTE_COMMENT'},
+}
+
+
+def _collect_until_known(items_iter, existing_files, category_map):
+    """Materialize a PRAW listing, stopping early once we are past the new items.
+
+    Listings are newest-first, so genuinely new items sit at the front. Once we
+    have seen EARLY_STOP_KNOWN_STREAK consecutive items already in existing_files
+    we are safely past the recently-touched region and can skip fetching the
+    remaining (older, already-saved) pages. Without dedup context we fall back to
+    consuming the whole listing, preserving the previous behaviour.
+    """
+    if not existing_files or not category_map:
+        return list(items_iter)
+
+    items = []
+    known_streak = 0
+    for item in items_iter:
+        items.append(item)
+        category = category_map.get(type(item).__name__)
+        if category is None:
+            known_streak = 0
+            continue
+        try:
+            unique_key = f"{item.id}-{item.subreddit.display_name}-{type(item).__name__}-{category}"
+        except Exception:
+            known_streak = 0  # can't judge this item; keep fetching to stay safe
+            continue
+        if unique_key in existing_files:
+            known_streak += 1
+            if known_streak >= EARLY_STOP_KNOWN_STREAK:
+                break
+        else:
+            known_streak = 0
+    return items
+
+
+def _fetch_items(reddit_instance, fetch_method_name, limit, label,
+                 existing_files=None, category_map=None):
     """Fetch items from a PRAW user endpoint with batch-then-one-by-one fallback.
 
-    Uses its own PRAW instance for thread-safe parallel fetching.
+    Uses its own PRAW instance for thread-safe parallel fetching. When
+    existing_files and category_map are provided, stops paginating early once it
+    passes the already-saved items (see _collect_until_known).
     """
     user = reddit_instance.user.me()
     if fetch_method_name in ('submissions', 'comments'):
@@ -209,7 +264,7 @@ def _fetch_items(reddit_instance, fetch_method_name, limit, label):
         items_iter = getattr(user, fetch_method_name)(limit=limit)
 
     try:
-        return list(items_iter)
+        return _collect_until_known(items_iter, existing_files, category_map)
     except prawcore.exceptions.NotFound:
         logger.warning(f"Batch fetch of {label} failed with 404, using safe iteration")
         if fetch_method_name in ('submissions', 'comments'):
@@ -408,7 +463,8 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
             futures = {}
             for method, label in endpoints:
                 r = _clone_reddit(reddit)
-                futures[label] = pool.submit(_fetch_items, r, method, 1000, label)
+                futures[label] = pool.submit(_fetch_items, r, method, 1000, label,
+                                             existing_files, _FETCH_CATEGORY_MAPS[label])
             for label, future in futures.items():
                 fetched[label] = future.result()
 
@@ -449,8 +505,10 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
         with ThreadPoolExecutor(max_workers=2) as pool:
             r1 = _clone_reddit(reddit)
             r2 = _clone_reddit(reddit)
-            f_sub = pool.submit(_fetch_items, r1, 'submissions', 1000, 'submission')
-            f_com = pool.submit(_fetch_items, r2, 'comments', 1000, 'comment')
+            f_sub = pool.submit(_fetch_items, r1, 'submissions', 1000, 'submission',
+                                existing_files, _FETCH_CATEGORY_MAPS['submission'])
+            f_com = pool.submit(_fetch_items, r2, 'comments', 1000, 'comment',
+                                existing_files, _FETCH_CATEGORY_MAPS['comment'])
             submissions = f_sub.result()
             comments = f_com.result()
 
@@ -469,14 +527,16 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
             )
 
     elif save_type == 'SAVED':
-        saved_items = _fetch_items(reddit, 'saved', 1000, 'saved')
+        saved_items = _fetch_items(reddit, 'saved', 1000, 'saved',
+                                   existing_files, _FETCH_CATEGORY_MAPS['saved'])
         processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
             saved_items, sub_category="SAVED_POST", comment_category="SAVED_COMMENT",
             unsave=unsave, tqdm_desc="Saved Items", **shared_args
         )
 
     elif save_type == 'UPVOTED':
-        upvoted_items = _fetch_items(reddit, 'upvoted', 1000, 'upvoted')
+        upvoted_items = _fetch_items(reddit, 'upvoted', 1000, 'upvoted',
+                                     existing_files, _FETCH_CATEGORY_MAPS['upvoted'])
         processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
             upvoted_items, sub_category="UPVOTE_POST", comment_category="UPVOTE_COMMENT",
             tqdm_desc="Upvoted Items", **shared_args

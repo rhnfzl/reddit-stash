@@ -16,43 +16,47 @@ def load_config_and_env():
     # Read the settings.ini file
     config_parser.read(config_file_path)
 
-    # Load from settings.ini, but treat "None" or empty strings as invalid
-    client_id = config_parser.get('Configuration', 'client_id', fallback=None)
-    client_secret = config_parser.get('Configuration', 'client_secret', fallback=None)
-    username = config_parser.get('Configuration', 'username', fallback=None)
-    password = config_parser.get('Configuration', 'password', fallback=None)
+    # Load from settings.ini, falling back to env vars; treat "None"/empty as unset.
+    def _load(key, env):
+        value = config_parser.get('Configuration', key, fallback=None)
+        return value if value and value not in invalid_config else os.getenv(env)
 
-    # If the values from the config are "None" (as strings) or empty, fallback to environment variables
-    client_id = client_id if client_id and client_id not in invalid_config else os.getenv('REDDIT_CLIENT_ID')
-    client_secret = client_secret if client_secret and client_secret not in invalid_config else os.getenv('REDDIT_CLIENT_SECRET')
-    username = username if username and username not in invalid_config else os.getenv('REDDIT_USERNAME')
-    password = password if password and password not in invalid_config else os.getenv('REDDIT_PASSWORD')
+    client_id = _load('client_id', 'REDDIT_CLIENT_ID')
+    client_secret = _load('client_secret', 'REDDIT_CLIENT_SECRET')
+    username = _load('username', 'REDDIT_USERNAME')
+    password = _load('password', 'REDDIT_PASSWORD')
+    refresh_token = _load('refresh_token', 'REDDIT_REFRESH_TOKEN')
 
-    # Check if any required credentials are still missing
-    if not all([client_id, client_secret, username, password]):
+    # Two auth modes: a refresh_token (preferred - no password in secrets, survives)
+    # OR username+password. client_id/client_secret are required either way.
+    have_token_auth = all([client_id, client_secret, refresh_token])
+    have_password_auth = all([client_id, client_secret, username, password])
+
+    if not (have_token_auth or have_password_auth):
         missing = []
         if not client_id:
             missing.append("REDDIT_CLIENT_ID")
         if not client_secret:
             missing.append("REDDIT_CLIENT_SECRET")
-        if not username:
-            missing.append("REDDIT_USERNAME")
-        if not password:
-            missing.append("REDDIT_PASSWORD")
+        if not refresh_token and not (username and password):
+            missing.append("REDDIT_REFRESH_TOKEN (or REDDIT_USERNAME + REDDIT_PASSWORD)")
 
         msg = (
             f"Missing Reddit API credentials: {', '.join(missing)}\n\n"
             "Since November 2025, Reddit requires pre-approval to create new API apps.\n"
             "If you need new credentials, apply here (2-4 week wait):\n"
             "  https://support.reddithelp.com/hc/en-us/requests/new?ticket_form_id=14868593862164\n\n"
-            "Existing credentials (created before Nov 2025) still work normally.\n"
-            "Set credentials via environment variables (REDDIT_CLIENT_ID, etc.) or in settings.ini.\n\n"
+            "Existing credentials (created before Nov 2025) still work normally.\n\n"
+            "Auth options:\n"
+            "  1. REDDIT_REFRESH_TOKEN (preferred) - run get_refresh_token.py once to mint it.\n"
+            "  2. REDDIT_USERNAME + REDDIT_PASSWORD.\n"
+            "Set credentials via environment variables or in settings.ini.\n\n"
             "Alternative: Set process_api=false and process_gdpr=true in settings.ini\n"
             "to process your Reddit GDPR export data without API credentials."
         )
         raise Exception(msg)
 
-    return client_id, client_secret, username, password
+    return client_id, client_secret, username, password, refresh_token
 
 def get_ignore_tls_errors():
     """Load the ignore_tls_errors setting from settings.ini."""

@@ -8,6 +8,22 @@ from utils.gdpr_processor import process_gdpr_export
 from utils.config_validator import validate_configuration
 from utils.feature_flags import get_feature_summary
 
+def _connect_reddit(client_id, client_secret, username, password, refresh_token):
+    """Build a PRAW client. Prefer refresh_token (no password in secrets, long-lived);
+    fall back to username+password."""
+    kwargs = {
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'user_agent': f'Reddit Saved Saver by /u/{username or "reddit-stash"}',
+    }
+    if refresh_token:
+        kwargs['refresh_token'] = refresh_token
+    else:
+        kwargs['username'] = username
+        kwargs['password'] = password
+    return praw.Reddit(**kwargs)
+
+
 def main():
     # Validate configuration before proceeding
     print("Validating configuration...")
@@ -44,25 +60,11 @@ def main():
     # Initialize Reddit API connection (only if API processing is needed)
     reddit = None
     if process_api:
-        client_id, client_secret, username, password = load_config_and_env()
-        reddit = praw.Reddit(
-            client_id=client_id,
-            client_secret=client_secret,
-            username=username,
-            password=password,
-            user_agent=f'Reddit Saved Saver by /u/{username}'
-        )
+        reddit = _connect_reddit(*load_config_and_env())
     elif process_gdpr:
         # Try to load credentials for GDPR enrichment, but don't fail if missing
         try:
-            client_id, client_secret, username, password = load_config_and_env()
-            reddit = praw.Reddit(
-                client_id=client_id,
-                client_secret=client_secret,
-                username=username,
-                password=password,
-                user_agent=f'Reddit Saved Saver by /u/{username}'
-            )
+            reddit = _connect_reddit(*load_config_and_env())
         except Exception:
             print("No API credentials available. GDPR export will run in CSV-only mode.")
             reddit = None
@@ -113,6 +115,15 @@ def main():
     print(f"Markdown file storage: {total_size / (1024 * 1024):.2f} MB")
     print(f"Media file storage: {total_media_size / (1024 * 1024):.2f} MB")
     print(f"Total combined storage: {(total_size + total_media_size) / (1024 * 1024):.2f} MB")
+
+    # Build a browsable/searchable index.html over the backup. Best-effort:
+    # indexing must never fail the backup run (the saved data is what matters).
+    # ponytail: unconditional; add a settings.ini toggle only if someone asks.
+    try:
+        import generate_index
+        generate_index.main([save_directory])
+    except Exception as e:
+        print(f"Index generation skipped: {e}")
 
 if __name__ == "__main__":
     main()
