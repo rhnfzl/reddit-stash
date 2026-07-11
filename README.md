@@ -1987,7 +1987,6 @@ max_daily_storage_mb = 1024           # Daily storage limit in MB
 [Imgur]
 # Optional: Comma-separated client IDs for rate limit rotation
 client_ids = None                      # Multiple Imgur client IDs
-client_secrets = None                  # Corresponding client secrets  
 recover_deleted = true                 # Attempt recovery of deleted content
 ```
 
@@ -2039,44 +2038,6 @@ recover_deleted = true                 # Attempt recovery of deleted content
     export IMGUR_CLIENT_ID='abc123def456'       # Single app only
     ```
   - **⚠️ Important**: Multiple client ID rotation is **only supported in settings.ini**, not via environment variables. If you need rotation across multiple Imgur apps, you must use settings.ini configuration.
-
-* **`client_secrets`** - Imgur application client secrets
-  - **Type**: String (comma-separated list in settings.ini, single value in env var)
-  - **Default**: `None`
-  - **Valid Values**: 
-    - `None`: No Imgur API access
-    - Comma-separated secrets matching `client_ids` order (settings.ini only)
-  - **MUST MATCH** `client_ids`:
-    - If `client_ids` has 3 IDs, `client_secrets` must have 3 secrets
-    - Order matters: `client_ids[0]` pairs with `client_secrets[0]`
-  - **Format Rules**:
-    - Same as client_ids: no spaces
-    - Each secret is alphanumeric, typically 40 characters
-    - Keep these SECRET (never commit to version control!)
-  - **Security Warning**:
-    - These are sensitive credentials
-    - Environment variables recommended for single app
-    - Never share or expose publicly
-  - **Configuration Methods**:
-    
-    | Method | Single Secret | Multiple Secrets | Recommended |
-    |--------|--------------|------------------|-------------|
-    | **Environment Variable** | ✅ Yes | ❌ No | ✅ Most secure |
-    | **settings.ini** | ✅ Yes | ✅ Yes | ⚠️ Only if multiple apps |
-    
-  - **Examples**:
-    ```ini
-    # settings.ini - Multiple secrets supported
-    client_secrets = None                                                    # No API
-    client_secrets = abcdef1234567890abcdef1234567890abcdef12              # Single
-    client_secrets = secret1_40chars,secret2_40chars,secret3_40chars        # Multiple ⚠️ settings.ini only
-    ```
-    ```bash
-    # Environment variable - Single secret only (RECOMMENDED)
-    export IMGUR_CLIENT_SECRET='abcdef1234567890abcdef1234567890abcdef12'
-    ```
-  - **Validation**: Script checks that count matches `client_ids`
-  - **⚠️ Note**: Multiple client secrets are **only supported in settings.ini**. For single app (most users), use environment variable for better security.
 
 * **`recover_deleted`** - Attempt recovery of deleted/unavailable Imgur content
   - **Type**: Boolean
@@ -2713,7 +2674,7 @@ The storage system lets you sync your Reddit archive to a cloud provider. Curren
 
 ### Settings Index (Alphabetical)
 
-Quick alphabetical reference of all 52 settings with links to detailed documentation:
+Quick alphabetical reference of all 51 settings with links to detailed documentation:
 
 #### A-C
 - **`base_retry_delay_high`** (Integer, default: 5) - High-priority retry delay | [→ Retry Section](#priority-based-delay-settings)
@@ -2725,7 +2686,6 @@ Quick alphabetical reference of all 52 settings with links to detailed documenta
 - **`client_id`** (String, default: None) - Reddit API client ID | [→ Configuration Section](#api-configuration-settings)
 - **`client_ids`** (String, default: None) - Imgur client IDs (multiple in settings.ini only) | [→ Imgur Section](#imgur-settings-explained)
 - **`client_secret`** (String, default: None) - Reddit API client secret | [→ Configuration Section](#api-configuration-settings)
-- **`client_secrets`** (String, default: None) - Imgur client secrets (multiple in settings.ini only) | [→ Imgur Section](#imgur-settings-explained)
 - **`create_thumbnails`** (Boolean, default: true) - Generate thumbnail versions | [→ Media Section](#media-settings-explained)
 
 #### D-I

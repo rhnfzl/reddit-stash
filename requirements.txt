@@ -8,7 +8,6 @@ tqdm>=4.68.4                # Progress bars
 requests>=2.34.2            # HTTP library
 
 # Media download dependencies
-pyimgur>=0.8.1              # Imgur API integration
 urllib3>=2.7.0              # HTTP connection pooling
 curl-cffi>=0.13.0            # HTTP/2 + browser TLS fingerprinting
 tenacity>=9.1.4             # Intelligent retry strategies

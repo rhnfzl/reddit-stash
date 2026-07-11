@@ -158,9 +158,6 @@ class ConfigValidator:
             'bs4': 'beautifulsoup4',
             'html5lib': 'html5lib'
         }
-        # Note: imgurpython removed as it's deprecated and no longer maintained
-        # pyimgur is used instead for Imgur API integration
-
         missing_deps = []
         for module, package in optional_imports.items():
             try:
