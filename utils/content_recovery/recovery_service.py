@@ -61,6 +61,7 @@ class ContentRecoveryService:
         # Get recovery configuration
         recovery_config = self.config.get_recovery_config()
         timeout = recovery_config.get('timeout_seconds', 10)
+        self._parallel_timeout_seconds = timeout
 
         # Initialize providers based on configuration
         if recovery_config.get('use_wayback_machine', True):
@@ -311,7 +312,11 @@ class ContentRecoveryService:
                 # Process every completed result before choosing the best quality.
                 for future in as_completed(
                     future_to_source,
-                    timeout=PARALLEL_RECOVERY_TIMEOUT_SECONDS,
+                    timeout=getattr(
+                        self,
+                        '_parallel_timeout_seconds',
+                        PARALLEL_RECOVERY_TIMEOUT_SECONDS,
+                    ),
                 ):
                     source = future_to_source[future]
 

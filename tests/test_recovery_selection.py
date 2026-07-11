@@ -125,17 +125,30 @@ class TestParallelRecoverySelection(unittest.TestCase):
             delay=0.1,
         )
         service = self._service({RecoverySource.WAYBACK_MACHINE: provider})
+        service._parallel_timeout_seconds = 0.01
 
-        with patch(
-            'utils.content_recovery.recovery_service.PARALLEL_RECOVERY_TIMEOUT_SECONDS',
-            0.01,
-        ):
-            started_at = time.monotonic()
-            result = service._attempt_parallel_recovery('https://example.com/image.jpg', None)
-            duration = time.monotonic() - started_at
+        started_at = time.monotonic()
+        result = service._attempt_parallel_recovery('https://example.com/image.jpg', None)
+        duration = time.monotonic() - started_at
 
         self.assertFalse(result.success)
         self.assertLess(duration, 0.05)
+
+    def test_provider_timeout_configures_parallel_timeout(self):
+        service = ContentRecoveryService.__new__(ContentRecoveryService)
+        service.config = SimpleNamespace(
+            get_recovery_config=lambda: {
+                'timeout_seconds': 120,
+                'use_wayback_machine': False,
+                'use_arctic_shift': False,
+                'use_pushshift_api': False,
+            },
+        )
+        service._logger = SimpleNamespace(debug=lambda *_: None, warning=lambda *_: None)
+
+        service._init_providers()
+
+        self.assertEqual(service._parallel_timeout_seconds, 120)
 
 
 if __name__ == '__main__':
