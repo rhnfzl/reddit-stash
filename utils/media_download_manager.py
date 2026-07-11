@@ -9,6 +9,7 @@ Integrates Reddit, Imgur, and generic HTTP downloaders with the existing codebas
 import os
 import logging
 import threading
+import tempfile
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
@@ -53,6 +54,8 @@ class MediaDownloadManager:
 
         # Session-level URL tracking to prevent duplicate downloads
         self._downloaded_urls = {}  # {url: local_path}
+        # Content hashes point to the first local file for session-level media deduplication.
+        self._downloaded_content_hashes = {}
 
         # Persistent retry queue for cross-run recovery
         self._retry_queue = get_retry_queue()
@@ -86,6 +89,43 @@ class MediaDownloadManager:
         if url in self._permanent_failures:
             return True
         return self._transient_failures.get(url, 0) >= 2
+
+    def _deduplicate_download(self, result: DownloadResult) -> Optional[str]:
+        """Hard-link identical content to the first downloaded file when possible."""
+        local_path = result.local_path
+        content_hash = result.content_hash
+        if not local_path or not content_hash or not os.path.isfile(local_path):
+            return local_path
+
+        with self._url_lock:
+            canonical_path = self._downloaded_content_hashes.get(content_hash)
+            if canonical_path and canonical_path != local_path and os.path.isfile(canonical_path):
+                replacement_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        dir=os.path.dirname(local_path) or ".",
+                        delete=False,
+                    ) as replacement:
+                        replacement_path = replacement.name
+                    os.unlink(replacement_path)
+                    os.link(canonical_path, replacement_path)
+                    os.replace(replacement_path, local_path)
+                    self._logger.debug(
+                        "Hard-linked duplicate media %s to %s", local_path, canonical_path
+                    )
+                except OSError as error:
+                    self._logger.debug(
+                        "Could not hard-link duplicate media %s: %s", local_path, error
+                    )
+                    try:
+                        if replacement_path and os.path.exists(replacement_path):
+                            os.unlink(replacement_path)
+                    except OSError:
+                        pass
+            else:
+                self._downloaded_content_hashes[content_hash] = local_path
+
+        return local_path
 
     def _initialize_services(self):
         """Initialize all media download services."""
@@ -255,13 +295,14 @@ class MediaDownloadManager:
             )
 
             if result and result.is_success and result.local_path:
-                self._logger.debug(f"Successfully downloaded {url} to {result.local_path}")
+                local_path = self._deduplicate_download(result)
+                self._logger.debug(f"Successfully downloaded {url} to {local_path}")
                 # Track this URL as successfully downloaded in this session
                 with self._url_lock:
-                    self._downloaded_urls[url] = result.local_path
+                    self._downloaded_urls[url] = local_path
                 # Mark as successful in retry queue if it was a retry
                 self._retry_queue.mark_retry_completed(url, success=True)
-                return result.local_path
+                return local_path
             else:
                 error_msg = result.error_message if result else "Unknown error"
                 self._logger.warning(f"Failed to download {url}: {error_msg}")
@@ -299,13 +340,14 @@ class MediaDownloadManager:
                                     recovery_download_result = recovery_downloader.download(final_recovery_url, save_path)
                             if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                 self._logger.info(f"Successfully downloaded from recovered URL: {recovery_result.recovered_url}")
+                                local_path = self._deduplicate_download(recovery_download_result)
                                 # Track both original and recovered URLs as successfully downloaded
                                 with self._url_lock:
-                                    self._downloaded_urls[url] = recovery_download_result.local_path
-                                    self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
+                                    self._downloaded_urls[url] = local_path
+                                    self._downloaded_urls[recovery_result.recovered_url] = local_path
                                 # Mark original URL as successful in retry queue (recovery counts as success)
                                 self._retry_queue.mark_retry_completed(url, success=True)
-                                return recovery_download_result.local_path
+                                return local_path
                             else:
                                 recovery_error = recovery_download_result.error_message if recovery_download_result else "Unknown recovery download error"
                                 self._logger.warning(f"Failed to download from recovered URL: {recovery_error}")
@@ -358,13 +400,14 @@ class MediaDownloadManager:
                                 recovery_download_result = downloader.download(final_recovery_url, save_path)
                                 if recovery_download_result and recovery_download_result.is_success and recovery_download_result.local_path:
                                     self._logger.info(f"Successfully downloaded from recovered URL after exception: {recovery_result.recovered_url}")
+                                    local_path = self._deduplicate_download(recovery_download_result)
                                     # Track both original and recovered URLs as successfully downloaded
                                     with self._url_lock:
-                                        self._downloaded_urls[url] = recovery_download_result.local_path
-                                        self._downloaded_urls[recovery_result.recovered_url] = recovery_download_result.local_path
+                                        self._downloaded_urls[url] = local_path
+                                        self._downloaded_urls[recovery_result.recovered_url] = local_path
                                     # Mark original URL as successful in retry queue (recovery counts as success)
                                     self._retry_queue.mark_retry_completed(url, success=True)
-                                    return recovery_download_result.local_path
+                                    return local_path
                     elif recovery_result.success:
                         self._logger.info("Recovery produced archived metadata, not downloadable media")
                 except Exception as recovery_e:

@@ -784,6 +784,7 @@ class BaseHTTPDownloader:
             return DownloadResult(
                 status=DownloadStatus.SUCCESS,
                 local_path=fixed_save_path,
+                content_hash=integrity_result.checksum,
                 metadata=metadata,
                 bytes_downloaded=downloaded,
                 download_time=download_time

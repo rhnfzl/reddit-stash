@@ -245,6 +245,8 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                                     return video_result
                                 return replace(
                                     video_result,
+                                    # The merged file differs from the downloaded video stream.
+                                    content_hash=None,
                                     bytes_downloaded=video_result.bytes_downloaded + audio_result.bytes_downloaded,
                                 )
 

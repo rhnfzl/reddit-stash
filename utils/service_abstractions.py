@@ -56,6 +56,7 @@ class DownloadResult:
     """
     status: DownloadStatus
     local_path: Optional[str] = None
+    content_hash: Optional[str] = None
     metadata: Optional[MediaMetadata] = None
     error_message: Optional[str] = None
     retry_after: Optional[int] = None  # Seconds to wait before retry
