@@ -1,6 +1,6 @@
 # Reddit Stash: Automatically Save Reddit Posts and Comments to Local, Dropbox, or S3
 
-[![Python](https://img.shields.io/badge/Python-3.10--3.12-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11--3.13-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Workflow-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/features/actions)
 [![Docker](https://img.shields.io/badge/Docker-Available-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://github.com/rhnfzl/reddit-stash/pkgs/container/reddit-stash)
 [![Dropbox](https://img.shields.io/badge/Dropbox-Integration-0061FF?style=for-the-badge&logo=dropbox&logoColor=white)](https://www.dropbox.com/)
@@ -197,7 +197,7 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 |---------|---------------|-------------------|--------|
 | **Ease of Setup** | ⭐⭐⭐ (Easiest) | ⭐⭐ | ⭐⭐ |
 | **Automation** | ✅ Runs on schedule | ✅ Manual control or cron | ✅ Built-in scheduling support |
-| **Requirements** | GitHub account | Python 3.10-3.12 | Docker |
+| **Requirements** | GitHub account | Python 3.11-3.13 | Docker |
 | **Data Storage** | Dropbox or S3 | Local, Dropbox, or S3 | Local, Dropbox, or S3 |
 | **Maintenance** | Minimal | More hands-on | Low to Medium |
 | **Privacy** | Credentials in GitHub secrets | Credentials on local machine | Credentials in container |
@@ -240,7 +240,7 @@ Beyond text, Reddit Stash can download and preserve images, videos, and other me
 ## Setup
 
 ### Prerequisites
-- ✅ Python 3.10-3.12 (Python 3.12 recommended for best performance)
+- ✅ Python 3.11-3.13 (Python 3.13 recommended for best performance)
 - 🔑 Reddit API credentials
 - 📊 A cloud storage account (optional): Dropbox with API token, or an AWS account with S3 access
 
@@ -286,7 +286,7 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
    - You can adjust these times in the workflow file to match your timezone if needed.
 
 5. **Additional Workflows**: The repository includes automated workflows for maintenance and testing:
-   - `python-compatibility.yml`: Tests compatibility across Python versions 3.10-3.12
+   - `python-compatibility.yml`: Tests compatibility across Python versions 3.11-3.13
 
 #### Local Installation
 
@@ -435,7 +435,7 @@ docker run -d \
 |-----|-------------|----------|
 | `latest` | Latest stable from main branch | Production deployments |
 | `develop` | Development version | Testing new features |
-| `py3.10-latest`, `py3.11-latest`, `py3.12-latest` | Python-specific versions | Specific Python requirements |
+| `py3.11-latest`, `py3.12-latest`, `py3.13-latest` | Python-specific versions | Specific Python requirements |
 | `v1.0.0` | Semantic version tags | Version pinning |
 | `sha-abc123` | Commit-specific builds | Reproducible deployments |
 
@@ -1032,7 +1032,6 @@ docker build -t reddit-stash:local .
 
 # Or build with specific Python version
 docker build --build-arg PYTHON_VERSION=3.11 -t reddit-stash:py3.11 .
-docker build --build-arg PYTHON_VERSION=3.10 -t reddit-stash:py3.10 .
 ```
 
 **2. Run the Locally Built Image:**
@@ -1059,7 +1058,7 @@ docker run -d \
 
 #### Docker Notes:
 
-- **Python Support**: Build supports Python 3.10, 3.11, and 3.12 (3.12 is default)
+- **Python Support**: Build supports Python 3.11 through 3.13 (3.12 is default)
 - **Security**: The container runs as a non-root user for security
 - **Data Persistence**: Data is persisted through a volume mount (`-v $(pwd)/reddit:/app/reddit`) to your local machine
 - **Runtime Configuration**: Environment variables must be provided at runtime
@@ -1146,7 +1145,7 @@ After completing your chosen installation method, verify that everything is work
 - [ ] Content files are present and readable
 
 #### For Local Installation:
-- [ ] Python 3.10-3.12 installed and working (3.12 recommended)
+- [ ] Python 3.11-3.13 installed and working (3.13 recommended)
 - [ ] Repository cloned successfully
 - [ ] Dependencies installed via `pip install -r requirements.txt`
 - [ ] Environment variables set correctly
