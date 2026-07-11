@@ -38,6 +38,16 @@ class URLTransformer:
         # Registry of URL transformation patterns
         # Each tuple contains: (pattern, transform_function, platform_name, notes)
         self.transformations = [
+            # Reddit media wrapper: reddit.com/media?url=<percent-encoded direct asset URL>
+            # Reddit began serving an HTML interstitial over these links; unwrapping the
+            # `url` query parameter yields the direct i.redd.it/preview.redd.it asset.
+            (
+                r'^https?://(?:[\w-]+\.)*reddit\.com/media\?',
+                self._transform_reddit_media_unwrap,
+                'Reddit Media',
+                'Unwraps reddit.com/media?url= HTML wrapper to the direct asset URL'
+            ),
+
             # GitHub blob to raw
             (
                 r'github\.com/([^/]+)/([^/]+)/blob/(.+)',
@@ -173,6 +183,17 @@ class URLTransformer:
             return None
 
     # Transform functions for each platform
+
+    def _transform_reddit_media_unwrap(self, url: str, match: re.Match) -> str:
+        """Unwrap a reddit.com/media?url= wrapper to its direct asset URL.
+
+        The `url` query parameter holds the percent-encoded direct link (e.g. an
+        i.redd.it or preview.redd.it URL). parse_qs percent-decodes it for us.
+        Returns the original URL unchanged if the parameter is absent.
+        """
+        parsed = urlparse(url)
+        inner = parse_qs(parsed.query).get('url', [None])[0]
+        return inner or url
 
     def _transform_github_blob(self, url: str, match: re.Match) -> str:
         """Transform GitHub blob URL to raw.githubusercontent.com"""
