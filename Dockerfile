@@ -124,15 +124,17 @@ CMD ["reddit_stash.py"]
 #   -e DROPBOX_APP_KEY=your_dropbox_key \
 #   -e DROPBOX_APP_SECRET=your_dropbox_secret \
 #   -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+#   -e STORAGE_PROVIDER=dropbox \
 #   -v /path/on/host/reddit:/app/reddit \
-#   reddit-stash dropbox_utils.py --upload
+#   reddit-stash storage_utils.py --upload
 #
 # To run dropbox upload periodically:
 # docker run -it \
 #   -e DROPBOX_APP_KEY=your_dropbox_key \
 #   -e DROPBOX_APP_SECRET=your_dropbox_secret \
 #   -e DROPBOX_REFRESH_TOKEN=your_dropbox_token \
+#   -e STORAGE_PROVIDER=dropbox \
 #   -e SCHEDULE_MODE=periodic \
 #   -e SCHEDULE_INTERVAL=3600 \
 #   -v /path/on/host/reddit:/app/reddit \
-#   reddit-stash dropbox_utils.py --upload
+#   reddit-stash storage_utils.py --upload

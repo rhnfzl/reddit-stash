@@ -79,7 +79,7 @@ services:
     profiles:
       - storage
 
-  # Legacy Dropbox-only service (backward compatibility)
+  # Dropbox-only storage shortcut
   reddit-stash-dropbox:
     build: .
     container_name: reddit-stash-dropbox
@@ -87,6 +87,7 @@ services:
       DROPBOX_APP_KEY: ${DROPBOX_APP_KEY}
       DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET}
       DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN}
+      STORAGE_PROVIDER: dropbox
     volumes:
       - ./reddit:/app/reddit
     profiles:
@@ -99,4 +100,4 @@ services:
 # 4. Storage upload: docker-compose --profile storage run --rm reddit-stash-storage python storage_utils.py --upload
 # 5. Storage download: docker-compose --profile storage run --rm reddit-stash-storage python storage_utils.py --download
 # 6. Migrate: docker-compose --profile storage run --rm reddit-stash-storage python storage_utils.py --migrate --source dropbox --target s3 --execute
-# 7. Legacy Dropbox: docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --upload
+# 7. Dropbox shortcut: docker-compose --profile dropbox run --rm reddit-stash-dropbox python storage_utils.py --upload
