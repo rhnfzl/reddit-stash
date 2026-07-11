@@ -20,8 +20,6 @@ from .providers import (
     WaybackMachineProvider,
     ArcticShiftProvider,
     PullPushProvider,
-    RedditPreviewProvider,
-    RevedditProvider
 )
 from ..feature_flags import get_media_config
 from ..rate_limiter import rate_limit_manager
@@ -77,13 +75,15 @@ class ContentRecoveryService:
             self.providers[RecoverySource.PULLPUSH_IO] = PullPushProvider(timeout)
             self._logger.debug("Initialized PullPush.io provider")
 
-        if recovery_config.get('use_reddit_previews', True):
-            self.providers[RecoverySource.REDDIT_PREVIEWS] = RedditPreviewProvider(timeout)
-            self._logger.debug("Initialized Reddit Preview provider")
+        if recovery_config.get('use_reddit_previews', False):
+            self._logger.warning(
+                "Reddit preview recovery is disabled because no authoritative preview discovery is available"
+            )
 
-        if recovery_config.get('use_reveddit_api', True):
-            self.providers[RecoverySource.REVEDDIT] = RevedditProvider(timeout)
-            self._logger.debug("Initialized Reveddit provider")
+        if recovery_config.get('use_reveddit_api', False):
+            self._logger.warning(
+                "Reveddit recovery is disabled because public pages no longer expose archive content"
+            )
 
         if not self.providers:
             self._logger.warning("No recovery providers enabled")

@@ -12,12 +12,11 @@ Known Limitations:
 - URL encoding issues common
 """
 
-import hashlib
 import time
 import requests
 import logging
 from typing import Optional, Dict, Any
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse
 
 from ..recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
 from ...rate_limiter import rate_limited
@@ -121,50 +120,8 @@ class RedditPreviewProvider:
             return False
 
     def _generate_preview_candidates(self, url: str) -> list[str]:
-        """Generate potential Reddit preview URLs for the given URL."""
-        candidates = []
-
-        try:
-            # For external URLs, Reddit might have generated previews
-            # These are speculative reconstructions based on Reddit's preview patterns
-
-            # external-preview.redd.it pattern (single-encoded only)
-            encoded_url = quote(url, safe='')
-            candidates.extend([
-                f"https://external-preview.redd.it/{encoded_url}",
-                f"https://preview.redd.it/{encoded_url}",
-            ])
-
-            # If it's an image URL, try common preview patterns
-            if self._is_image_url(url):
-                # Use deterministic hash (md5) instead of Python's hash() which varies per-process
-                domain_hash = hashlib.md5(urlparse(url).netloc.encode()).hexdigest()[-8:]
-                candidates.extend([
-                    f"https://preview.redd.it/preview-{domain_hash}.jpg",
-                    f"https://external-preview.redd.it/preview-{domain_hash}.jpg",
-                ])
-
-        except Exception as e:
-            self._logger.debug(f"Error generating preview candidates: {e}")
-
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_candidates = []
-        for candidate in candidates:
-            if candidate not in seen:
-                seen.add(candidate)
-                unique_candidates.append(candidate)
-
-        return unique_candidates
-
-    def _is_image_url(self, url: str) -> bool:
-        """Check if URL appears to be an image."""
-        try:
-            parsed = urlparse(url)
-            path = parsed.path.lower()
-            return any(path.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp'])
-        except Exception:
-            return False
+        """Return no synthetic candidates because Reddit does not expose them reliably."""
+        return []
 
     def _verify_preview_url(self, url: str) -> Optional[Dict[str, Any]]:
         """Verify that a preview URL is accessible and return metadata."""

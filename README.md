@@ -213,7 +213,7 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 - ⏱️ **Rate Limit Management:** Implements dynamic sleep timers to respect Reddit's API rate limits.
 - 🔒 **GDPR Data Processing:** Optional processing of Reddit's GDPR export data.
 - 🖼️ **Enhanced Media Downloads:** Download images, videos, and other media with dramatically improved success rates (~80% vs previous ~10%), featuring intelligent fallback systems and modern web compatibility.
-- 🔄 **Content Recovery System:** 5-provider cascade for failed downloads and archived Reddit text (Wayback Machine, Arctic Shift, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs.
+- 🔄 **Content Recovery System:** 3-provider cascade for failed downloads and archived Reddit text (Wayback Machine, Arctic Shift, PullPush.io) with SQLite caching and automatic retry across runs.
 
 ## 🎯 Why Use Reddit Stash
 
@@ -1175,7 +1175,7 @@ Jump to any section or browse the complete settings index:
 | **[Configuration]** | 4 | Reddit API credentials (use env vars!) | [↓ View](#configuration---reddit-api-credentials) |
 | **[Media]** | 14 | Media download controls (images, videos, albums) | [↓ View](#media---advanced-media-download-system) |
 | **[Imgur]** | 3 | Imgur API configuration (optional) | [↓ View](#imgur---imgur-api-configuration) |
-| **[Recovery]** | 11 | Content recovery system (5-provider cascade) | [↓ View](#recovery---content-recovery-system) |
+| **[Recovery]** | 11 | Content recovery system (3-provider cascade) | [↓ View](#recovery---content-recovery-system) |
 | **[Retry]** | 7 | Retry queue management (exponential backoff) | [↓ View](#retry---retry-queue-configuration) |
 | **[Storage]** | 5 | Cloud storage backend (Dropbox, S3) | [↓ View](#storage---cloud-storage-backend) |
 | **Total** | **52 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
@@ -1184,7 +1184,7 @@ Jump to any section or browse the complete settings index:
 - 🔒 **Security First**: Use environment variables for credentials, not settings.ini
 - ⚡ **Performance**: `check_type=LOG`, `max_concurrent_downloads=3-5`
 - 💾 **Storage**: Configure `max_image_size`, `max_video_size`, `max_daily_storage_mb`
-- 🔄 **Recovery**: Enable all 5 providers for best deleted content recovery
+- 🔄 **Recovery**: Enable all 3 active providers for best deleted content recovery
 - 📖 **Full Docs**: Each setting includes type, defaults, examples, and trade-offs
 
 ---
@@ -2114,12 +2114,12 @@ recover_deleted = true                 # Attempt recovery of deleted content
 
 ```ini
 [Recovery]
-# Recovery providers (5-provider cascade)
+# Active recovery providers (3-provider cascade)
 use_wayback_machine = true             # Internet Archive Wayback Machine
 use_arctic_shift = true                # Archived Reddit posts and comments
 use_pushshift_api = true               # PullPush.io (Pushshift successor) 
-use_reddit_previews = true             # Reddit's preview/thumbnail system
-use_reveddit_api = true                # Reveddit deleted content recovery
+use_reddit_previews = false            # Retained compatibility setting, not an active provider
+use_reveddit_api = false               # Retained compatibility setting, not an active provider
 
 # Performance settings
 timeout_seconds = 10                   # Per-provider timeout
@@ -2134,7 +2134,7 @@ enable_background_cleanup = true       # Automatic cache maintenance
 
 #### Content Recovery Explained:
 
-Reddit Stash includes a 5-provider cascade that attempts to recover deleted, removed, or unavailable content.
+Reddit Stash includes a 3-provider cascade that attempts to recover deleted, removed, or unavailable content.
 
 #### Recovery Provider Settings:
 
@@ -2182,42 +2182,26 @@ Reddit Stash includes a 5-provider cascade that attempts to recover deleted, rem
     use_pushshift_api = false  # Disable if service unavailable
     ```
 
-* **`use_reddit_previews`** - Use Reddit's preview/thumbnail system
+* **`use_reddit_previews`** - Legacy Reddit preview compatibility setting
   - **Type**: Boolean
-  - **Default**: `true`
+  - **Default**: `false`
   - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**: Reddit's own cached preview images
-  - **Best For**: Recent posts with images, when original host is down
-  - **Success Rate**: 20-50% (only works if Reddit generated preview)
-  - **Coverage**: Images from posts where Reddit created thumbnails
-  - **Quality**: Usually lower resolution (preview quality, not original)
-  - **Rate Limit**: 30 requests/minute
-  - **Response Time**: <1 second (very fast)
-  - **Limitations**: 
-    - Only works for posts Reddit previewed
-    - Lower quality than originals
-    - May not work for very old posts
+  - **What It Does**: The application does not synthesize preview URLs because Reddit does not expose a reliable discovery path
+  - **Note**: This setting remains in configuration for compatibility but does not enable a recovery provider
   - **Examples**:
     ```ini
-    use_reddit_previews = true   # Enable (fast fallback)
-    use_reddit_previews = false  # Disable if quality matters
+    use_reddit_previews = false  # Keep unsupported preview probing disabled
     ```
 
-* **`use_reveddit_api`** - Use Reveddit deleted content recovery
+* **`use_reveddit_api`** - Legacy Reveddit compatibility setting
   - **Type**: Boolean
-  - **Default**: `true`
+  - **Default**: `false`
   - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**: Specialized service for recovering deleted Reddit content
-  - **Best For**: Recently deleted posts/comments (within days/weeks)
-  - **Success Rate**: 30-60% for recent deletions, lower for older
-  - **Coverage**: Reddit posts and comments deleted by users or moderators
-  - **Rate Limit**: 20 requests/minute
-  - **Response Time**: 2-5 seconds average
-  - **Note**: Most effective for recent deletions (<30 days)
+  - **What It Does**: Public Reveddit pages no longer expose archive content reliably, so the application does not send HTML probes to them
+  - **Note**: This setting remains in configuration for compatibility but does not enable a recovery provider
   - **Examples**:
     ```ini
-    use_reveddit_api = true   # Enable (good for recent deletions)
-    use_reveddit_api = false  # Disable to save time
+    use_reveddit_api = false  # Keep unsupported HTML probing disabled
     ```
 
 #### Recovery Performance Settings:
@@ -2239,12 +2223,12 @@ Reddit Stash includes a 5-provider cascade that attempts to recover deleted, rem
     | **10s** | Good (~70%) | Moderate | Default, balanced |
     | **20-30s** | Higher (~85%) | Slow | Thorough recovery, slow networks |
     
-  - **Cascade Example** (timeout=10s, 4 providers):
+  - **Cascade Example** (timeout=10s, 3 providers):
     - Wayback: Try for 10s → Success/Fail → Next
+    - Arctic Shift: Try for archived Reddit text → Success/Fail → Next
     - PullPush: Try for 10s → Success/Fail → Next
-    - Reddit Preview: Try for 10s → Success/Fail → Next
-    - Reveddit: Try for 10s → Success/Fail → Give up
-    - Total: 0-40 seconds per item (stops at first success)
+    - Sequential total: 0-30 seconds per item (stops at first success)
+    - Parallel mode: Collects enabled provider results before selecting the highest-quality recovery
   - **Examples**:
     ```ini
     timeout_seconds = 5    # Fast, may miss some content
@@ -2787,8 +2771,8 @@ Quick alphabetical reference of all 52 settings with links to detailed documenta
 - **`unsave_after_download`** (Boolean, default: false) - Auto-unsave after download | [→ Settings Section](#core-settings-explained)
 - **`use_arctic_shift`** (Boolean, default: true) - Use Arctic Shift archive provider | [→ Recovery Section](#recovery-provider-settings)
 - **`use_pushshift_api`** (Boolean, default: true) - Use PullPush.io provider | [→ Recovery Section](#recovery-provider-settings)
-- **`use_reddit_previews`** (Boolean, default: true) - Use Reddit preview system | [→ Recovery Section](#recovery-provider-settings)
-- **`use_reveddit_api`** (Boolean, default: true) - Use Reveddit provider | [→ Recovery Section](#recovery-provider-settings)
+- **`use_reddit_previews`** (Boolean, default: false) - Retained legacy Reddit preview setting | [→ Recovery Section](#recovery-provider-settings)
+- **`use_reveddit_api`** (Boolean, default: false) - Retained legacy Reveddit setting | [→ Recovery Section](#recovery-provider-settings)
 - **`use_wayback_machine`** (Boolean, default: true) - Use Internet Archive | [→ Recovery Section](#recovery-provider-settings)
 - **`username`** (String, default: None) - Reddit username | [→ Configuration Section](#api-configuration-settings)
 
@@ -3643,7 +3627,7 @@ Feel free to open issues or submit pull requests if you have any improvements or
 Have an idea for improving Reddit Stash? Feel free to suggest it in the issues or contribute a pull request!
 
 **✅ Recently Implemented:**
-- **Content Recovery System** - 5-provider cascade for failed downloads and archived Reddit text (Wayback Machine, Arctic Shift, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs
+- **Content Recovery System** - 3-provider cascade for failed downloads and archived Reddit text (Wayback Machine, Arctic Shift, PullPush.io) with SQLite caching and automatic retry across runs
 - **Advanced Media Download System** - Modern web compatibility with HTTP/2 support and browser impersonation
 - **Comprehensive Rate Limiting** - Multi-layer rate limiting with provider-specific limits and intelligent backoff
 
