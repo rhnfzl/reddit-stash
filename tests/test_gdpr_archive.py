@@ -6,7 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from utils.gdpr_processor import _csv_only_post_markdown, process_gdpr_export
+from utils.gdpr_processor import (
+    _csv_only_comment_markdown,
+    _csv_only_post_markdown,
+    process_gdpr_export,
+)
 
 
 class _ArchiveClient:
@@ -187,6 +191,69 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
         self.assertNotIn('Content was not fetched from Reddit.', content)
         self.assertTrue(file_log['GDPR_COMMENT_comment456']['archive_enriched'])
 
+    def test_metadata_only_archive_record_keeps_a_post_upgradeable(self):
+        self._write_export('saved_posts.csv', [
+            {'id': 'post123', 'permalink': '/r/python/comments/post123/example/'},
+        ])
+        existing_files = set()
+        file_log = {}
+
+        process_gdpr_export(
+            None,
+            self.save_directory,
+            existing_files,
+            set(),
+            file_log,
+            archive_client=_ArchiveClient(posts={'post123': {'id': 'post123', 'author': 'archivist'}}),
+        )
+        first_export = next(Path(self.save_directory).glob('r_python/GDPR_POST_post123.md'))
+        self.assertIn('Content was not fetched from Reddit.', first_export.read_text(encoding='utf-8'))
+        self.assertFalse(file_log['GDPR_POST_post123']['archive_enriched'])
+
+        processed, skipped, _ = process_gdpr_export(
+            None,
+            self.save_directory,
+            existing_files,
+            set(),
+            file_log,
+            archive_client=_ArchiveClient(posts={'post123': {'selftext': 'Recovered body'}}),
+        )
+
+        self.assertEqual((processed, skipped), (1, 0))
+        self.assertIn('Recovered body', first_export.read_text(encoding='utf-8'))
+        self.assertTrue(file_log['GDPR_POST_post123']['archive_enriched'])
+
+    def test_missing_link_only_export_is_recreated_when_archive_text_arrives(self):
+        self._write_export('saved_comments.csv', [
+            {'id': 'comment456', 'permalink': '/r/python/comments/post123/example/comment456/'},
+        ])
+        existing_files = set()
+        file_log = {}
+
+        process_gdpr_export(
+            None,
+            self.save_directory,
+            existing_files,
+            set(),
+            file_log,
+            archive_client=_ArchiveClient(),
+        )
+        comment_file = next(Path(self.save_directory).glob('r_python/GDPR_COMMENT_comment456.md'))
+        comment_file.unlink()
+
+        processed, skipped, _ = process_gdpr_export(
+            None,
+            self.save_directory,
+            existing_files,
+            set(),
+            file_log,
+            archive_client=_ArchiveClient(comments={'comment456': {'body': 'Recovered body'}}),
+        )
+
+        self.assertEqual((processed, skipped), (1, 0))
+        self.assertTrue(comment_file.exists())
+        self.assertIn('Recovered body', comment_file.read_text(encoding='utf-8'))
+
     def test_missing_archive_record_keeps_link_only_export(self):
         self._write_export('saved_posts.csv', [
             {'id': 'post123', 'permalink': '/r/python/comments/post123/example/'},
@@ -203,6 +270,21 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
 
         post_file = next(Path(self.save_directory).glob('r_python/GDPR_POST_post123.md'))
         self.assertIn('Content was not fetched from Reddit.', post_file.read_text(encoding='utf-8'))
+
+    def test_metadata_only_comment_renders_as_a_link_only_export(self):
+        content = _csv_only_comment_markdown(
+            'comment456',
+            'https://www.reddit.com/r/python/comments/post123/example/comment456/',
+            {'id': 'comment456', 'author': 'archivist'},
+        )
+
+        _, frontmatter, _ = content.split('---\n', 2)
+        fields = {
+            key: json.loads(value)
+            for key, value in (line.split(': ', 1) for line in frontmatter.strip().splitlines())
+        }
+        self.assertFalse(fields['archive_enriched'])
+        self.assertIn('Content was not fetched from Reddit.', content)
 
     def test_csv_only_posts_start_with_quoted_frontmatter(self):
         title = 'Archived: "quoted" title'

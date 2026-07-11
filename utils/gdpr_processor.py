@@ -48,7 +48,8 @@ def _save_csv_only_post(
 
     file_path = path_result.safe_path
     already_saved = unique_key in existing_files or is_file_logged(file_log, unique_key)
-    if already_saved and not (archived_data and _is_link_only_csv_export(file_path)):
+    archive_enriched = _has_archive_text(archived_data, ('title', 'selftext'))
+    if already_saved and not (archive_enriched and _is_link_only_csv_export(file_path)):
         return 0, 0  # skipped
 
     # Ensure directory exists
@@ -58,14 +59,18 @@ def _save_csv_only_post(
         created_dirs_cache.add(dir_path)
 
     reddit_url = f"https://www.reddit.com{permalink}" if permalink else f"https://www.reddit.com/comments/{post_id}"
-    content = _csv_only_post_markdown(post_id, reddit_url, archived_data)
+    content = _csv_only_post_markdown(
+        post_id,
+        reddit_url,
+        archived_data if archive_enriched else None,
+    )
     return _write_csv_only_export(
         file_path,
         content,
         unique_key,
         'GDPR_POST',
         post_id,
-        bool(archived_data),
+        archive_enriched,
         existing_files,
         file_log,
         save_directory,
@@ -93,7 +98,8 @@ def _save_csv_only_comment(
 
     file_path = path_result.safe_path
     already_saved = unique_key in existing_files or is_file_logged(file_log, unique_key)
-    if already_saved and not (archived_data and _is_link_only_csv_export(file_path)):
+    archive_enriched = _has_archive_text(archived_data, ('body',))
+    if already_saved and not (archive_enriched and _is_link_only_csv_export(file_path)):
         return 0, 0  # skipped
 
     dir_path = os.path.dirname(file_path)
@@ -102,7 +108,11 @@ def _save_csv_only_comment(
         created_dirs_cache.add(dir_path)
 
     reddit_url = f"https://www.reddit.com{permalink}" if permalink else f"https://www.reddit.com/comments/{comment_id}"
-    content = _csv_only_comment_markdown(comment_id, reddit_url, archived_data)
+    content = _csv_only_comment_markdown(
+        comment_id,
+        reddit_url,
+        archived_data if archive_enriched else None,
+    )
 
     return _write_csv_only_export(
         file_path,
@@ -110,7 +120,7 @@ def _save_csv_only_comment(
         unique_key,
         'GDPR_COMMENT',
         comment_id,
-        bool(archived_data),
+        archive_enriched,
         existing_files,
         file_log,
         save_directory,
@@ -122,6 +132,8 @@ def _is_link_only_csv_export(file_path):
     try:
         with open(file_path, encoding='utf-8') as export_file:
             return 'Content was not fetched from Reddit.' in export_file.read()
+    except FileNotFoundError:
+        return True
     except OSError:
         return False
 
@@ -167,15 +179,16 @@ def _extract_subreddit_from_permalink(permalink):
 
 def _csv_only_post_markdown(post_id, reddit_url, archived_data):
     """Render a CSV-only post export, including archive text when available."""
-    title = _archive_text(archived_data.get('title')) if archived_data else None
+    archive_enriched = _has_archive_text(archived_data, ('title', 'selftext'))
+    title = _archive_text(archived_data.get('title')) if archive_enriched else None
     title = title or f'GDPR Export Post: {post_id}'
     frontmatter = _yaml_frontmatter({
         'id': post_id,
         'title': title,
         'permalink': reddit_url,
-        'archive_enriched': bool(archived_data),
+        'archive_enriched': archive_enriched,
     })
-    if not archived_data:
+    if not archive_enriched:
         return (
             f"{frontmatter}# {title}\n\n"
             f"**Reddit Link:** [{reddit_url}]({reddit_url})\n\n"
@@ -199,14 +212,15 @@ def _csv_only_post_markdown(post_id, reddit_url, archived_data):
 
 def _csv_only_comment_markdown(comment_id, reddit_url, archived_data):
     """Render a CSV-only comment export, including archive text when available."""
+    archive_enriched = _has_archive_text(archived_data, ('body',))
     title = f'GDPR Export Comment: {comment_id}'
     frontmatter = _yaml_frontmatter({
         'id': comment_id,
         'title': title,
         'permalink': reddit_url,
-        'archive_enriched': bool(archived_data),
+        'archive_enriched': archive_enriched,
     })
-    if not archived_data:
+    if not archive_enriched:
         return (
             f"{frontmatter}# {title}\n\n"
             f"**Reddit Link:** [{reddit_url}]({reddit_url})\n\n"
@@ -231,6 +245,13 @@ def _csv_only_comment_markdown(comment_id, reddit_url, archived_data):
 def _archive_text(value):
     """Return non-empty archive text without turning missing values into strings."""
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _has_archive_text(archived_data, fields):
+    """Return whether archive data contains content worth exporting."""
+    return isinstance(archived_data, dict) and any(
+        _archive_text(archived_data.get(field)) for field in fields
+    )
 
 
 def _yaml_frontmatter(fields):

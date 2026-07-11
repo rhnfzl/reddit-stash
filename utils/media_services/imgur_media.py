@@ -18,6 +18,7 @@ from ..service_abstractions import (
     MediaMetadata, MediaType, ServiceConfig
 )
 from ..domain_matching import domain_matches
+from ..rate_limiter import rate_limit_manager
 from .base_downloader import BaseHTTPDownloader
 
 
@@ -159,6 +160,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
 
     def _api_get(self, url: str, timeout: tuple[float, float]):
         """Fetch an Imgur API endpoint, rotating client IDs after a 429 response."""
+        retry_seconds = 60
         for rotation in range(len(self._client_ids)):
             self._respect_rate_limit()
 
@@ -175,6 +177,16 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             if response.status_code != 429:
                 return response
 
+            retry_after = response.headers.get('Retry-After')
+            try:
+                retry_seconds = int(retry_after) if retry_after else 60
+            except (TypeError, ValueError):
+                retry_seconds = 60
+            try:
+                response.close()
+            except Exception:
+                pass
+
             self._logger.debug(
                 "Imgur API rate limited (429), rotating client ID (%s/%s)",
                 rotation + 1,
@@ -182,6 +194,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             )
             self._rotate_client_id()
 
+        rate_limit_manager.report_response(self.config.name.lower(), 429, retry_seconds)
         return None
 
     def _get_metadata_direct_api(self, imgur_id: str, media_type: str, original_url: str) -> Optional[MediaMetadata]:
