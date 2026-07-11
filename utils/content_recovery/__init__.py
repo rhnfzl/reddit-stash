@@ -20,12 +20,13 @@ Usage:
 
 from .recovery_service import ContentRecoveryService
 from .cache_manager import RecoveryCacheManager
-from .recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource
+from .recovery_metadata import RecoveryResult, RecoveryMetadata, RecoveryQuality, RecoverySource
 
 __all__ = [
     'ContentRecoveryService',
     'RecoveryCacheManager',
     'RecoveryResult',
     'RecoveryMetadata',
+    'RecoveryQuality',
     'RecoverySource'
 ]

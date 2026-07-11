@@ -217,91 +217,61 @@ def safe_fetch_items_one_by_one(
     logger_instance: Optional[logging.Logger] = None
 ) -> Generator[Any, None, None]:
     """
-    Fetch items one-by-one with individual error handling and recovery.
+    Fetch items one-by-one with individual error handling.
 
-    This is slower than batch fetching but allows recovering individual
-    deleted items via archival sources.
+    This is slower than batch fetching but isolates unavailable records.
 
     Args:
         praw_generator: PRAW ListingGenerator
         item_type: Type of items being fetched
-        recovery_enabled: Whether to attempt content recovery
+        recovery_enabled: Retained for backward-compatible callers
         logger_instance: Optional logger instance
 
     Yields:
-        PRAW objects or RecoveredItem objects
+        PRAW objects
     """
     log = logger_instance or logger
-    recovery_service = ContentRecoveryService() if recovery_enabled else None
 
     count = 0
     skipped = 0
-    recovered = 0
-    last_successful_item = None
 
     log.debug(f"Starting one-by-one fetch of {item_type} items with recovery enabled={recovery_enabled}")
 
     try:
-        for item in praw_generator:
+        try:
+            iterator = iter(praw_generator)
+        except prawcore.exceptions.NotFound:
+            skipped += 1
+            log.warning(f"Could not start {item_type} iteration because content was not found")
+            return
+        except prawcore.exceptions.Forbidden:
+            skipped += 1
+            log.warning(f"Could not start {item_type} iteration because access was forbidden")
+            return
+
+        while True:
             try:
-                # Successfully fetched item
-                count += 1
-                last_successful_item = item
-                yield item
+                item = next(iterator)
+            except StopIteration:
+                break
 
             except prawcore.exceptions.NotFound:
-                # Individual item not found (deleted/removed)
                 skipped += 1
-                log.warning(f"Item {count + skipped} not found (404) - attempting recovery")
-
-                if recovery_enabled and recovery_service and last_successful_item:
-                    # Try to recover using context from last successful item
-                    try:
-                        # Construct URL from last known position
-                        # Note: This is approximate - we don't know the exact failed item
-                        url = construct_reddit_url(last_successful_item)
-
-                        if url:
-                            log.debug(f"Attempting recovery for {item_type} near: {url}")
-                            recovery_result = recovery_service.attempt_recovery(
-                                url,
-                                original_failure_reason="PRAW 404 during iteration"
-                            )
-
-                            if recovery_result.success:
-                                recovered += 1
-                                log.info(
-                                    f"✓ Successfully recovered {item_type} via {recovery_result.source.value}"
-                                )
-
-                                # Create placeholder recovered item
-                                recovered_item = RecoveredItem(
-                                    item_type=item_type,
-                                    item_id="recovered",
-                                    recovery_result=recovery_result,
-                                    original_url=url
-                                )
-                                yield recovered_item
-                            else:
-                                log.warning(
-                                    f"✗ Recovery failed: {recovery_result.error_message}"
-                                )
-
-                    except Exception as recovery_error:
-                        log.error(f"Recovery attempt failed: {recovery_error}")
+                log.warning(f"Item {count + skipped} was not found; stopping iteration")
+                break
 
             except prawcore.exceptions.Forbidden:
                 skipped += 1
-                log.warning(f"Access forbidden for item {count + skipped} - skipping")
+                log.warning(f"Access forbidden for item {count + skipped}; stopping iteration")
+                break
 
-            except Exception as e:
-                skipped += 1
-                log.error(f"Unexpected error processing item {count + skipped}: {e}")
+            count += 1
+            yield item
 
     finally:
         log.info(
             f"Completed {item_type} fetch: {count} successful, "
-            f"{skipped} skipped, {recovered} recovered"
+            f"{skipped} skipped"
         )
 
 
