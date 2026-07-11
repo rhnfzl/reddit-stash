@@ -1,10 +1,14 @@
 """Tests for utils/save_utils.py — save_submission, process_comments, save_comment_and_context."""
 
 import os
+import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 from praw.models import Submission, Comment
+from utils.content_recovery import RecoveryMetadata, RecoveryQuality, RecoveryResult, RecoverySource
+from utils.praw_helpers import RecoveredItem
 
 
 def _make_submission(is_self=True, selftext='', url='', title='Test Title',
@@ -81,6 +85,73 @@ class TestSaveSubmission(unittest.TestCase):
 
         content = open(self.filepath).read()
         self.assertIn('Hello world body text', content)
+
+    @patch('utils.save_utils.lazy_load_comments', return_value=[])
+    @patch('utils.save_utils.get_media_config')
+    def test_submission_frontmatter_quotes_special_title_characters(self, mock_config, mock_comments):
+        """Saved posts start with YAML-safe metadata and preserve the original title."""
+        from utils.save_utils import save_submission
+
+        title = 'A "quoted": title\nwith a second line'
+        sub = _make_submission(is_self=True, selftext='Hello world body text', title=title)
+        with open(self.filepath, 'w', encoding='utf-8') as file:
+            save_submission(sub, file)
+
+        content = Path(self.filepath).read_text(encoding='utf-8')
+        _, frontmatter, _ = content.split('---\n', 2)
+        fields = {
+            key: json.loads(value)
+            for key, value in (line.split(': ', 1) for line in frontmatter.strip().splitlines())
+        }
+        self.assertEqual(fields['title'], title)
+        self.assertEqual(fields['subreddit'], '/r/test')
+
+    def test_comment_frontmatter_has_a_quoted_title(self):
+        """Saved comments use valid frontmatter instead of prose inside YAML delimiters."""
+        from utils.save_utils import save_comment_and_context
+
+        comment = _make_comment()
+        with open(self.filepath, 'w', encoding='utf-8') as file:
+            save_comment_and_context(comment, file)
+
+        content = Path(self.filepath).read_text(encoding='utf-8')
+        _, frontmatter, _ = content.split('---\n', 2)
+        fields = {
+            key: json.loads(value)
+            for key, value in (line.split(': ', 1) for line in frontmatter.strip().splitlines())
+        }
+        self.assertEqual(fields['title'], 'Comment by /u/commenter')
+        self.assertEqual(fields['body'], 'Test comment body')
+
+    def test_recovered_submission_uses_archive_fields_without_praw_attributes(self):
+        """Archive-only submissions render without requiring a live PRAW object."""
+        from utils.save_utils import save_submission
+
+        metadata = RecoveryMetadata(
+            source=RecoverySource.ARCTIC_SHIFT,
+            recovered_url=None,
+            recovery_timestamp=1700000000.0,
+            content_quality=RecoveryQuality.METADATA_ONLY,
+            additional_metadata={
+                'title': 'Recovered post title',
+                'selftext': 'Recovered post body',
+                'author': 'archivist',
+                'subreddit': 'python',
+            },
+        )
+        recovered = RecoveredItem(
+            item_type='submission',
+            item_id='archive123',
+            recovery_result=RecoveryResult.success_result(None, metadata),
+            original_url='https://reddit.com/r/python/comments/archive123/',
+        )
+
+        with open(self.filepath, 'w', encoding='utf-8') as file:
+            save_submission(recovered, file)
+
+        content = Path(self.filepath).read_text(encoding='utf-8')
+        self.assertIn('# Recovered post title', content)
+        self.assertIn('Recovered post body', content)
 
     @patch('utils.save_utils.lazy_load_comments', return_value=[])
     @patch('utils.save_utils.get_media_config')

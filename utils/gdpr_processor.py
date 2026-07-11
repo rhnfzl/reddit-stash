@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import pandas as pd
 from tqdm import tqdm
@@ -166,9 +167,17 @@ def _extract_subreddit_from_permalink(permalink):
 
 def _csv_only_post_markdown(post_id, reddit_url, archived_data):
     """Render a CSV-only post export, including archive text when available."""
+    title = _archive_text(archived_data.get('title')) if archived_data else None
+    title = title or f'GDPR Export Post: {post_id}'
+    frontmatter = _yaml_frontmatter({
+        'id': post_id,
+        'title': title,
+        'permalink': reddit_url,
+        'archive_enriched': bool(archived_data),
+    })
     if not archived_data:
         return (
-            f"# GDPR Export Post: {post_id}\n\n"
+            f"{frontmatter}# {title}\n\n"
             f"**Reddit Link:** [{reddit_url}]({reddit_url})\n\n"
             f"**Post ID:** {post_id}\n\n"
             f"---\n\n"
@@ -177,10 +186,9 @@ def _csv_only_post_markdown(post_id, reddit_url, archived_data):
             f"Visit the link above to view the full post.*\n"
         )
 
-    title = _archive_text(archived_data.get('title')) or f'GDPR Export Post: {post_id}'
     body = _archive_text(archived_data.get('selftext')) or '*No post text was available in the archive.*'
     return (
-        f"# {title}\n\n"
+        f"{frontmatter}# {title}\n\n"
         f"**Reddit Link:** [{reddit_url}]({reddit_url})\n\n"
         f"**Post ID:** {post_id}\n\n"
         f"**Archive:** Public Reddit archive\n\n"
@@ -191,9 +199,16 @@ def _csv_only_post_markdown(post_id, reddit_url, archived_data):
 
 def _csv_only_comment_markdown(comment_id, reddit_url, archived_data):
     """Render a CSV-only comment export, including archive text when available."""
+    title = f'GDPR Export Comment: {comment_id}'
+    frontmatter = _yaml_frontmatter({
+        'id': comment_id,
+        'title': title,
+        'permalink': reddit_url,
+        'archive_enriched': bool(archived_data),
+    })
     if not archived_data:
         return (
-            f"# GDPR Export Comment: {comment_id}\n\n"
+            f"{frontmatter}# {title}\n\n"
             f"**Reddit Link:** [{reddit_url}]({reddit_url})\n\n"
             f"**Comment ID:** {comment_id}\n\n"
             f"---\n\n"
@@ -204,7 +219,7 @@ def _csv_only_comment_markdown(comment_id, reddit_url, archived_data):
 
     body = _archive_text(archived_data.get('body')) or '*No comment text was available in the archive.*'
     return (
-        f"# GDPR Export Comment: {comment_id}\n\n"
+        f"{frontmatter}# {title}\n\n"
         f"**Reddit Link:** [{reddit_url}]({reddit_url})\n\n"
         f"**Comment ID:** {comment_id}\n\n"
         f"**Archive:** Public Reddit archive\n\n"
@@ -216,6 +231,15 @@ def _csv_only_comment_markdown(comment_id, reddit_url, archived_data):
 def _archive_text(value):
     """Return non-empty archive text without turning missing values into strings."""
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _yaml_frontmatter(fields):
+    """Render a YAML header with JSON-quoted scalar values."""
+    lines = ['---']
+    for key, value in fields.items():
+        lines.append(f'{key}: {json.dumps(str(value), ensure_ascii=False)}')
+    lines.extend(['---', ''])
+    return '\n'.join(lines) + '\n'
 
 
 def _archive_id(item_id):

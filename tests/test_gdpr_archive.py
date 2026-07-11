@@ -1,11 +1,12 @@
 """Tests for archive-enriched GDPR CSV-only exports."""
 
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from utils.gdpr_processor import process_gdpr_export
+from utils.gdpr_processor import _csv_only_post_markdown, process_gdpr_export
 
 
 class _ArchiveClient:
@@ -202,6 +203,22 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
 
         post_file = next(Path(self.save_directory).glob('r_python/GDPR_POST_post123.md'))
         self.assertIn('Content was not fetched from Reddit.', post_file.read_text(encoding='utf-8'))
+
+    def test_csv_only_posts_start_with_quoted_frontmatter(self):
+        title = 'Archived: "quoted" title'
+        content = _csv_only_post_markdown(
+            'post123',
+            'https://www.reddit.com/r/python/comments/post123/example/',
+            {'title': title, 'selftext': 'Archived body'},
+        )
+
+        _, frontmatter, _ = content.split('---\n', 2)
+        fields = {
+            key: json.loads(value)
+            for key, value in (line.split(': ', 1) for line in frontmatter.strip().splitlines())
+        }
+        self.assertEqual(fields['title'], title)
+        self.assertEqual(fields['id'], 'post123')
 
 
 if __name__ == '__main__':
