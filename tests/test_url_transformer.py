@@ -322,6 +322,21 @@ class TestURLTransformer(unittest.TestCase):
         self.assertIn('ref=abc123', result.url)
         self.assertIn('token=xyz', result.url)
 
+    def test_host_anchored_image_matchers_reject_lookalikes(self):
+        """github/ibb.co matchers are host-anchored; ibb.co captures only the id."""
+        # Lookalike or embedded hosts must NOT transform.
+        for url in [
+            'https://notgithub.com/user/repo/blob/main/file.txt',
+            'https://i-ibb.co/tokenabc',
+            'https://cdn.example.com/path?next=https://ibb.co/tokenxyz',
+        ]:
+            with self.subTest(url=url):
+                self.assertFalse(self.transformer.transform(url).transformed)
+        # ibb.co captures only the share id, dropping any query/fragment.
+        result = self.transformer.transform('https://ibb.co/abc123?x=1#frag')
+        self.assertTrue(result.transformed)
+        self.assertEqual(result.url, 'https://i.ibb.co/abc123/')
+
     # NOTE: a custom-transformer registration API (register_transformer) was
     # never implemented and had no callers; its aspirational test was removed
     # rather than build an unused plugin mechanism.

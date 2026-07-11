@@ -50,7 +50,7 @@ class URLTransformer:
 
             # GitHub blob to raw
             (
-                r'github\.com(?::\d+)?/([^/]+)/([^/]+)/blob/(.+)',
+                r'^https?://(?:www\.)?github\.com(?::\d+)?/([^/]+)/([^/]+)/blob/(.+)',
                 self._transform_github_blob,
                 'GitHub',
                 'Converts blob viewer to raw file access'
@@ -112,9 +112,10 @@ class URLTransformer:
                 'Converts viewer page to direct image access'
             ),
 
-            # ImgBB to direct (real share URLs use the ibb.co short domain)
+            # ImgBB to direct (real share URLs use the ibb.co short domain).
+            # Host-anchored; capture only the share id (stop at /, ? or #).
             (
-                r'ibb\.co/([^/]+)$',
+                r'^https?://ibb\.co/([^/?#]+)',
                 self._transform_imgbb,
                 'ImgBB',
                 'Converts viewer page to direct image access'
@@ -172,13 +173,15 @@ class URLTransformer:
             'drive.google.com': 'Google Drive',
             'pastebin.com': 'Pastebin',
             'postimg.cc': 'PostImages',
+            'ibb.co': 'ImgBB',
             'imgbb.com': 'ImgBB',
             'paste.ubuntu.com': 'Ubuntu Paste',
         }
 
         try:
-            parsed = urlparse(url)
-            return domain_map.get(parsed.netloc.lower())
+            # hostname (not netloc) so an explicit :port does not break the lookup
+            hostname = urlparse(url).hostname
+            return domain_map.get(hostname.lower()) if hostname else None
         except Exception:
             return None
 
