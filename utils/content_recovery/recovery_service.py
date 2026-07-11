@@ -8,7 +8,7 @@ managing multiple providers and implementing the recovery cascade strategy.
 import time
 import logging
 from typing import Optional, Dict, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 
 from .recovery_metadata import (
     RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality, RecoveryAttempt
@@ -21,6 +21,10 @@ from .providers import (
     RevedditProvider
 )
 from ..feature_flags import get_media_config
+from ..rate_limiter import rate_limit_manager
+
+
+PARALLEL_RECOVERY_TIMEOUT_SECONDS = 30
 
 
 class ContentRecoveryService:
@@ -183,6 +187,14 @@ class ContentRecoveryService:
             provider = self.providers[source]
             self._logger.debug(f"Trying recovery provider: {source.value}")
 
+            if source == RecoverySource.PULLPUSH_IO and not rate_limit_manager.can_proceed(source.value):
+                deferred_result = RecoveryResult.failure_result(
+                    "PullPush.io recovery deferred by rate limiter",
+                    source,
+                )
+                self._record_attempt(url, source, deferred_result, failure_reason)
+                continue
+
             try:
                 result = provider.attempt_recovery(url)
 
@@ -203,40 +215,85 @@ class ContentRecoveryService:
         return RecoveryResult.failure_result("All recovery providers failed")
 
     def _attempt_parallel_recovery(self, url: str, failure_reason: Optional[str]) -> RecoveryResult:
-        """Try recovery providers in parallel for faster results."""
+        """Collect parallel recovery results and select the highest-quality result."""
 
-        # Submit all provider attempts to thread pool
-        with ThreadPoolExecutor(max_workers=min(4, len(self.providers))) as executor:
+        provider_priorities = {
+            RecoverySource.WAYBACK_MACHINE: 4,
+            RecoverySource.PULLPUSH_IO: 3,
+            RecoverySource.REDDIT_PREVIEWS: 2,
+            RecoverySource.REVEDDIT: 1,
+        }
+        quality_priorities = {
+            RecoveryQuality.ORIGINAL: 5,
+            RecoveryQuality.HIGH_QUALITY: 4,
+            RecoveryQuality.MEDIUM_QUALITY: 3,
+            RecoveryQuality.LOW_QUALITY: 2,
+            RecoveryQuality.THUMBNAIL: 1,
+            RecoveryQuality.METADATA_ONLY: 0,
+        }
+
+        # Submit all provider attempts to thread pool.
+        executor = ThreadPoolExecutor(max_workers=min(4, len(self.providers)))
+        try:
             future_to_source = {}
 
             for source, provider in self.providers.items():
+                if source == RecoverySource.PULLPUSH_IO and not rate_limit_manager.can_proceed(source.value):
+                    deferred_result = RecoveryResult.failure_result(
+                        "PullPush.io recovery deferred by rate limiter",
+                        source,
+                    )
+                    self._record_attempt(url, source, deferred_result, failure_reason)
+                    continue
                 future = executor.submit(provider.attempt_recovery, url)
                 future_to_source[future] = source
 
-            # Process results as they complete
-            for future in as_completed(future_to_source, timeout=30):
-                source = future_to_source[future]
+            successful_results = []
+            try:
+                # Process every completed result before choosing the best quality.
+                for future in as_completed(
+                    future_to_source,
+                    timeout=PARALLEL_RECOVERY_TIMEOUT_SECONDS,
+                ):
+                    source = future_to_source[future]
 
-                try:
-                    result = future.result()
+                    try:
+                        result = future.result()
+                        self._record_attempt(url, source, result, failure_reason)
 
-                    # Record the attempt
-                    self._record_attempt(url, source, result, failure_reason)
+                        if result.success:
+                            self._logger.info(
+                                f"Recovery successful via {source.value}: {result.recovered_url}"
+                            )
+                            successful_results.append((source, result))
+                        else:
+                            self._logger.debug(
+                                f"Recovery failed via {source.value}: {result.error_message}"
+                            )
 
-                    if result.success:
-                        self._logger.info(f"Recovery successful via {source.value}: {result.recovered_url}")
+                    except Exception as e:
+                        self._logger.error(f"Provider {source.value} threw exception: {e}")
+            except FuturesTimeoutError:
+                for future in future_to_source:
+                    future.cancel()
+                self._logger.warning("Parallel recovery timed out before all providers returned")
+        finally:
+            # Provider requests have their own I/O timeouts. Do not make the caller wait
+            # for an already-running provider after the overall recovery deadline expires.
+            executor.shutdown(wait=False, cancel_futures=True)
 
-                        # Cancel remaining futures
-                        for remaining_future in future_to_source:
-                            if remaining_future != future:
-                                remaining_future.cancel()
-
-                        return result
-                    else:
-                        self._logger.debug(f"Recovery failed via {source.value}: {result.error_message}")
-
-                except Exception as e:
-                    self._logger.error(f"Provider {source.value} threw exception: {e}")
+        if successful_results:
+            _, best_result = max(
+                successful_results,
+                key=lambda item: (
+                    quality_priorities.get(
+                        item[1].metadata.content_quality if item[1].metadata else RecoveryQuality.METADATA_ONLY,
+                        0,
+                    ),
+                    provider_priorities.get(item[0], 0),
+                ),
+            )
+            return best_result
 
         # All providers failed
         return RecoveryResult.failure_result("All recovery providers failed")
