@@ -130,7 +130,7 @@ class ContentRecoveryService:
                 self._cache_successful_result(url, recovery_result)
                 self._stats['successful_recoveries'] += 1
             else:
-                self._cache_negative_results(url, recovery_result.attempted_sources)
+                self._cache_negative_results(url, recovery_result.negative_cache_sources)
                 self._stats['failed_recoveries'] += 1
 
             duration = time.time() - start_time
@@ -228,6 +228,7 @@ class ContentRecoveryService:
         ]
 
         completed_sources = set()
+        negative_cache_sources = set()
 
         for source in provider_order:
             if source not in self.providers:
@@ -259,6 +260,8 @@ class ContentRecoveryService:
                     )
                 else:
                     self._logger.debug(f"Recovery failed via {source.value}: {result.error_message}")
+                    if self._is_authoritative_not_found(result):
+                        negative_cache_sources.add(source)
 
             except Exception as e:
                 completed_sources.add(source)
@@ -269,6 +272,7 @@ class ContentRecoveryService:
         return RecoveryResult.failure_result(
             "All recovery providers failed",
             attempted_sources=frozenset(completed_sources),
+            negative_cache_sources=frozenset(negative_cache_sources),
         )
 
     def _attempt_parallel_recovery(self, url: str, failure_reason: Optional[str]) -> RecoveryResult:
@@ -293,6 +297,7 @@ class ContentRecoveryService:
         # Submit all provider attempts to thread pool.
         executor = ThreadPoolExecutor(max_workers=min(4, len(self.providers)))
         completed_sources = set()
+        negative_cache_sources = set()
         try:
             future_to_source = {}
 
@@ -334,6 +339,8 @@ class ContentRecoveryService:
                             self._logger.debug(
                                 f"Recovery failed via {source.value}: {result.error_message}"
                             )
+                            if self._is_authoritative_not_found(result):
+                                negative_cache_sources.add(source)
 
                     except Exception as e:
                         completed_sources.add(source)
@@ -367,7 +374,14 @@ class ContentRecoveryService:
         return RecoveryResult.failure_result(
             "All recovery providers failed",
             attempted_sources=frozenset(completed_sources),
+            negative_cache_sources=frozenset(negative_cache_sources),
         )
+
+    @staticmethod
+    def _is_authoritative_not_found(result: RecoveryResult) -> bool:
+        """Return whether a provider confirmed that its archive lacks the item."""
+        message = (result.error_message or '').lower()
+        return 'not found' in message or 'no archived version found' in message
 
     def _record_attempt(self, url: str, source: RecoverySource, result: RecoveryResult,
                        failure_reason: Optional[str]):
@@ -419,7 +433,7 @@ class ContentRecoveryService:
         url: str,
         completed_sources: FrozenSet[RecoverySource],
     ):
-        """Cache completed provider failures without suppressing deferred providers."""
+        """Cache only provider outcomes that confirmed an archive miss."""
         try:
             for source in completed_sources:
                 self.cache_manager.cache_result(

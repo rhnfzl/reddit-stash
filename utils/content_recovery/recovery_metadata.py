@@ -58,6 +58,7 @@ class RecoveryResult:
     error_message: Optional[str] = None
     source: Optional[RecoverySource] = None
     attempted_sources: FrozenSet[RecoverySource] = frozenset()
+    negative_cache_sources: FrozenSet[RecoverySource] = frozenset()
 
     @classmethod
     def success_result(
@@ -81,6 +82,7 @@ class RecoveryResult:
         error: str,
         source: Optional[RecoverySource] = None,
         attempted_sources: FrozenSet[RecoverySource] = frozenset(),
+        negative_cache_sources: FrozenSet[RecoverySource] = frozenset(),
     ) -> 'RecoveryResult':
         """Create a failed recovery result."""
         return cls(
@@ -88,6 +90,7 @@ class RecoveryResult:
             error_message=error,
             source=source,
             attempted_sources=attempted_sources,
+            negative_cache_sources=negative_cache_sources,
         )
 
 

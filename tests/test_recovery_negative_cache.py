@@ -164,7 +164,9 @@ class TestRecoveryNegativeCache(unittest.TestCase):
 
     def test_caches_only_providers_that_completed_a_failed_recovery(self):
         cache_manager = _CacheManager()
-        wayback = _Provider(RecoveryResult.failure_result('missing'))
+        wayback = _Provider(
+            RecoveryResult.failure_result('No archived version found in Wayback Machine')
+        )
         service = self._service({RecoverySource.WAYBACK_MACHINE: wayback}, cache_manager)
 
         result = service.attempt_recovery('https://example.com/image.jpg', async_mode=False)
@@ -178,6 +180,19 @@ class TestRecoveryNegativeCache(unittest.TestCase):
         self.assertFalse(cache_call['success'])
         self.assertEqual(cache_call['quality'], RecoveryQuality.METADATA_ONLY)
         self.assertLess(cache_call['ttl_hours'], 24)
+
+    def test_does_not_cache_transient_provider_failure(self):
+        cache_manager = _CacheManager()
+        wayback = _Provider(
+            RecoveryResult.failure_result('Wayback Machine request timed out after 10.00s')
+        )
+        service = self._service({RecoverySource.WAYBACK_MACHINE: wayback}, cache_manager)
+
+        result = service.attempt_recovery('https://example.com/image.jpg', async_mode=False)
+
+        self.assertFalse(result.success)
+        self.assertEqual(wayback.attempts, 1)
+        self.assertEqual(cache_manager.cache_calls, [])
 
     def test_rate_limited_provider_is_not_cached_as_a_failure(self):
         cache_manager = _CacheManager()
