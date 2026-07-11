@@ -174,9 +174,17 @@ def process_gdpr_export(reddit, save_directory, existing_files, created_dirs_cac
                     file_path = path_result.safe_path
 
                     # Use existing save_to_file function
-                    if save_to_file(submission, file_path, save_submission,
-                                  existing_files, file_log, save_directory, created_dirs_cache,
-                                  ignore_tls_errors=ignore_tls_errors):
+                    already_saved, _ = save_to_file(
+                        submission,
+                        file_path,
+                        save_submission,
+                        existing_files,
+                        file_log,
+                        save_directory,
+                        created_dirs_cache,
+                        ignore_tls_errors=ignore_tls_errors,
+                    )
+                    if already_saved:
                         skipped_count += 1
                         continue
 
@@ -219,9 +227,17 @@ def process_gdpr_export(reddit, save_directory, existing_files, created_dirs_cac
                     file_path = path_result.safe_path
 
                     # Use existing save_to_file function
-                    if save_to_file(comment, file_path, save_comment_and_context,
-                                  existing_files, file_log, save_directory, created_dirs_cache,
-                                  ignore_tls_errors=ignore_tls_errors):
+                    already_saved, _ = save_to_file(
+                        comment,
+                        file_path,
+                        save_comment_and_context,
+                        existing_files,
+                        file_log,
+                        save_directory,
+                        created_dirs_cache,
+                        ignore_tls_errors=ignore_tls_errors,
+                    )
+                    if already_saved:
                         skipped_count += 1
                         continue
 
