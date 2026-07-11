@@ -1174,11 +1174,11 @@ Jump to any section or browse the complete settings index:
 | **[Settings]** | 8 | Core behavior (save paths, types, file checking) | [↓ View](#settings---core-application-behavior) |
 | **[Configuration]** | 4 | Reddit API credentials (use env vars!) | [↓ View](#configuration---reddit-api-credentials) |
 | **[Media]** | 14 | Media download controls (images, videos, albums) | [↓ View](#media---advanced-media-download-system) |
-| **[Imgur]** | 3 | Imgur API configuration (optional) | [↓ View](#imgur---imgur-api-configuration) |
+| **[Imgur]** | 2 | Imgur API configuration (optional) | [↓ View](#imgur---imgur-api-configuration) |
 | **[Recovery]** | 11 | Content recovery system (3-provider cascade) | [↓ View](#recovery---content-recovery-system) |
 | **[Retry]** | 7 | Retry queue management (exponential backoff) | [↓ View](#retry---retry-queue-configuration) |
 | **[Storage]** | 5 | Cloud storage backend (Dropbox, S3) | [↓ View](#storage---cloud-storage-backend) |
-| **Total** | **52 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
+| **Total** | **51 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
 
 **Quick Tips:**
 - 🔒 **Security First**: Use environment variables for credentials, not settings.ini

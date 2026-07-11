@@ -63,10 +63,18 @@ class TestPullPushMetadataRecovery(unittest.TestCase):
         provider = PullPushProvider()
         provider.session = _Session()
 
-        records = provider.fetch_metadata_by_ids('posts', ['abc123'])
+        with patch(
+            'utils.content_recovery.providers.pullpush_provider.rate_limit_manager.acquire',
+            return_value=True,
+        ):
+            with patch(
+                'utils.content_recovery.providers.pullpush_provider.rate_limit_manager.report_response',
+            ) as report_response:
+                records = provider.fetch_metadata_by_ids('posts', ['abc123'])
 
         self.assertEqual(records['abc123']['title'], 'Archived title')
         self.assertEqual(provider.session.calls[0][1]['ids'], 'abc123')
+        report_response.assert_called_once_with('pullpush_io', 200)
 
     def test_archived_submission_is_successful_metadata_without_media_url(self):
         provider = PullPushProvider()
