@@ -18,6 +18,7 @@ from ..service_abstractions import (
     DownloadResult, DownloadStatus,
     MediaMetadata, MediaType, ServiceConfig
 )
+from ..domain_matching import domain_matches
 from .base_downloader import BaseHTTPDownloader
 
 
@@ -107,7 +108,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             'm.imgur.com'
         ]
 
-        return any(domain.endswith(imgur_domain) for imgur_domain in imgur_domains)
+        return any(domain_matches(domain, imgur_domain) for imgur_domain in imgur_domains)
 
     def get_metadata(self, url: str) -> Optional[MediaMetadata]:
         """Get metadata for Imgur media without downloading."""

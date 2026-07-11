@@ -13,6 +13,7 @@ from utils.env_config import get_ignore_tls_errors
 from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
 from utils.feature_flags import get_media_config
 from utils.media_services.reddit_media import RedditMediaDownloader
+from utils.domain_matching import domain_matches
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ def _is_image_url(url):
 
         # Known image hosting domains (even without extension)
         image_domains = ['i.redd.it', 'i.imgur.com', 'preview.redd.it', 'external-preview.redd.it']
-        if any(domain.endswith(d) for d in image_domains):
+        if any(domain_matches(domain, image_domain) for image_domain in image_domains):
             return True
 
         return False

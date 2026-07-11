@@ -21,6 +21,7 @@ from ..service_abstractions import (
 )
 from ..temp_file_utils import temp_files_cleanup
 from ..constants import FFMPEG_TIMEOUT_SECONDS
+from ..domain_matching import domain_matches
 from .base_downloader import BaseHTTPDownloader
 
 
@@ -66,7 +67,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 'external-preview.redd.it'
             ]
 
-            return any(domain.endswith(reddit_domain) for reddit_domain in reddit_domains)
+            return any(domain_matches(domain, reddit_domain) for reddit_domain in reddit_domains)
 
         except Exception:
             return False

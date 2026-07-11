@@ -25,6 +25,7 @@ from .content_recovery.recovery_service import ContentRecoveryService
 from .url_transformer import url_transformer
 from .url_security import get_url_validator
 from .constants import TRUSTED_MEDIA_DOMAINS
+from .domain_matching import domain_matches
 
 
 class MediaDownloadManager:
@@ -442,15 +443,15 @@ class MediaDownloadManager:
 
             # Reddit media domains — separate circuit breakers per subdomain
             # so video timeouts don't cascade to block image downloads
-            if domain.endswith('v.redd.it'):
+            if domain_matches(domain, 'v.redd.it'):
                 return 'reddit_video', self._reddit_downloader
-            elif domain.endswith('i.redd.it'):
+            elif domain_matches(domain, 'i.redd.it'):
                 return 'reddit_image', self._reddit_downloader
-            elif domain.endswith('preview.redd.it') or domain.endswith('external-preview.redd.it'):
+            elif domain_matches(domain, 'preview.redd.it') or domain_matches(domain, 'external-preview.redd.it'):
                 return 'reddit_preview', self._reddit_downloader
 
             # Imgur domains
-            elif any(domain.endswith(imgur_domain) for imgur_domain in [
+            elif any(domain_matches(domain, imgur_domain) for imgur_domain in [
                 'i.imgur.com', 'imgur.com', 'm.imgur.com'
             ]):
                 return 'imgur', self._imgur_downloader
