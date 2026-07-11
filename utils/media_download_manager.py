@@ -318,7 +318,12 @@ class MediaDownloadManager:
                 with self._url_lock:
                     self._record_failure(url, error_msg)
                 # Add to persistent retry queue for cross-run recovery
-                self._retry_queue.add_failed_download(url, error_msg, service_name)
+                self._retry_queue.add_failed_download(
+                    url,
+                    error_msg,
+                    service_name,
+                    metadata={"save_path": save_path},
+                )
                 return None
 
         except Exception as e:
@@ -366,7 +371,12 @@ class MediaDownloadManager:
                 self._record_failure(url, str(e))
             # Add to persistent retry queue for cross-run recovery
             service_name, _ = self._get_service_for_url(url)
-            self._retry_queue.add_failed_download(url, str(e), service_name or "unknown")
+            self._retry_queue.add_failed_download(
+                url,
+                str(e),
+                service_name or "unknown",
+                metadata={"save_path": save_path},
+            )
             return None
 
     def _get_service_for_url(self, url: str) -> tuple[str, Optional[Any]]:
@@ -458,12 +468,20 @@ class MediaDownloadManager:
                     self._logger.warning(f"Failed to mark retry as started for {url}")
                     continue
 
-                # Attempt the download
-                # Use a temporary save path for retry attempts
-                temp_save_path = f"/tmp/retry_{retry_item['id']}"
+                metadata = retry_item.get("metadata") or {}
+                save_path = metadata.get("save_path")
+                if not isinstance(save_path, str) or not save_path:
+                    self._logger.error("Retry item has no persisted save path: %s", url)
+                    stats["failed"] += 1
+                    self._retry_queue.mark_retry_completed(
+                        url,
+                        success=False,
+                        error_message="Retry item has no persisted save path",
+                    )
+                    continue
 
                 try:
-                    result_path = self.download_media(url, temp_save_path)
+                    result_path = self.download_media(url, save_path)
                     stats["processed"] += 1
 
                     if result_path:
