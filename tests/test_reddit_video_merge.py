@@ -3,7 +3,7 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from utils.media_services.reddit_media import RedditMediaDownloader
 from utils.service_abstractions import DownloadResult, DownloadStatus
@@ -60,6 +60,18 @@ class TestRedditVideoMerge(unittest.TestCase):
 
         self.assertTrue(result.is_success)
         self.assertEqual(result.local_path, self.save_path)
+        with open(self.save_path, 'rb') as video_file:
+            self.assertEqual(video_file.read(), b'video')
+
+    def test_insufficient_merge_space_keeps_the_downloaded_video(self):
+        merge = Mock()
+
+        with patch.object(self.downloader, '_check_disk_space', return_value=False):
+            result = self._download_video(merge)
+
+        self.assertTrue(result.is_success)
+        self.assertEqual(result.error_message, 'Audio track not merged (insufficient disk space)')
+        merge.assert_not_called()
         with open(self.save_path, 'rb') as video_file:
             self.assertEqual(video_file.read(), b'video')
 

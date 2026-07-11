@@ -222,6 +222,18 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                             return video_result
 
                     if audio_result.is_success and video_result.local_path:
+                        audio_size = (
+                            os.path.getsize(audio_result.local_path)
+                            if audio_result.local_path and os.path.exists(audio_result.local_path)
+                            else audio_result.bytes_downloaded
+                        )
+                        merged_size_estimate = os.path.getsize(video_result.local_path) + audio_size
+                        if not self._check_disk_space(merged_size_estimate, video_result.local_path):
+                            return replace(
+                                video_result,
+                                error_message="Audio track not merged (insufficient disk space)",
+                            )
+
                         with tempfile.NamedTemporaryFile(
                             dir=os.path.dirname(video_result.local_path) or '.',
                             suffix='.mp4',
