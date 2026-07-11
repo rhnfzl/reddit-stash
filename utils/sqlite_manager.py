@@ -209,7 +209,8 @@ class ThreadLocalSQLiteManager:
 
 # Global instances for different databases
 _retry_queue_manager: Optional[ThreadLocalSQLiteManager] = None
-_cache_manager: Optional[ThreadLocalSQLiteManager] = None
+_cache_managers: Dict[str, ThreadLocalSQLiteManager] = {}
+_cache_managers_lock = threading.Lock()
 
 
 def get_retry_queue_manager(db_path: str = "reddit_stash_retry_queue.db") -> ThreadLocalSQLiteManager:
@@ -221,8 +222,10 @@ def get_retry_queue_manager(db_path: str = "reddit_stash_retry_queue.db") -> Thr
 
 
 def get_cache_manager(db_path: str = "retry_queue.db") -> ThreadLocalSQLiteManager:
-    """Get global cache SQLite manager."""
-    global _cache_manager
-    if _cache_manager is None:
-        _cache_manager = ThreadLocalSQLiteManager(db_path)
-    return _cache_manager
+    """Get the cache SQLite manager for a database path."""
+    with _cache_managers_lock:
+        manager = _cache_managers.get(db_path)
+        if manager is None:
+            manager = ThreadLocalSQLiteManager(db_path)
+            _cache_managers[db_path] = manager
+        return manager

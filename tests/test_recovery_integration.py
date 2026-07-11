@@ -9,7 +9,8 @@ import unittest
 import tempfile
 import os
 import time
-from unittest.mock import Mock, patch, MagicMock
+import threading
+from unittest.mock import Mock, patch
 from typing import Optional
 
 # Import system components
@@ -151,6 +152,52 @@ class TestRecoveryIntegration(unittest.TestCase):
                 else:
                     print("    ❌ FAILED: No file downloaded")
                     self.fail("Expected successful download after recovery")
+
+    def test_trusted_url_recovery_validates_the_recovered_url(self):
+        """Trusted media hosts must still validate recovered URLs."""
+        original_url = "https://i.redd.it/failing_image.jpg"
+        recovered_url = "https://web.archive.org/web/20220101/https://example.com/failing_image.jpg"
+        recovery_service = MockRecoveryService({original_url: recovered_url})
+
+        def downloader_for(url):
+            return MockDownloader(should_fail=url == original_url, fail_count=999)
+
+        with patch.object(self.download_manager, '_recovery_service', recovery_service):
+            with patch.object(self.download_manager, '_get_service_for_url') as mock_get_service:
+                with patch('utils.media_download_manager.get_url_validator') as mock_get_validator:
+                    mock_validator = Mock()
+                    mock_validator.validate_url.return_value = Mock(is_valid=True, cleaned_url=None)
+                    mock_get_validator.return_value = mock_validator
+                    mock_get_service.side_effect = lambda url: ('generic', downloader_for(url))
+
+                    result_path = self.download_manager.download_media(original_url, self.temp_dir)
+
+        self.assertEqual(result_path, os.path.join(self.temp_dir, "downloaded_file.jpg"))
+        self.assertEqual(recovery_service.attempt_count, 1)
+        mock_validator.validate_url.assert_called_once_with(recovered_url)
+
+    def test_trusted_url_recovery_rejects_an_invalid_recovered_url(self):
+        """Recovered URLs must pass validation before a second download."""
+        original_url = "https://i.redd.it/failing_image.jpg"
+        recovered_url = "https://invalid.example/failing_image.jpg"
+        recovery_service = MockRecoveryService({original_url: recovered_url})
+        original_downloader = MockDownloader(should_fail=True, fail_count=999)
+
+        with patch.object(self.download_manager, '_recovery_service', recovery_service):
+            with patch.object(self.download_manager, '_get_service_for_url', return_value=('generic', original_downloader)) as mock_get_service:
+                with patch('utils.media_download_manager.get_url_validator') as mock_get_validator:
+                    mock_validator = Mock()
+                    mock_validator.validate_url.return_value = Mock(
+                        is_valid=False,
+                        issues=['blocked for test'],
+                    )
+                    mock_get_validator.return_value = mock_validator
+
+                    result_path = self.download_manager.download_media(original_url, self.temp_dir)
+
+        self.assertIsNone(result_path)
+        mock_validator.validate_url.assert_called_once_with(recovered_url)
+        mock_get_service.assert_called_once_with(original_url)
 
     def test_recovery_failure_leads_to_blacklist(self):
         """Test that failed recovery leads to URL blacklisting."""
@@ -348,6 +395,71 @@ class TestRecoveryIntegration(unittest.TestCase):
             # Clean up temporary cache
             if os.path.exists(temp_cache.name):
                 os.unlink(temp_cache.name)
+
+
+class TestRecoveryCacheManagerRegistry(unittest.TestCase):
+    """Test cache-manager registry isolation."""
+
+    def test_cache_manager_is_shared_for_concurrent_same_path_requests(self):
+        from utils import sqlite_manager
+
+        sqlite_manager._cache_managers.clear()
+        start = threading.Barrier(4)
+        creation_lock = threading.Lock()
+        creation_count = 0
+        release_creation = threading.Event()
+        results = []
+
+        def create_manager(_path):
+            nonlocal creation_count
+            with creation_lock:
+                creation_count += 1
+                if creation_count == 4:
+                    release_creation.set()
+            release_creation.wait(timeout=0.1)
+            return object()
+
+        def get_manager():
+            start.wait()
+            results.append(sqlite_manager.get_cache_manager('concurrent-cache.db'))
+
+        try:
+            with patch('utils.sqlite_manager.ThreadLocalSQLiteManager', side_effect=create_manager):
+                threads = [threading.Thread(target=get_manager) for _ in range(4)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+            self.assertEqual(creation_count, 1)
+            self.assertEqual(len({id(manager) for manager in results}), 1)
+        finally:
+            sqlite_manager._cache_managers.clear()
+
+    def test_cache_managers_keep_different_paths_isolated(self):
+        from utils import sqlite_manager
+
+        sqlite_manager._cache_managers.clear()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_path = os.path.join(temp_dir, 'first.db')
+            second_path = os.path.join(temp_dir, 'second.db')
+            first = sqlite_manager.get_cache_manager(first_path)
+            second = sqlite_manager.get_cache_manager(second_path)
+
+            try:
+                first.execute_query('CREATE TABLE entries (value TEXT)')
+                first.execute_query("INSERT INTO entries VALUES ('first')")
+                with second.get_connection() as connection:
+                    table = connection.execute(
+                        "SELECT name FROM sqlite_master WHERE name = 'entries'"
+                    ).fetchone()
+
+                self.assertIsNot(first, second)
+                self.assertIsNone(table)
+            finally:
+                first.close_connection()
+                second.close_connection()
+                sqlite_manager._cache_managers.clear()
 
 
 class TestRecoveryPerformance(unittest.TestCase):

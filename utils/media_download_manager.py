@@ -201,10 +201,10 @@ class MediaDownloadManager:
             # Skip full URL validation for trusted media CDN domains
             parsed_check = urlparse(download_url)
             is_trusted = parsed_check.netloc.lower() in TRUSTED_MEDIA_DOMAINS
+            url_validator = get_url_validator()
 
             if not is_trusted:
                 # Validate URL security before downloading
-                url_validator = get_url_validator()
                 validation_result = url_validator.validate_url(download_url)
 
                 if not validation_result.is_valid:
