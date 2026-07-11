@@ -60,6 +60,15 @@ from ..constants import (
     DOWNLOAD_CHUNK_SIZE, DISK_SPACE_SAFETY_FACTOR, MIN_MEDIA_FILE_SIZE
 )
 
+CROSS_ORIGIN_REDIRECT_HEADER_ALLOWLIST = frozenset({
+    "accept",
+    "accept-encoding",
+    "accept-language",
+    "cache-control",
+    "range",
+    "user-agent",
+})
+
 # Optional imports for format-specific validation
 try:
     from PIL import Image
@@ -508,12 +517,7 @@ class BaseHTTPDownloader:
                         "headers": {
                             name: value
                             for name, value in headers.items()
-                            if name.lower() not in {
-                                "authorization",
-                                "cookie",
-                                "proxy-authorization",
-                                "x-api-key",
-                            }
+                            if name.lower() in CROSS_ORIGIN_REDIRECT_HEADER_ALLOWLIST
                         },
                     }
             current_url = next_url

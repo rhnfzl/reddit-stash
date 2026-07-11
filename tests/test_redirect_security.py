@@ -78,13 +78,25 @@ class TestRedirectSecurity(unittest.TestCase):
                             'Cookie': 'session=secret',
                             'Proxy-Authorization': 'Basic secret',
                             'X-API-Key': 'secret',
+                            'X-Auth-Token': 'secret',
+                            'X-Access-Token': 'secret',
                             'X-Request-ID': 'trace',
+                            'Accept': 'image/*',
+                            'Range': 'bytes=0-',
+                            'User-Agent': 'Reddit Stash test',
                         },
                     },
                 )
 
         self.assertIn('Authorization', get.call_args_list[0].kwargs['headers'])
-        self.assertEqual(get.call_args_list[1].kwargs['headers'], {'X-Request-ID': 'trace'})
+        self.assertEqual(
+            get.call_args_list[1].kwargs['headers'],
+            {
+                'Accept': 'image/*',
+                'Range': 'bytes=0-',
+                'User-Agent': 'Reddit Stash test',
+            },
+        )
 
     def test_same_origin_redirect_preserves_request_headers(self):
         redirect = MagicMock()
