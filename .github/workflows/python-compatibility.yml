@@ -88,3 +88,9 @@ jobs:
           python -m py_compile storage_utils.py
           find utils/ -name "*.py" -exec python -m py_compile {} \;
           echo "All Python files compile successfully"
+
+      - name: Run test suite
+        run: python -m unittest discover tests
+
+      - name: Run linter
+        run: ruff check .
