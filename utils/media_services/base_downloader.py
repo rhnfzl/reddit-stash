@@ -213,6 +213,10 @@ class BaseHTTPDownloader:
             self._session.mount("http://", adapter)
             self._session.mount("https://", adapter)
 
+        # DNS pinning is ineffective if a proxy from the environment resolves the
+        # request elsewhere. Downloads must connect to the validated destination.
+        self._session.trust_env = False
+
         # Set enhanced headers for better compatibility
         # Accept header prioritizes images to prevent Reddit serving HTML wrapper pages
         self._session.headers.update({

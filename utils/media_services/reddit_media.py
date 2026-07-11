@@ -260,7 +260,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                                     video_result,
                                     # The merged file differs from the downloaded video stream.
                                     content_hash=None,
-                                    bytes_downloaded=video_result.bytes_downloaded + audio_result.bytes_downloaded,
+                                    bytes_downloaded=merged_result.bytes_downloaded,
                                 )
 
                     # Audio failed or merge failed, return video-only

@@ -43,13 +43,17 @@ class TestRedditVideoMerge(unittest.TestCase):
             self.assertNotEqual(output_path, video_path)
             with open(output_path, 'wb') as merged_file:
                 merged_file.write(b'merged')
-            return DownloadResult(status=DownloadStatus.SUCCESS, local_path=output_path)
+            return DownloadResult(
+                status=DownloadStatus.SUCCESS,
+                local_path=output_path,
+                bytes_downloaded=6,
+            )
 
         result = self._download_video(merge)
 
         self.assertTrue(result.is_success)
         self.assertEqual(result.local_path, self.save_path)
-        self.assertEqual(result.bytes_downloaded, 12)
+        self.assertEqual(result.bytes_downloaded, 6)
         with open(self.save_path, 'rb') as merged_file:
             self.assertEqual(merged_file.read(), b'merged')
 

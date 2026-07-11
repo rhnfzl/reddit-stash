@@ -15,6 +15,9 @@ class TestRedirectSecurity(unittest.TestCase):
             ServiceConfig(name='redirect-security', max_redirects=2)
         )
 
+    def test_session_does_not_inherit_environment_proxies(self):
+        self.assertFalse(self.downloader._session.trust_env)
+
     def test_rejects_redirect_to_non_public_destination(self):
         redirect = MagicMock()
         redirect.status_code = 302
