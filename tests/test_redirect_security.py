@@ -77,6 +77,7 @@ class TestRedirectSecurity(unittest.TestCase):
                             'Authorization': 'Bearer secret',
                             'Cookie': 'session=secret',
                             'Proxy-Authorization': 'Basic secret',
+                            'X-API-Key': 'secret',
                             'X-Request-ID': 'trace',
                         },
                     },
@@ -88,7 +89,7 @@ class TestRedirectSecurity(unittest.TestCase):
     def test_same_origin_redirect_preserves_request_headers(self):
         redirect = MagicMock()
         redirect.status_code = 302
-        redirect.headers = {'location': '/final.jpg'}
+        redirect.headers = {'location': 'https://PUBLIC.EXAMPLE:443/final.jpg'}
         final = MagicMock()
         final.status_code = 200
         final.headers = {'content-type': 'image/jpeg'}

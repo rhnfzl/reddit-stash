@@ -500,15 +500,7 @@ class BaseHTTPDownloader:
 
             response.close()
             next_url = urljoin(current_url, location)
-            current_origin = urlparse(current_url)
-            next_origin = urlparse(next_url)
-            if (
-                current_origin.scheme,
-                current_origin.netloc,
-            ) != (
-                next_origin.scheme,
-                next_origin.netloc,
-            ):
+            if self._get_origin(current_url) != self._get_origin(next_url):
                 headers = request_kwargs.get("headers")
                 if headers:
                     request_kwargs = {
@@ -520,12 +512,22 @@ class BaseHTTPDownloader:
                                 "authorization",
                                 "cookie",
                                 "proxy-authorization",
+                                "x-api-key",
                             }
                         },
                     }
             current_url = next_url
 
         raise UnsafeRedirectError("Redirect limit exceeded")
+
+    @staticmethod
+    def _get_origin(url: str) -> tuple[str, str, Optional[int]]:
+        """Return the canonical origin tuple for redirect credential checks."""
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        hostname = (parsed.hostname or "").lower()
+        default_port = {"http": 80, "https": 443}.get(scheme)
+        return scheme, hostname, parsed.port or default_port
 
     def _pin_resolved_addresses(
         self,
