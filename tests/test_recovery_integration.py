@@ -462,17 +462,18 @@ class TestRecoveryCacheManagerRegistry(unittest.TestCase):
                 sqlite_manager._cache_managers.clear()
 
 
-class TestRecoveryPerformance(unittest.TestCase):
-    """Performance tests for recovery system."""
+class TestRecoveryProviderIsolation(unittest.TestCase):
+    """Recovery tests that never contact external archives."""
 
-    def test_recovery_timeout_compliance(self):
-        """Test that recovery attempts respect timeout settings."""
-        print("\n⏱️ Testing recovery timeout compliance...")
+    def test_sequential_recovery_uses_injected_provider(self):
+        """Sequential recovery records an injected provider result."""
+        print("\nTesting injected recovery provider...")
 
         # Create recovery service with short timeout
         mock_config = Mock()
         mock_config.get_recovery_config.return_value = {
             'use_wayback_machine': True,
+            'use_arctic_shift': False,
             'use_pushshift_api': False,
             'use_reddit_previews': False,
             'use_reveddit_api': False,
@@ -481,62 +482,56 @@ class TestRecoveryPerformance(unittest.TestCase):
         }
 
         recovery_service = ContentRecoveryService(config=mock_config)
+        provider = Mock()
+        provider.attempt_recovery.return_value = RecoveryResult.failure_result(
+            "Archive unavailable", RecoverySource.WAYBACK_MACHINE
+        )
+        recovery_service.providers = {RecoverySource.WAYBACK_MACHINE: provider}
 
-        test_url = "https://httpbin.org/delay/5"  # URL that delays 5 seconds
+        test_url = "https://example.com/missing-image.jpg"
 
-        print(f"  Testing timeout with: {test_url}")
-        start_time = time.time()
-        result = recovery_service.attempt_recovery(test_url)
-        duration = time.time() - start_time
+        result = recovery_service._attempt_sequential_recovery(test_url, None)
 
-        print(f"    Duration: {duration:.2f}s")
-        print(f"    Result: {'✅ Success' if result.success else '❌ Failed'}")
+        self.assertFalse(result.success)
+        self.assertEqual(result.attempted_sources, frozenset({RecoverySource.WAYBACK_MACHINE}))
+        provider.attempt_recovery.assert_called_once_with(test_url)
 
-        # Should complete within reasonable time (allowing for some overhead)
-        self.assertLess(duration, 10, "Recovery should respect timeout settings")
-
-    def test_parallel_vs_sequential_performance(self):
-        """Compare parallel vs sequential recovery performance."""
-        print("\n⚡ Testing parallel vs sequential performance...")
+    def test_parallel_and_sequential_recovery_use_injected_providers(self):
+        """Both orchestration modes report deterministic provider failures."""
+        print("\nTesting injected providers in both recovery modes...")
 
         mock_config = Mock()
         mock_config.get_recovery_config.return_value = {
             'use_wayback_machine': True,
-            'use_pushshift_api': True,
-            'use_reddit_previews': True,
-            'use_reveddit_api': True,
+            'use_arctic_shift': False,
+            'use_pushshift_api': False,
+            'use_reddit_previews': False,
+            'use_reveddit_api': False,
             'timeout_seconds': 10,
             'cache_duration_hours': 24
         }
 
         recovery_service = ContentRecoveryService(config=mock_config)
-        test_url = "https://httpbin.org/status/404"
+        providers = {}
+        for source in (RecoverySource.WAYBACK_MACHINE, RecoverySource.ARCTIC_SHIFT):
+            provider = Mock()
+            provider.attempt_recovery.return_value = RecoveryResult.failure_result(
+                "Archive unavailable", source
+            )
+            providers[source] = provider
+        recovery_service.providers = providers
+        test_url = "https://example.com/missing-image.jpg"
 
-        # Test sequential mode
-        print("  Testing sequential recovery...")
-        start_time = time.time()
-        result_sequential = recovery_service.attempt_recovery(test_url, async_mode=False)
-        sequential_duration = time.time() - start_time
+        result_sequential = recovery_service._attempt_sequential_recovery(test_url, None)
+        result_parallel = recovery_service._attempt_parallel_recovery(test_url, None)
 
-        # Small delay to avoid caching
-        time.sleep(1)
-
-        # Test parallel mode
-        print("  Testing parallel recovery...")
-        start_time = time.time()
-        result_parallel = recovery_service.attempt_recovery(test_url, async_mode=True)
-        parallel_duration = time.time() - start_time
-
-        print(f"    Sequential: {sequential_duration:.2f}s ({'✅' if result_sequential.success else '❌'})")
-        print(f"    Parallel: {parallel_duration:.2f}s ({'✅' if result_parallel.success else '❌'})")
-
-        # Both attempts should have same success/failure result
-        self.assertEqual(result_sequential.success, result_parallel.success)
-
-        # Log performance difference (don't assert since external services vary)
-        if sequential_duration > 0:
-            speedup = sequential_duration / parallel_duration
-            print(f"    Parallel speedup: {speedup:.2f}x")
+        expected_sources = frozenset(providers)
+        self.assertFalse(result_sequential.success)
+        self.assertFalse(result_parallel.success)
+        self.assertEqual(result_sequential.attempted_sources, expected_sources)
+        self.assertEqual(result_parallel.attempted_sources, expected_sources)
+        for provider in providers.values():
+            self.assertEqual(provider.attempt_recovery.call_count, 2)
 
 
 if __name__ == '__main__':
@@ -550,7 +545,7 @@ if __name__ == '__main__':
     # Add test classes
     test_classes = [
         TestRecoveryIntegration,
-        TestRecoveryPerformance,
+        TestRecoveryProviderIsolation,
     ]
 
     for test_class in test_classes:
