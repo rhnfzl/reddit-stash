@@ -16,7 +16,7 @@ import socket
 import threading
 from contextlib import contextmanager, nullcontext
 from typing import Optional, Dict, Callable, Any
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass
 
 # Modern fast hashing with graceful fallback
@@ -225,29 +225,6 @@ class BaseHTTPDownloader:
         # Increased timeout to 90 seconds to handle Imgur's backoff periods
         if not rate_limit_manager.acquire(service_name, timeout=90):
             raise RuntimeError(f"Rate limit timeout for service '{service_name}'")
-
-    def _get_filename_from_url(self, url: str) -> str:
-        """Extract filename from URL, handling encoding issues."""
-        try:
-            parsed = urlparse(url)
-            filename = os.path.basename(parsed.path)
-
-            # Handle URL encoding issues (common with Reddit URLs)
-            filename = unquote(filename)
-
-            # If no filename in path, generate one from URL
-            if not filename or '.' not in filename:
-                # Use last part of path or generate from URL hash
-                path_parts = parsed.path.strip('/').split('/')
-                if path_parts and path_parts[-1]:
-                    filename = f"{path_parts[-1]}.unknown"
-                else:
-                    filename = f"media_{abs(hash(url)) % 10000}.unknown"
-
-            return filename
-        except Exception:
-            # Fallback to hash-based filename
-            return f"media_{abs(hash(url)) % 10000}.unknown"
 
     def _get_file_extension_from_headers(self, headers: Dict[str, str]) -> Optional[str]:
         """Determine file extension from Content-Type header."""
