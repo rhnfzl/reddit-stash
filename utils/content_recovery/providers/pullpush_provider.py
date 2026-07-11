@@ -120,6 +120,15 @@ class PullPushProvider:
 
             path = parsed.path.lower()
 
+            # Match comment URL patterns before their parent submission URLs.
+            comment_match = re.search(r'/comments/[a-z0-9]+/[^/]+/([a-z0-9]+)', path)
+            if comment_match:
+                return {
+                    'type': 'comment',
+                    'id': comment_match.group(1),
+                    'subreddit': self._extract_subreddit(path)
+                }
+
             # Match submission URL patterns
             submission_patterns = [
                 r'/r/[^/]+/comments/([a-z0-9]+)',  # /r/subreddit/comments/ID
@@ -135,15 +144,6 @@ class PullPushProvider:
                         'id': match.group(1),
                         'subreddit': self._extract_subreddit(path)
                     }
-
-            # Match comment URL patterns
-            comment_match = re.search(r'/comments/[a-z0-9]+/[^/]+/([a-z0-9]+)', path)
-            if comment_match:
-                return {
-                    'type': 'comment',
-                    'id': comment_match.group(1),
-                    'subreddit': self._extract_subreddit(path)
-                }
 
         except Exception as e:
             self._logger.debug(f"Failed to parse Reddit URL {url}: {e}")

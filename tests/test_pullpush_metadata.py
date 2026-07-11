@@ -51,6 +51,14 @@ class _Session:
 
 
 class TestPullPushMetadataRecovery(unittest.TestCase):
+    def test_comment_permalink_uses_comment_lookup(self):
+        parsed = PullPushProvider()._parse_reddit_url(
+            'https://www.reddit.com/r/python/comments/abc123/example/def456/'
+        )
+
+        self.assertEqual(parsed['type'], 'comment')
+        self.assertEqual(parsed['id'], 'def456')
+
     def test_batch_metadata_lookup_returns_records_by_id(self):
         provider = PullPushProvider()
         provider.session = _Session()
