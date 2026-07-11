@@ -220,18 +220,33 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                         if not video_result.is_success:
                             return video_result
 
-                    if audio_result.is_success:
-                        merged_result = self._merge_video_audio(
-                            video_result.local_path,
-                            audio_result.local_path,
-                            save_path
-                        )
-                        if merged_result.is_success:
-                            return replace(
-                                video_result,
-                                local_path=merged_result.local_path,
-                                bytes_downloaded=video_result.bytes_downloaded + audio_result.bytes_downloaded
+                    if audio_result.is_success and video_result.local_path:
+                        with tempfile.NamedTemporaryFile(
+                            dir=os.path.dirname(video_result.local_path) or '.',
+                            suffix='.mp4',
+                            delete=False,
+                        ) as temp_merged:
+                            temp_merged_path = temp_merged.name
+
+                        with temp_files_cleanup(temp_merged_path):
+                            merged_result = self._merge_video_audio(
+                                video_result.local_path,
+                                audio_result.local_path,
+                                temp_merged_path,
                             )
+                            if merged_result.is_success:
+                                try:
+                                    os.replace(temp_merged_path, video_result.local_path)
+                                except OSError as error:
+                                    _logger.warning(
+                                        "Could not promote merged Reddit video, keeping video-only file: %s",
+                                        error,
+                                    )
+                                    return video_result
+                                return replace(
+                                    video_result,
+                                    bytes_downloaded=video_result.bytes_downloaded + audio_result.bytes_downloaded,
+                                )
 
                     # Audio failed or merge failed, return video-only
                     return video_result
