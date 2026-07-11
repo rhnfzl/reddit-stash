@@ -1,7 +1,7 @@
 """
 Unit tests for the storage provider abstraction layer.
 
-All cloud provider tests use mocks — no real AWS or Dropbox access required.
+All cloud provider tests use mocks, with no real AWS or Dropbox access required.
 """
 
 import os
