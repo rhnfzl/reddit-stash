@@ -499,7 +499,31 @@ class BaseHTTPDownloader:
                 raise UnsafeRedirectError("Redirect limit exceeded")
 
             response.close()
-            current_url = urljoin(current_url, location)
+            next_url = urljoin(current_url, location)
+            current_origin = urlparse(current_url)
+            next_origin = urlparse(next_url)
+            if (
+                current_origin.scheme,
+                current_origin.netloc,
+            ) != (
+                next_origin.scheme,
+                next_origin.netloc,
+            ):
+                headers = request_kwargs.get("headers")
+                if headers:
+                    request_kwargs = {
+                        **request_kwargs,
+                        "headers": {
+                            name: value
+                            for name, value in headers.items()
+                            if name.lower() not in {
+                                "authorization",
+                                "cookie",
+                                "proxy-authorization",
+                            }
+                        },
+                    }
+            current_url = next_url
 
         raise UnsafeRedirectError("Redirect limit exceeded")
 
