@@ -11,6 +11,7 @@ import re
 import logging
 from typing import Optional
 from dataclasses import dataclass
+from urllib.parse import unquote
 
 
 logger = logging.getLogger(__name__)
@@ -106,16 +107,11 @@ class SecurePathHandler:
             issues.append(f"Component too long ({len(component)} > {self.max_component_length})")
             component = component[:self.max_component_length]
 
-        # Check for traversal patterns
+        # Check decoded input too, since callers may receive URL-encoded paths.
+        decoded_component = unquote(component)
         for pattern in self.TRAVERSAL_PATTERNS:
-            if pattern.search(component):
+            if pattern.search(decoded_component):
                 issues.append(f"Directory traversal pattern detected: {pattern.pattern}")
-
-        # Check for reserved names
-        component_upper = component.upper()
-        if component_upper in self.RESERVED_NAMES:
-            issues.append(f"Reserved filename: {component}")
-            component = f"_{component}"  # Prefix with underscore
 
         # Remove dangerous characters
         original_length = len(component)
@@ -126,6 +122,10 @@ class SecurePathHandler:
         # Additional cleanup
         component = self._clean_component(component)
 
+        if component.split('.', 1)[0].upper() in self.RESERVED_NAMES:
+            issues.append(f"Reserved filename: {component}")
+            component = f"_{component}"
+
         # Final validation
         if not component or component in ['.', '..']:
             return PathValidationResult(
@@ -134,8 +134,7 @@ class SecurePathHandler:
             )
 
         # Check if it's safe enough
-        has_critical_issues = any("traversal" in issue.lower() or "reserved" in issue.lower()
-                                for issue in issues)
+        has_critical_issues = any("traversal" in issue.lower() for issue in issues)
 
         return PathValidationResult(
             is_safe=not has_critical_issues,
@@ -154,15 +153,15 @@ class SecurePathHandler:
         Returns:
             Cleaned component
         """
-        # Remove leading/trailing dots and spaces
-        component = component.strip('. ')
+        if component.startswith('.'):
+            component = 'dot_' + component[1:]
+
+        # Remove trailing dots and surrounding spaces.
+        component = component.strip(' ')
+        component = component.rstrip('. ')
 
         # Replace multiple underscores with single
         component = re.sub(r'_+', '_', component)
-
-        # Ensure it doesn't start with a dot (hidden files)
-        if component.startswith('.'):
-            component = 'dot_' + component[1:]
 
         return component
 
@@ -197,7 +196,7 @@ class SecurePathHandler:
         all_issues = []
 
         for component in path_components:
-            if not component:
+            if not component or component == '.':
                 continue
 
             result = self.sanitize_path_component(component)
