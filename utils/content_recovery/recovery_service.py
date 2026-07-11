@@ -7,7 +7,8 @@ managing multiple providers and implementing the recovery cascade strategy.
 
 import time
 import logging
-from typing import Optional, Dict, Any
+from dataclasses import replace
+from typing import Optional, Dict, Any, FrozenSet
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 
 from .recovery_metadata import (
@@ -25,6 +26,7 @@ from ..rate_limiter import rate_limit_manager
 
 
 PARALLEL_RECOVERY_TIMEOUT_SECONDS = 30
+NEGATIVE_CACHE_TTL_HOURS = 1
 
 
 class ContentRecoveryService:
@@ -121,6 +123,7 @@ class ContentRecoveryService:
                 self._cache_successful_result(url, recovery_result)
                 self._stats['successful_recoveries'] += 1
             else:
+                self._cache_negative_results(url, recovery_result.attempted_sources)
                 self._stats['failed_recoveries'] += 1
 
             duration = time.time() - start_time
@@ -143,11 +146,26 @@ class ContentRecoveryService:
     def _check_cache(self, url: str) -> Optional[RecoveryResult]:
         """Check if we have a cached recovery result for this URL."""
         try:
-            # Check each provider's cache
+            successful_results = []
+            negative_sources = set()
+            quality_priorities = {
+                RecoveryQuality.ORIGINAL: 5,
+                RecoveryQuality.HIGH_QUALITY: 4,
+                RecoveryQuality.MEDIUM_QUALITY: 3,
+                RecoveryQuality.LOW_QUALITY: 2,
+                RecoveryQuality.THUMBNAIL: 1,
+                RecoveryQuality.METADATA_ONLY: 0,
+            }
+            provider_priorities = {
+                RecoverySource.WAYBACK_MACHINE: 4,
+                RecoverySource.PULLPUSH_IO: 3,
+                RecoverySource.REDDIT_PREVIEWS: 2,
+                RecoverySource.REVEDDIT: 1,
+            }
+
             for source in self.providers.keys():
                 cached_entry = self.cache_manager.get_cached_result(url, source)
                 if cached_entry and not cached_entry.is_expired:
-                    # Create recovery result from cache
                     metadata = RecoveryMetadata(
                         source=RecoverySource(cached_entry.recovery_source),
                         recovered_url=cached_entry.recovered_url,
@@ -157,12 +175,24 @@ class ContentRecoveryService:
                     )
 
                     if cached_entry.recovered_url:
-                        return RecoveryResult.success_result(cached_entry.recovered_url, metadata)
+                        successful_results.append(RecoveryResult.success_result(
+                            cached_entry.recovered_url,
+                            metadata,
+                        ))
                     else:
-                        return RecoveryResult.failure_result(
-                            "Cached negative result",
-                            RecoverySource(cached_entry.recovery_source)
-                        )
+                        negative_sources.add(source)
+
+            if successful_results:
+                return max(
+                    successful_results,
+                    key=lambda result: (
+                        quality_priorities.get(result.metadata.content_quality, 0),
+                        provider_priorities.get(result.metadata.source, 0),
+                    ),
+                )
+
+            if set(self.providers).issubset(negative_sources):
+                return RecoveryResult.failure_result("Cached negative result")
 
         except Exception as e:
             self._logger.debug(f"Cache check failed: {e}")
@@ -179,6 +209,8 @@ class ContentRecoveryService:
             RecoverySource.REDDIT_PREVIEWS,    # Lower quality but sometimes works
             RecoverySource.REVEDDIT            # Specific to moderator deletions
         ]
+
+        completed_sources = set()
 
         for source in provider_order:
             if source not in self.providers:
@@ -197,22 +229,30 @@ class ContentRecoveryService:
 
             try:
                 result = provider.attempt_recovery(url)
+                completed_sources.add(source)
 
                 # Record the attempt
                 self._record_attempt(url, source, result, failure_reason)
 
                 if result.success:
                     self._logger.info(f"Recovery successful via {source.value}: {result.recovered_url}")
-                    return result
+                    return replace(
+                        result,
+                        attempted_sources=result.attempted_sources | frozenset(completed_sources),
+                    )
                 else:
                     self._logger.debug(f"Recovery failed via {source.value}: {result.error_message}")
 
             except Exception as e:
+                completed_sources.add(source)
                 self._logger.error(f"Provider {source.value} threw exception: {e}")
                 # Continue to next provider
 
         # All providers failed
-        return RecoveryResult.failure_result("All recovery providers failed")
+        return RecoveryResult.failure_result(
+            "All recovery providers failed",
+            attempted_sources=frozenset(completed_sources),
+        )
 
     def _attempt_parallel_recovery(self, url: str, failure_reason: Optional[str]) -> RecoveryResult:
         """Collect parallel recovery results and select the highest-quality result."""
@@ -234,6 +274,7 @@ class ContentRecoveryService:
 
         # Submit all provider attempts to thread pool.
         executor = ThreadPoolExecutor(max_workers=min(4, len(self.providers)))
+        completed_sources = set()
         try:
             future_to_source = {}
 
@@ -259,6 +300,7 @@ class ContentRecoveryService:
 
                     try:
                         result = future.result()
+                        completed_sources.add(source)
                         self._record_attempt(url, source, result, failure_reason)
 
                         if result.success:
@@ -272,6 +314,7 @@ class ContentRecoveryService:
                             )
 
                     except Exception as e:
+                        completed_sources.add(source)
                         self._logger.error(f"Provider {source.value} threw exception: {e}")
             except FuturesTimeoutError:
                 for future in future_to_source:
@@ -293,10 +336,16 @@ class ContentRecoveryService:
                     provider_priorities.get(item[0], 0),
                 ),
             )
-            return best_result
+            return replace(
+                best_result,
+                attempted_sources=best_result.attempted_sources | frozenset(completed_sources),
+            )
 
         # All providers failed
-        return RecoveryResult.failure_result("All recovery providers failed")
+        return RecoveryResult.failure_result(
+            "All recovery providers failed",
+            attempted_sources=frozenset(completed_sources),
+        )
 
     def _record_attempt(self, url: str, source: RecoverySource, result: RecoveryResult,
                        failure_reason: Optional[str]):
@@ -342,6 +391,24 @@ class ContentRecoveryService:
 
         except Exception as e:
             self._logger.debug(f"Failed to cache recovery result: {e}")
+
+    def _cache_negative_results(
+        self,
+        url: str,
+        completed_sources: FrozenSet[RecoverySource],
+    ):
+        """Cache completed provider failures without suppressing deferred providers."""
+        try:
+            for source in completed_sources:
+                self.cache_manager.cache_result(
+                    url=url,
+                    source=source,
+                    recovered_url=None,
+                    quality=RecoveryQuality.METADATA_ONLY,
+                    ttl_hours=NEGATIVE_CACHE_TTL_HOURS,
+                )
+        except Exception as e:
+            self._logger.debug(f"Failed to cache negative recovery result: {e}")
 
     def get_provider_info(self) -> Dict[str, Dict[str, Any]]:
         """Get information about all available providers."""

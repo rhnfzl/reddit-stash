@@ -74,6 +74,25 @@ class TestParallelRecoverySelection(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_message, 'All recovery providers failed')
 
+    def test_success_preserves_all_completed_provider_sources(self):
+        service = self._service({
+            RecoverySource.WAYBACK_MACHINE: _Provider(RecoveryResult.failure_result('missing')),
+            RecoverySource.REDDIT_PREVIEWS: _Provider(
+                _result(RecoverySource.REDDIT_PREVIEWS, RecoveryQuality.THUMBNAIL),
+            ),
+        })
+
+        result = service._attempt_sequential_recovery('https://example.com/image.jpg', None)
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            result.attempted_sources,
+            frozenset({
+                RecoverySource.WAYBACK_MACHINE,
+                RecoverySource.REDDIT_PREVIEWS,
+            }),
+        )
+
     def test_rate_limited_pullpush_is_not_started(self):
         provider = _Provider(_result(RecoverySource.PULLPUSH_IO, RecoveryQuality.MEDIUM_QUALITY))
         service = self._service({RecoverySource.PULLPUSH_IO: provider})
