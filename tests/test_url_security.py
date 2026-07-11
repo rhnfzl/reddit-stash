@@ -8,7 +8,9 @@ and malicious URL detection functionality.
 import unittest
 import sys
 import os
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from urllib.parse import urlparse
+from unittest.mock import MagicMock, patch
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +24,12 @@ class TestURLSecurityValidator(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.validator = URLSecurityValidator()
+        self.dns_lookup = patch(
+            'utils.url_security.socket.getaddrinfo',
+            return_value=[(2, 1, 6, '', ('93.184.216.34', 0))],
+        )
+        self.mock_dns_lookup = self.dns_lookup.start()
+        self.addCleanup(self.dns_lookup.stop)
 
     def test_valid_https_urls(self):
         """Test validation of valid HTTPS URLs."""
@@ -90,7 +98,10 @@ class TestURLSecurityValidator(unittest.TestCase):
             'https://192.168.1.1/admin',
             'https://10.0.0.1/config',
             'https://172.16.0.1/internal',
-            'https://169.254.1.1/metadata'
+            'https://169.254.1.1/metadata',
+            'https://[::1]/internal',
+            'https://[fe80::1]/metadata',
+            'https://[fc00::1]/private',
         ]
 
         for url in private_ips:
@@ -99,6 +110,51 @@ class TestURLSecurityValidator(unittest.TestCase):
                 self.assertFalse(result.is_valid)
                 self.assertEqual(result.risk_level, 'high')
                 self.assertIn('Private/internal IP', str(result.issues))
+
+    def test_domain_resolving_to_private_address_is_rejected(self):
+        self.dns_lookup.stop()
+        with patch(
+            'utils.url_security.socket.getaddrinfo',
+            return_value=[(2, 1, 6, '', ('127.0.0.1', 0))],
+        ):
+            result = self.validator.validate_url('https://public-name.example/image.jpg')
+
+        self.assertFalse(result.is_valid)
+        self.assertEqual(result.risk_level, 'high')
+        self.assertIn('not publicly routable', str(result.issues))
+
+    def test_domain_resolving_only_to_public_addresses_is_allowed(self):
+        result = self.validator.validate_url('https://public-name.example/image.jpg')
+
+        self.assertTrue(result.is_valid)
+        self.assertEqual(result.risk_level, 'low')
+
+    def test_domain_resolution_timeout_is_rejected(self):
+        future = MagicMock()
+        future.result.side_effect = FuturesTimeoutError()
+        executor = MagicMock()
+        executor.submit.return_value = future
+
+        with patch('utils.url_security._dns_executor', executor):
+            result = self.validator.validate_url('https://public-name.example/image.jpg')
+
+        self.assertFalse(result.is_valid)
+        self.assertEqual(result.risk_level, 'high')
+        self.assertIn('timed out', str(result.issues))
+        future.cancel.assert_called_once_with()
+
+    def test_address_resolver_rejects_malformed_hosts_without_dns(self):
+        self.mock_dns_lookup.reset_mock()
+
+        self.assertEqual(
+            self.validator.resolve_public_addresses('https://exam_ple.com/image.jpg'),
+            (),
+        )
+        self.assertEqual(
+            self.validator.resolve_public_addresses('https://[::1/image.jpg'),
+            (),
+        )
+        self.mock_dns_lookup.assert_not_called()
 
     def test_suspicious_patterns(self):
         """Test detection of suspicious URL patterns."""
@@ -296,7 +352,7 @@ class TestURLSecurityValidator(unittest.TestCase):
 
     def test_custom_blocked_domains_initialization(self):
         """Test initialization with custom blocked domains."""
-        custom_domains = {'bad.example.com', 'evil.test.org'}
+        custom_domains = {'BAD.EXAMPLE.COM', 'evil.test.org'}
         validator = URLSecurityValidator(additional_blocked_domains=custom_domains)
 
         for domain in custom_domains:

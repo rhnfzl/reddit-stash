@@ -6,15 +6,34 @@ malicious URLs from being processed. Implements 2024 security best practices
 including domain blocklisting, URL sanitization, and input validation.
 """
 
-import re
+import ipaddress
 import logging
+import socket
+import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from urllib.parse import urlparse, urlunparse
 from typing import Set, Optional, Dict, Any
 from dataclasses import dataclass
-from .constants import MAX_URL_LENGTH, MIN_URL_LENGTH
+from .constants import MAX_URL_LENGTH, MIN_URL_LENGTH, URL_VALIDATION_TIMEOUT
 
 
 logger = logging.getLogger(__name__)
+_dns_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="url-dns")
+
+
+def _resolve_hostname(hostname: str):
+    """Resolve a hostname within the URL validation timeout."""
+    future = _dns_executor.submit(
+        socket.getaddrinfo,
+        hostname,
+        None,
+        type=socket.SOCK_STREAM,
+    )
+    try:
+        return future.result(timeout=URL_VALIDATION_TIMEOUT)
+    except FuturesTimeoutError as error:
+        future.cancel()
+        raise OSError(f"DNS resolution timed out for '{hostname}'") from error
 
 
 @dataclass
@@ -53,18 +72,6 @@ class URLSecurityValidator:
         '0.0.0.0',    # Block null route
     }
 
-    # Private/internal IP ranges (RFC 1918 and others)
-    PRIVATE_IP_PATTERNS = [
-        re.compile(r'^192\.168\.'),          # 192.168.0.0/16
-        re.compile(r'^10\.'),                # 10.0.0.0/8
-        re.compile(r'^172\.(1[6-9]|2[0-9]|3[0-1])\.'),  # 172.16.0.0/12
-        re.compile(r'^169\.254\.'),          # 169.254.0.0/16 (link-local)
-        re.compile(r'^fe80:'),               # IPv6 link-local
-        re.compile(r'^::1$'),                # IPv6 loopback
-        re.compile(r'^fc[0-9a-f][0-9a-f]:'), # IPv6 private
-        re.compile(r'^fd[0-9a-f][0-9a-f]:'), # IPv6 private
-    ]
-
     # Suspicious URL patterns
     SUSPICIOUS_PATTERNS = [
         re.compile(r'[<>"\']'),              # HTML/script injection
@@ -84,7 +91,7 @@ class URLSecurityValidator:
         """
         self.blocked_domains = self.BLOCKED_DOMAINS.copy()
         if additional_blocked_domains:
-            self.blocked_domains.update(additional_blocked_domains)
+            self.blocked_domains.update(domain.lower() for domain in additional_blocked_domains)
 
         logger.info(f"URL Security Validator initialized with {len(self.blocked_domains)} blocked domains")
 
@@ -141,8 +148,12 @@ class URLSecurityValidator:
             issues.append(f"Invalid scheme '{parsed.scheme}' - only http/https allowed")
             risk_level = "high"
 
+        if parsed.username is not None or parsed.password is not None:
+            issues.append("Credentials in URLs are not allowed")
+            risk_level = "high"
+
         # Validate domain
-        domain_issues, domain_risk = self._validate_domain(parsed.netloc)
+        domain_issues, domain_risk = self._validate_domain(parsed.hostname)
         issues.extend(domain_issues)
         if domain_risk == "high":
             risk_level = "high"
@@ -171,9 +182,9 @@ class URLSecurityValidator:
             risk_level=risk_level
         )
 
-    def _validate_domain(self, netloc: str) -> tuple[list, str]:
+    def _validate_domain(self, hostname: Optional[str]) -> tuple[list, str]:
         """
-        Validate domain/netloc portion of URL.
+        Validate a hostname and every address it resolves to.
 
         Returns:
             Tuple of (issues_list, risk_level)
@@ -181,29 +192,52 @@ class URLSecurityValidator:
         issues = []
         risk_level = "low"
 
-        if not netloc:
+        if not hostname:
             issues.append("Missing domain/host")
             return issues, "high"
 
-        # Extract hostname (remove port if present)
-        hostname = netloc.split(':')[0].lower()
+        hostname = hostname.lower()
 
         # Check against blocked domains
         if hostname in self.blocked_domains:
             issues.append(f"Domain '{hostname}' is blocked")
-            risk_level = "high"
+            return issues, "high"
 
-        # Check for private/internal IPs
-        for pattern in self.PRIVATE_IP_PATTERNS:
-            if pattern.match(hostname):
-                issues.append(f"Private/internal IP address not allowed: {hostname}")
-                risk_level = "high"
-                break
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            address = None
+
+        if address is not None:
+            if not address.is_global:
+                issues.append(
+                    f"Private/internal IP address not publicly routable: {hostname}"
+                )
+                return issues, "high"
+            return issues, risk_level
 
         # Basic domain format validation
         if not self._is_valid_domain_format(hostname):
             issues.append(f"Invalid domain format: {hostname}")
-            risk_level = "medium"
+            return issues, "medium"
+
+        try:
+            addresses = {result[4][0] for result in _resolve_hostname(hostname)}
+        except OSError as error:
+            issues.append(f"Could not resolve domain '{hostname}': {error}")
+            return issues, "high"
+
+        if not addresses:
+            issues.append(f"Could not resolve domain '{hostname}'")
+            return issues, "high"
+
+        for resolved_address in addresses:
+            if not ipaddress.ip_address(resolved_address).is_global:
+                issues.append(
+                    "Resolved address is not publicly routable: "
+                    f"{resolved_address}"
+                )
+                return issues, "high"
 
         return issues, risk_level
 
@@ -222,6 +256,40 @@ class URLSecurityValidator:
             r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
         )
         return bool(domain_pattern.match(domain)) and len(domain) <= 253
+
+    def resolve_public_addresses(self, url: str) -> tuple[str, ...]:
+        """Resolve a previously validated URL to only globally routable addresses."""
+        try:
+            hostname = urlparse(url).hostname
+        except ValueError:
+            return ()
+        if not hostname:
+            return ()
+
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            if not self._is_valid_domain_format(hostname):
+                return ()
+
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            address = None
+
+        if address is not None:
+            return (str(address),) if address.is_global else ()
+
+        try:
+            addresses = {result[4][0] for result in _resolve_hostname(hostname)}
+        except OSError:
+            return ()
+
+        if not addresses or any(
+            not ipaddress.ip_address(address).is_global for address in addresses
+        ):
+            return ()
+        return tuple(sorted(addresses))
 
     def _check_suspicious_patterns(self, url: str) -> tuple[list, str]:
         """
