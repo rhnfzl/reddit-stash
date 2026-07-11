@@ -1,13 +1,33 @@
 """Tests for the direct Imgur API path."""
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from utils.media_services.imgur_media import ImgurMediaDownloader
 from utils.service_abstractions import DownloadResult, DownloadStatus, ServiceConfig
 
 
 class TestImgurDirectApi(unittest.TestCase):
+    def test_api_get_rotates_client_id_after_rate_limit(self):
+        downloader = ImgurMediaDownloader(
+            ServiceConfig(name='Imgur', api_keys={'client_ids': ['first', 'second']})
+        )
+        rate_limited = Mock(status_code=429)
+        success = Mock(status_code=200)
+        with patch.object(downloader._session, 'get', side_effect=[rate_limited, success]) as api_get:
+            response = downloader._api_get('https://api.imgur.com/3/image/abc123', (5.0, 10.0))
+
+        self.assertIs(response, success)
+        self.assertEqual(api_get.call_count, 2)
+        self.assertEqual(
+            api_get.call_args_list[0].kwargs['headers']['Authorization'],
+            'Client-ID first',
+        )
+        self.assertEqual(
+            api_get.call_args_list[1].kwargs['headers']['Authorization'],
+            'Client-ID second',
+        )
+
     def test_configured_image_download_uses_direct_api(self):
         downloader = ImgurMediaDownloader(
             ServiceConfig(name='Imgur', api_keys={'client_ids': ['client-id']})

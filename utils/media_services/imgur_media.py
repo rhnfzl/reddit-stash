@@ -157,6 +157,33 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
 
         return None, 'unknown'
 
+    def _api_get(self, url: str, timeout: tuple[float, float]):
+        """Fetch an Imgur API endpoint, rotating client IDs after a 429 response."""
+        for rotation in range(len(self._client_ids)):
+            self._respect_rate_limit()
+
+            client_id = self._get_current_client_id()
+            response = self._session.get(
+                url,
+                headers={
+                    'Authorization': f'Client-ID {client_id}',
+                    'User-Agent': self.config.user_agent,
+                },
+                timeout=timeout,
+            )
+
+            if response.status_code != 429:
+                return response
+
+            self._logger.debug(
+                "Imgur API rate limited (429), rotating client ID (%s/%s)",
+                rotation + 1,
+                len(self._client_ids),
+            )
+            self._rotate_client_id()
+
+        return None
+
     def _get_metadata_direct_api(self, imgur_id: str, media_type: str, original_url: str) -> Optional[MediaMetadata]:
         """Get metadata using direct API calls."""
         try:
@@ -170,26 +197,8 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             else:
                 url = f'https://api.imgur.com/3/image/{imgur_id}'
 
-            max_rotations = len(self._client_ids)
-            for rotation in range(max_rotations):
-                self._respect_rate_limit()
-
-                client_id = self._get_current_client_id()
-                headers = {
-                    'Authorization': f'Client-ID {client_id}',
-                    'User-Agent': self.config.user_agent
-                }
-
-                response = self._session.get(url, headers=headers, timeout=(5.0, 10.0))
-
-                if response.status_code == 429:
-                    self._logger.debug(f"Imgur API rate limited (429) for metadata, rotating client ID ({rotation + 1}/{max_rotations})")
-                    self._rotate_client_id()
-                    continue  # Retry with new client ID
-
-                break  # Non-429 response, proceed
-            else:
-                # All client IDs exhausted
+            response = self._api_get(url, (5.0, 10.0))
+            if response is None:
                 return None
 
             response.raise_for_status()
@@ -265,28 +274,11 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                     error_message="No Imgur client IDs available for API access"
                 )
 
-            api_url = f'https://api.imgur.com/3/image/{imgur_id}'
-            max_rotations = len(self._client_ids)
-
-            for rotation in range(max_rotations):
-                self._respect_rate_limit()
-
-                client_id = self._get_current_client_id()
-                headers = {
-                    'Authorization': f'Client-ID {client_id}',
-                    'User-Agent': self.config.user_agent
-                }
-
-                response = self._session.get(api_url, headers=headers, timeout=(5.0, 10.0))
-
-                if response.status_code == 429:
-                    self._logger.debug(f"Imgur API rate limited (429) for {imgur_id}, rotating client ID ({rotation + 1}/{max_rotations})")
-                    self._rotate_client_id()
-                    continue  # Retry with new client ID
-
-                break  # Non-429 response, proceed
-            else:
-                # All client IDs exhausted
+            response = self._api_get(
+                f'https://api.imgur.com/3/image/{imgur_id}',
+                (5.0, 10.0),
+            )
+            if response is None:
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
                     error_message="Imgur API rate limit exceeded (all client IDs exhausted)",
@@ -412,32 +404,11 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                     error_message="No Imgur client IDs configured"
                 )
 
-            album_url = f'https://api.imgur.com/3/album/{album_id}'
-            max_rotations = len(self._client_ids)
-
-            for rotation in range(max_rotations):
-                self._respect_rate_limit()
-
-                client_id = self._get_current_client_id()
-                headers = {
-                    'Authorization': f'Client-ID {client_id}',
-                    'User-Agent': self.config.user_agent
-                }
-
-                response = self._session.get(
-                    album_url,
-                    headers=headers,
-                    timeout=(5.0, 15.0)
-                )
-
-                if response.status_code == 429:
-                    self._logger.debug(f"Imgur API rate limited (429) for album {album_id}, rotating client ID ({rotation + 1}/{max_rotations})")
-                    self._rotate_client_id()
-                    continue  # Retry with new client ID
-
-                break  # Non-429 response, proceed
-            else:
-                # All client IDs exhausted
+            response = self._api_get(
+                f'https://api.imgur.com/3/album/{album_id}',
+                (5.0, 15.0),
+            )
+            if response is None:
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
                     error_message="Imgur rate limit exceeded (all client IDs exhausted)",
