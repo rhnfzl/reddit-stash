@@ -74,6 +74,11 @@ class TestParallelRecoverySelection(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_message, 'All recovery providers failed')
 
+    def test_failure_result_records_its_provider_source(self):
+        result = RecoveryResult.failure_result('missing', RecoverySource.WAYBACK_MACHINE)
+
+        self.assertEqual(result.attempted_sources, frozenset({RecoverySource.WAYBACK_MACHINE}))
+
     def test_success_preserves_all_completed_provider_sources(self):
         service = self._service({
             RecoverySource.WAYBACK_MACHINE: _Provider(RecoveryResult.failure_result('missing')),

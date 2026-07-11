@@ -99,6 +99,11 @@ class MediaDownloadManager:
             return local_path
 
         with self._url_lock:
+            local_path_key = os.path.realpath(local_path)
+            for tracked_hash, tracked_path in list(self._downloaded_content_hashes.items()):
+                if tracked_hash != content_hash and os.path.realpath(tracked_path) == local_path_key:
+                    del self._downloaded_content_hashes[tracked_hash]
+
             canonical_path = self._downloaded_content_hashes.get(content_hash)
             if canonical_path and canonical_path != local_path and os.path.isfile(canonical_path):
                 replacement_path = None
@@ -519,12 +524,14 @@ class MediaDownloadManager:
                 metadata = retry_item.get("metadata") or {}
                 save_path = metadata.get("save_path")
                 if not isinstance(save_path, str) or not save_path:
-                    self._logger.error("Retry item has no persisted save path: %s", url)
+                    # Legacy queue rows lack a safe destination. Keep them retryable rather
+                    # than guessing a path and writing into the wrong export.
+                    self._logger.error("Legacy retry item has no persisted save path: %s", url)
                     stats["failed"] += 1
                     self._retry_queue.mark_retry_completed(
                         url,
                         success=False,
-                        error_message="Retry item has no persisted save path",
+                        error_message="Legacy retry item has no persisted save path",
                     )
                     continue
 

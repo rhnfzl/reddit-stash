@@ -26,11 +26,17 @@ def format_date(timestamp):
 
 
 def _write_yaml_frontmatter(file, fields):
-    """Write a YAML header with JSON-quoted strings for safe scalar values."""
+    """Write a YAML header with JSON-encoded scalar values."""
     file.write('---\n')
     for key, value in fields.items():
-        file.write(f'{key}: {json.dumps(str(value), ensure_ascii=False)}\n')
+        file.write(f'{key}: {json.dumps(value, ensure_ascii=False)}\n')
     file.write('---\n\n')
+
+
+def _recovered_value(data, key, fallback):
+    """Return archived values while replacing explicit nulls with export defaults."""
+    value = data.get(key)
+    return fallback if value is None else value
 
 def extract_video_id(url):
     """Extract the video ID from a YouTube URL."""
@@ -350,10 +356,10 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
             title = recovered_data.get('title') or getattr(submission, 'title', f'Recovered post {submission.id}')
             frontmatter.update({
                 'title': title,
-                'subreddit': recovered_data.get('subreddit', '[unknown]'),
-                'timestamp': recovered_data.get('created_utc', 'unknown'),
-                'author': recovered_data.get('author', '[deleted]'),
-                'recovered': 'true',
+                'subreddit': _recovered_value(recovered_data, 'subreddit', '[unknown]'),
+                'timestamp': _recovered_value(recovered_data, 'created_utc', 'unknown'),
+                'author': _recovered_value(recovered_data, 'author', '[deleted]'),
+                'recovered': True,
                 'permalink': getattr(submission, 'original_url', ''),
             })
         else:
@@ -452,15 +458,15 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
 
         if is_recovered:
             recovered_data = comment.recovered_data if hasattr(comment, 'recovered_data') else {}
-            author = recovered_data.get('author', '[deleted]')
-            body = recovered_data.get('body', '[Content not available]')
+            author = _recovered_value(recovered_data, 'author', '[deleted]')
+            body = _recovered_value(recovered_data, 'body', '[Content not available]')
             title = recovered_data.get('title') or f'Comment by {author}'
             frontmatter = {
                 'id': comment.id,
                 'title': title,
                 'author': author,
                 'body': body,
-                'recovered': 'true',
+                'recovered': True,
             }
         else:
             author = f'/u/{comment.author.name if comment.author else "[deleted]"}'

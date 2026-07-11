@@ -88,6 +88,37 @@ class TestContentHashMediaDedup(unittest.TestCase):
         self.assertFalse(os.path.samefile(first_path, second_path))
         self.assertEqual(Path(second_path).read_bytes(), b"https://i.redd.it/second.jpg")
 
+    def test_overwriting_a_path_removes_its_stale_hash_mapping(self):
+        shared_path = os.path.join(self.temp_dir.name, "shared.jpg")
+        duplicate_path = os.path.join(self.temp_dir.name, "duplicate.jpg")
+        content_hashes = {
+            "https://i.redd.it/first.jpg": "first-hash",
+            "https://i.redd.it/second.jpg": "second-hash",
+            "https://i.redd.it/repeated-first.jpg": "first-hash",
+        }
+
+        def download(url, destination):
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            Path(destination).write_bytes(url.encode())
+            return DownloadResult(
+                status=DownloadStatus.SUCCESS,
+                local_path=destination,
+                content_hash=content_hashes[url],
+            )
+
+        self.manager._get_service_for_url = Mock(return_value=("reddit_image", Mock(download=download)))
+
+        def transform(url):
+            return SimpleNamespace(url=url, transformed=False, platform="", notes="")
+
+        with patch("utils.media_download_manager.url_transformer.transform", side_effect=transform):
+            self.manager.download_media("https://i.redd.it/first.jpg", shared_path)
+            self.manager.download_media("https://i.redd.it/second.jpg", shared_path)
+            self.manager.download_media("https://i.redd.it/repeated-first.jpg", duplicate_path)
+
+        self.assertEqual(Path(shared_path).read_bytes(), b"https://i.redd.it/second.jpg")
+        self.assertEqual(Path(duplicate_path).read_bytes(), b"https://i.redd.it/repeated-first.jpg")
+
 
 if __name__ == "__main__":
     unittest.main()

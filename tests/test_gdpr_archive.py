@@ -219,6 +219,7 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
         }
         self.assertEqual(fields['title'], title)
         self.assertEqual(fields['id'], 'post123')
+        self.assertIs(fields['archive_enriched'], True)
 
 
 if __name__ == '__main__':

@@ -80,7 +80,7 @@ class TestMediaRetryQueue(unittest.TestCase):
         self.manager._retry_queue.mark_retry_completed.assert_called_once_with(
             url,
             success=False,
-            error_message='Retry item has no persisted save path',
+            error_message='Legacy retry item has no persisted save path',
         )
 
 

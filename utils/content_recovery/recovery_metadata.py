@@ -89,7 +89,10 @@ class RecoveryResult:
             success=False,
             error_message=error,
             source=source,
-            attempted_sources=attempted_sources,
+            attempted_sources=(
+                attempted_sources | frozenset({source})
+                if source is not None else attempted_sources
+            ),
             negative_cache_sources=negative_cache_sources,
         )
 

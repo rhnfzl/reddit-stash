@@ -234,10 +234,10 @@ def _archive_text(value):
 
 
 def _yaml_frontmatter(fields):
-    """Render a YAML header with JSON-quoted scalar values."""
+    """Render a YAML header with JSON-encoded scalar values."""
     lines = ['---']
     for key, value in fields.items():
-        lines.append(f'{key}: {json.dumps(str(value), ensure_ascii=False)}')
+        lines.append(f'{key}: {json.dumps(value, ensure_ascii=False)}')
     lines.extend(['---', ''])
     return '\n'.join(lines) + '\n'
 

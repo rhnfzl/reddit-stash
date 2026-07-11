@@ -1377,7 +1377,7 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     5. Place in `{save_directory}/gdpr_data/`
   - **Performance Impact**:
     - Processes AFTER regular API content
-    - API mode makes one Reddit API call per item
+    - API mode batches up to 100 item IDs per Reddit API call, then fetches batch misses individually
     - CSV-only mode batches up to 500 IDs per archive request
   - **Deduplication**: Items already in log are skipped (no duplicates)
   - **Examples**:
@@ -3487,7 +3487,7 @@ The script can process Reddit's GDPR data export to access your complete saved p
 
 #### Important Notes:
 - GDPR processing runs after regular API processing when API mode is enabled
-- API mode fetches each item separately, while CSV-only mode batches archive IDs
+- API mode batches Reddit item IDs, while CSV-only mode batches archive IDs
 - API rate limits are shared with regular API processing
 - Large exports may take significant time to process
 - Duplicate items are automatically skipped via file logging

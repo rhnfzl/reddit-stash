@@ -106,6 +106,22 @@ class TestSaveSubmission(unittest.TestCase):
         self.assertEqual(fields['title'], title)
         self.assertEqual(fields['subreddit'], '/r/test')
 
+    def test_frontmatter_preserves_boolean_and_number_scalars(self):
+        from io import StringIO
+
+        from utils.save_utils import _write_yaml_frontmatter
+
+        output = StringIO()
+        _write_yaml_frontmatter(output, {'recovered': True, 'score': 42})
+        _, frontmatter, _ = output.getvalue().split('---\n', 2)
+        fields = {
+            key: json.loads(value)
+            for key, value in (line.split(': ', 1) for line in frontmatter.strip().splitlines())
+        }
+
+        self.assertIs(fields['recovered'], True)
+        self.assertEqual(fields['score'], 42)
+
     def test_comment_frontmatter_has_a_quoted_title(self):
         """Saved comments use valid frontmatter instead of prose inside YAML delimiters."""
         from utils.save_utils import save_comment_and_context
@@ -135,8 +151,9 @@ class TestSaveSubmission(unittest.TestCase):
             additional_metadata={
                 'title': 'Recovered post title',
                 'selftext': 'Recovered post body',
-                'author': 'archivist',
-                'subreddit': 'python',
+                'author': None,
+                'subreddit': None,
+                'created_utc': None,
             },
         )
         recovered = RecoveredItem(
@@ -152,6 +169,15 @@ class TestSaveSubmission(unittest.TestCase):
         content = Path(self.filepath).read_text(encoding='utf-8')
         self.assertIn('# Recovered post title', content)
         self.assertIn('Recovered post body', content)
+        _, frontmatter, _ = content.split('---\n', 2)
+        fields = {
+            key: json.loads(value)
+            for key, value in (line.split(': ', 1) for line in frontmatter.strip().splitlines())
+        }
+        self.assertEqual(fields['author'], '[deleted]')
+        self.assertEqual(fields['subreddit'], '[unknown]')
+        self.assertEqual(fields['timestamp'], 'unknown')
+        self.assertIs(fields['recovered'], True)
 
     @patch('utils.save_utils.lazy_load_comments', return_value=[])
     @patch('utils.save_utils.get_media_config')
@@ -393,6 +419,31 @@ class TestSaveCommentAndContext(unittest.TestCase):
 
         content = open(self.filepath).read()
         self.assertIn('Self post body content.', content)
+
+    def test_recovered_comment_replaces_null_archive_fields(self):
+        """Archive-only comments retain usable export defaults for null fields."""
+        from utils.save_utils import save_comment_and_context
+
+        metadata = RecoveryMetadata(
+            source=RecoverySource.ARCTIC_SHIFT,
+            recovered_url=None,
+            recovery_timestamp=1700000000.0,
+            content_quality=RecoveryQuality.METADATA_ONLY,
+            additional_metadata={'author': None, 'body': None},
+        )
+        recovered = RecoveredItem(
+            item_type='comment',
+            item_id='archive456',
+            recovery_result=RecoveryResult.success_result(None, metadata),
+            original_url='https://reddit.com/r/python/comments/archive456/',
+        )
+
+        with open(self.filepath, 'w', encoding='utf-8') as file:
+            save_comment_and_context(recovered, file)
+
+        content = Path(self.filepath).read_text(encoding='utf-8')
+        self.assertIn('Comment by [deleted]', content)
+        self.assertIn('[Content not available]', content)
 
 
 if __name__ == '__main__':
