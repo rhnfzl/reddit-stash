@@ -214,67 +214,33 @@ class PullPushProvider:
 
     def _create_success_result(self, original_url: str, pullpush_data: Dict[str, Any],
                              duration: float) -> RecoveryResult:
-        """Create a successful recovery result with metadata."""
+        """Create a metadata-only recovery result from archived Reddit text."""
 
-        # Create reconstructed Reddit URL from archived data
         content_data = pullpush_data['data']
         content_type = pullpush_data['type']
         content_id = pullpush_data['id']
 
-        if content_type == 'submission':
-            subreddit = content_data.get('subreddit', 'unknown')
-            title_slug = self._create_title_slug(content_data.get('title', ''))
-            recovered_url = f"https://www.reddit.com/r/{subreddit}/comments/{content_id}/{title_slug}/"
-        else:  # comment
-            # For comments, we'd need the submission ID to create the full URL
-            # For now, just indicate the content was found
-            recovered_url = f"https://www.reddit.com/comments/{content_id}/"
-
-        # Assess content quality based on metadata
-        quality = self._assess_content_quality(content_data)
-
         metadata = RecoveryMetadata(
             source=RecoverySource.PULLPUSH_IO,
-            recovered_url=recovered_url,
+            recovered_url=None,
             recovery_timestamp=time.time(),
-            content_quality=quality,
+            content_quality=RecoveryQuality.METADATA_ONLY,
             attempt_duration=duration,
             additional_metadata={
                 'content_type': content_type,
+                'content_id': content_id,
                 'subreddit': content_data.get('subreddit'),
                 'author': content_data.get('author'),
                 'created_utc': content_data.get('created_utc'),
                 'score': content_data.get('score'),
+                'title': content_data.get('title'),
+                'selftext': content_data.get('selftext'),
+                'body': content_data.get('body'),
                 'archived_data_available': True
             }
         )
 
-        return RecoveryResult.success_result(recovered_url, metadata)
-
-    def _create_title_slug(self, title: str) -> str:
-        """Create URL-safe slug from submission title."""
-        if not title:
-            return "post"
-
-        # Convert to lowercase and replace non-alphanumeric with underscores
-        slug = re.sub(r'[^a-zA-Z0-9]+', '_', title.lower())
-        slug = slug.strip('_')[:50]  # Limit length
-        return slug or "post"
-
-    def _assess_content_quality(self, content_data: Dict[str, Any]) -> RecoveryQuality:
-        """Assess the quality of archived content."""
-        # Check if content appears to be deleted/removed
-        if content_data.get('removed_by_category') or content_data.get('selftext') == '[deleted]':
-            return RecoveryQuality.METADATA_ONLY
-
-        # Check content age and score for quality assessment
-        score = content_data.get('score', 0)
-        if score > 100:
-            return RecoveryQuality.HIGH_QUALITY
-        elif score > 10:
-            return RecoveryQuality.MEDIUM_QUALITY
-        else:
-            return RecoveryQuality.LOW_QUALITY
+        return RecoveryResult.success_result(None, metadata)
 
     def get_provider_info(self) -> Dict[str, Any]:
         """Get information about this recovery provider."""

@@ -5,6 +5,7 @@ This module provides the central orchestration for content recovery attempts,
 managing multiple providers and implementing the recovery cascade strategy.
 """
 
+import json
 import time
 import logging
 from dataclasses import replace
@@ -166,15 +167,23 @@ class ContentRecoveryService:
             for source in self.providers.keys():
                 cached_entry = self.cache_manager.get_cached_result(url, source)
                 if cached_entry and not cached_entry.is_expired:
+                    additional_metadata = None
+                    if cached_entry.metadata_json:
+                        try:
+                            additional_metadata = json.loads(cached_entry.metadata_json)
+                        except (TypeError, json.JSONDecodeError):
+                            self._logger.debug("Cached recovery metadata could not be decoded")
+
                     metadata = RecoveryMetadata(
                         source=RecoverySource(cached_entry.recovery_source),
                         recovered_url=cached_entry.recovered_url,
                         recovery_timestamp=cached_entry.cached_at,
                         content_quality=RecoveryQuality(cached_entry.content_quality),
-                        cache_hit=True
+                        cache_hit=True,
+                        additional_metadata=additional_metadata,
                     )
 
-                    if cached_entry.recovered_url:
+                    if cached_entry.success:
                         successful_results.append(RecoveryResult.success_result(
                             cached_entry.recovered_url,
                             metadata,
@@ -406,6 +415,7 @@ class ContentRecoveryService:
                     recovered_url=None,
                     quality=RecoveryQuality.METADATA_ONLY,
                     ttl_hours=NEGATIVE_CACHE_TTL_HOURS,
+                    success=False,
                 )
         except Exception as e:
             self._logger.debug(f"Failed to cache negative recovery result: {e}")

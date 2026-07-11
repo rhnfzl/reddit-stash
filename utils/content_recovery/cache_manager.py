@@ -108,17 +108,26 @@ class RecoveryCacheManager:
                         recovery_source TEXT NOT NULL,
                         recovered_url TEXT,
                         content_quality TEXT DEFAULT 'medium_quality',
-                        cached_at REAL NOT NULL,
-                        last_accessed_at REAL NOT NULL,
-                        expires_at REAL NOT NULL,
-                        metadata_json TEXT,
-                        UNIQUE(url_hash, recovery_source)
-                    )
+                    cached_at REAL NOT NULL,
+                    last_accessed_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    metadata_json TEXT,
+                    success INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(url_hash, recovery_source)
+                )
                 """)
 
                 # Add last_accessed_at column if it doesn't exist (migration)
                 try:
                     cursor.execute("ALTER TABLE recovery_cache ADD COLUMN last_accessed_at REAL")
+                except sqlite3.OperationalError:
+                    # Column already exists or other error - continue
+                    pass
+
+                try:
+                    cursor.execute(
+                        "ALTER TABLE recovery_cache ADD COLUMN success INTEGER NOT NULL DEFAULT 1"
+                    )
                 except sqlite3.OperationalError:
                     # Column already exists or other error - continue
                     pass
@@ -206,7 +215,7 @@ class RecoveryCacheManager:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT id, url_hash, original_url, recovery_source, recovered_url,
-                           content_quality, cached_at, last_accessed_at, expires_at, metadata_json
+                           content_quality, cached_at, last_accessed_at, expires_at, metadata_json, success
                     FROM recovery_cache
                     WHERE url_hash = ? AND recovery_source = ? AND expires_at > ?
                 """, (url_hash, source.value, current_time))
@@ -230,7 +239,8 @@ class RecoveryCacheManager:
                         content_quality=row[5],
                         cached_at=row[6],
                         expires_at=row[8],  # Updated index after adding last_accessed_at
-                        metadata_json=row[9]  # Updated index
+                        metadata_json=row[9],
+                        success=bool(row[10]),
                     )
 
         except sqlite3.Error as e:
@@ -240,7 +250,8 @@ class RecoveryCacheManager:
 
     def cache_result(self, url: str, source: RecoverySource, recovered_url: Optional[str],
                     quality: RecoveryQuality, ttl_hours: int = 24,
-                    metadata: Optional[Dict[str, Any]] = None) -> bool:
+                    metadata: Optional[Dict[str, Any]] = None,
+                    success: bool = True) -> bool:
         """Cache a recovery result."""
         try:
             url_hash = self._url_hash(url)
@@ -256,7 +267,8 @@ class RecoveryCacheManager:
                 content_quality=quality.value,
                 cached_at=current_time,
                 expires_at=expires_at,
-                metadata_json=metadata_json
+                metadata_json=metadata_json,
+                success=success,
             )
 
             with self.sqlite_manager.get_connection() as conn:
@@ -264,8 +276,8 @@ class RecoveryCacheManager:
                 cursor.execute("""
                     INSERT OR REPLACE INTO recovery_cache
                     (url_hash, original_url, recovery_source, recovered_url,
-                     content_quality, cached_at, last_accessed_at, expires_at, metadata_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     content_quality, cached_at, last_accessed_at, expires_at, metadata_json, success)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     cache_entry.url_hash,
                     cache_entry.original_url,
@@ -275,7 +287,8 @@ class RecoveryCacheManager:
                     cache_entry.cached_at,
                     cache_entry.cached_at,  # Set last_accessed_at to cached_at initially
                     cache_entry.expires_at,
-                    cache_entry.metadata_json
+                    cache_entry.metadata_json,
+                    1 if cache_entry.success else 0,
                 ))
                 conn.commit()
 
@@ -598,4 +611,3 @@ class RecoveryCacheManager:
         except sqlite3.Error as e:
             self._logger.error(f"Failed to get database info: {e}")
             return {}
-

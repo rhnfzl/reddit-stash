@@ -61,7 +61,7 @@ class RecoveryResult:
     @classmethod
     def success_result(
         cls,
-        url: str,
+        url: Optional[str],
         metadata: RecoveryMetadata,
         attempted_sources: FrozenSet[RecoverySource] = frozenset(),
     ) -> 'RecoveryResult':
@@ -119,6 +119,7 @@ class RecoveryCacheEntry:
     cached_at: float = 0.0
     expires_at: float = 0.0
     metadata_json: Optional[str] = None
+    success: bool = True
 
     def __post_init__(self):
         if self.cached_at == 0.0:

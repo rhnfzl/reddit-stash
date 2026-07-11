@@ -311,6 +311,8 @@ class MediaDownloadManager:
                                 self._logger.warning(f"Failed to download from recovered URL: {recovery_error}")
                         except Exception as e:
                             self._logger.warning(f"Exception downloading from recovered URL: {e}")
+                    elif recovery_result.success:
+                        self._logger.info("Recovery produced archived metadata, not downloadable media")
                     else:
                         self._logger.debug(f"Content recovery failed: {recovery_result.error_message}")
 
@@ -363,6 +365,8 @@ class MediaDownloadManager:
                                     # Mark original URL as successful in retry queue (recovery counts as success)
                                     self._retry_queue.mark_retry_completed(url, success=True)
                                     return recovery_download_result.local_path
+                    elif recovery_result.success:
+                        self._logger.info("Recovery produced archived metadata, not downloadable media")
                 except Exception as recovery_e:
                     self._logger.warning(f"Recovery attempt also failed: {recovery_e}")
 

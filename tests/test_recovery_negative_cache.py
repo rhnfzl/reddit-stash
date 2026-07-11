@@ -1,9 +1,11 @@
 """Regression tests for short-lived failed recovery cache entries."""
 
 import unittest
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from utils.content_recovery.cache_manager import RecoveryCacheManager
 from utils.content_recovery.recovery_metadata import (
     RecoveryCacheEntry,
     RecoveryQuality,
@@ -39,13 +41,18 @@ class _CacheManager:
         return True
 
 
-def _cache_entry(source, recovered_url):
+def _cache_entry(source, recovered_url, success=None, metadata_json=None):
+    if success is None:
+        success = recovered_url is not None
+
     return SimpleNamespace(
         recovery_source=source.value,
         recovered_url=recovered_url,
         content_quality=RecoveryQuality.MEDIUM_QUALITY.value,
         cached_at=1,
         is_expired=False,
+        success=success,
+        metadata_json=metadata_json,
     )
 
 
@@ -135,6 +142,26 @@ class TestRecoveryNegativeCache(unittest.TestCase):
         self.assertEqual(wayback.attempts, 0)
         self.assertEqual(previews.attempts, 0)
 
+    def test_cached_metadata_only_success_preserves_archived_text(self):
+        url = 'https://example.com/image.jpg'
+        cache_manager = _CacheManager({
+            (url, RecoverySource.PULLPUSH_IO): _cache_entry(
+                RecoverySource.PULLPUSH_IO,
+                None,
+                success=True,
+                metadata_json='{"body": "Archived text"}',
+            ),
+        })
+        service = self._service({
+            RecoverySource.PULLPUSH_IO: _Provider(RecoveryResult.failure_result('missing')),
+        }, cache_manager)
+
+        result = service._check_cache(url)
+
+        self.assertTrue(result.success)
+        self.assertIsNone(result.recovered_url)
+        self.assertEqual(result.metadata.additional_metadata['body'], 'Archived text')
+
     def test_caches_only_providers_that_completed_a_failed_recovery(self):
         cache_manager = _CacheManager()
         wayback = _Provider(RecoveryResult.failure_result('missing'))
@@ -148,6 +175,7 @@ class TestRecoveryNegativeCache(unittest.TestCase):
         cache_call = cache_manager.cache_calls[0]
         self.assertEqual(cache_call['source'], RecoverySource.WAYBACK_MACHINE)
         self.assertIsNone(cache_call['recovered_url'])
+        self.assertFalse(cache_call['success'])
         self.assertEqual(cache_call['quality'], RecoveryQuality.METADATA_ONLY)
         self.assertLess(cache_call['ttl_hours'], 24)
 
@@ -171,6 +199,28 @@ class TestRecoveryNegativeCache(unittest.TestCase):
 
         with patch('utils.content_recovery.recovery_metadata.time.time', return_value=100):
             self.assertTrue(entry.is_expired)
+
+    def test_cache_preserves_metadata_only_success_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_manager = RecoveryCacheManager(f'{temp_dir}/recovery.db')
+            self.addCleanup(cache_manager.stop_background_cleanup)
+            url = 'https://example.com/image.jpg'
+
+            cached = cache_manager.cache_result(
+                url=url,
+                source=RecoverySource.PULLPUSH_IO,
+                recovered_url=None,
+                quality=RecoveryQuality.METADATA_ONLY,
+                metadata={'body': 'Archived text'},
+                success=True,
+            )
+            entry = cache_manager.get_cached_result(url, RecoverySource.PULLPUSH_IO)
+
+        self.assertTrue(cached)
+        self.assertIsNotNone(entry)
+        self.assertTrue(entry.success)
+        self.assertIsNone(entry.recovered_url)
+        self.assertEqual(entry.metadata_json, '{"body": "Archived text"}')
 
 
 if __name__ == '__main__':
