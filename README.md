@@ -3142,7 +3142,7 @@ If you're switching from Dropbox to S3 (or vice versa), Reddit Stash includes a 
 
 - Migration copies **all files** including `file_log.json`, so your deduplication state is preserved
 - Existing files on the target are **not deleted** — migration only adds files
-- For large archives, migration may take a while (all files pass through your machine)
+- For large archives, migration may take a while. Files pass through your machine one at a time, so temporary space only needs to fit the largest file.
 - You can migrate in either direction: Dropbox → S3, or S3 → Dropbox
 
 ---

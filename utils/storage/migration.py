@@ -1,12 +1,11 @@
 """
 Bidirectional migration tool between storage providers.
 
-Downloads everything from source to a temp directory, then uploads
-to target.  Supports dry-run mode (default) and explicit execution.
+Downloads and uploads one file at a time through a temporary directory.
+Supports dry-run mode (default) and explicit execution.
 """
 
 import os
-import shutil
 import tempfile
 import time
 from dataclasses import dataclass
@@ -65,66 +64,50 @@ class StorageMigration:
         return plan
 
     def execute(self) -> SyncResult:
-        """Download from source → upload to target via temp directory."""
+        """Transfer each source file through a short-lived local directory."""
         start = time.time()
-        tmp_dir = tempfile.mkdtemp(prefix="reddit_stash_migrate_")
+        source_files = self._source.list_files(self._source_dir)
+        downloaded = 0
+        failed_downloads = 0
+        download_errors: List[str] = []
+        uploaded = 0
+        failed_uploads = 0
+        upload_errors: List[str] = []
+        bytes_transferred = 0
 
-        try:
-            # Phase 1: download everything from source
-            print(f"Downloading from {self._source.get_provider_name()}...")
-            source_files = self._source.list_files(self._source_dir)
+        src_prefix = self._source_dir.strip("/")
+        src_prefix_len = len(src_prefix) + 1 if src_prefix else 0
+        tgt_prefix = self._target_dir.strip("/")
 
-            downloaded = 0
-            failed_downloads = 0
-            download_errors: List[str] = []
+        print(
+            f"Migrating from {self._source.get_provider_name()} to "
+            f"{self._target.get_provider_name()}..."
+        )
+        for source_info in source_files:
+            rel_path = source_info.remote_path[src_prefix_len:].lstrip("/")
+            if not rel_path:
+                rel_path = os.path.basename(source_info.remote_path)
+            remote_key = f"{tgt_prefix}/{rel_path}" if tgt_prefix else rel_path
 
-            # Determine prefix to strip from remote paths
-            src_prefix = self._source_dir.strip("/")
-            src_prefix_len = len(src_prefix) + 1 if src_prefix else 0
-
-            for info in source_files:
-                rel_path = info.remote_path[src_prefix_len:].lstrip("/")
-                if not rel_path:
-                    rel_path = os.path.basename(info.remote_path)
-                local_path = os.path.join(tmp_dir, rel_path)
-
-                try:
-                    self._source.download_file(info.remote_path, local_path)
+            try:
+                with tempfile.TemporaryDirectory(prefix="reddit_stash_migrate_") as tmp_dir:
+                    local_path = os.path.join(tmp_dir, os.path.basename(rel_path))
+                    self._source.download_file(source_info.remote_path, local_path)
                     downloaded += 1
-                except Exception as exc:
-                    failed_downloads += 1
-                    download_errors.append(f"download {info.remote_path}: {exc}")
-
-            print(f"Downloaded {downloaded} files ({failed_downloads} failed)")
-
-            # Phase 2: upload everything to target
-            print(f"Uploading to {self._target.get_provider_name()}...")
-            uploaded = 0
-            failed_uploads = 0
-            upload_errors: List[str] = []
-            bytes_transferred = 0
-
-            tgt_prefix = self._target_dir.strip("/")
-
-            for root, _dirs, fnames in os.walk(tmp_dir):
-                for fname in fnames:
-                    file_path = os.path.join(root, fname)
-                    rel = os.path.relpath(file_path, tmp_dir).replace(os.sep, "/")
-                    remote_key = f"{tgt_prefix}/{rel}" if tgt_prefix else rel
 
                     try:
-                        info = self._target.upload_file(file_path, remote_key)
+                        uploaded_info = self._target.upload_file(local_path, remote_key)
                         uploaded += 1
-                        bytes_transferred += info.size_bytes
+                        bytes_transferred += uploaded_info.size_bytes
                     except Exception as exc:
                         failed_uploads += 1
-                        upload_errors.append(f"upload {rel}: {exc}")
+                        upload_errors.append(f"upload {rel_path}: {exc}")
+            except Exception as exc:
+                failed_downloads += 1
+                download_errors.append(f"download {source_info.remote_path}: {exc}")
 
-            print(f"Uploaded {uploaded} files ({failed_uploads} failed)")
-
-        finally:
-            # Always clean up temp directory
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        print(f"Downloaded {downloaded} files ({failed_downloads} failed)")
+        print(f"Uploaded {uploaded} files ({failed_uploads} failed)")
 
         elapsed = time.time() - start
         all_errors = download_errors + upload_errors

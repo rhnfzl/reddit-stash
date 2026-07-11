@@ -500,6 +500,50 @@ class TestStorageMigration(unittest.TestCase):
         source.download_file.assert_called_once()
         target.upload_file.assert_called_once()
 
+    def test_execute_uploads_each_file_before_downloading_the_next(self):
+        """Migration keeps only one source file on local disk at a time."""
+        from utils.storage.migration import StorageMigration
+
+        source = self._make_mock_provider("Dropbox")
+        target = self._make_mock_provider("AWS S3")
+        source.list_files.return_value = [
+            StorageFileInfo(remote_path="/reddit/post1.md", size_bytes=100),
+            StorageFileInfo(remote_path="/reddit/post2.md", size_bytes=200),
+        ]
+        events = []
+
+        def fake_download(remote_path, local_path):
+            events.append(("download", remote_path))
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            with open(local_path, "w", encoding="utf-8") as output_file:
+                output_file.write(remote_path)
+            return StorageFileInfo(remote_path=remote_path, size_bytes=100)
+
+        def fake_upload(local_path, remote_path):
+            events.append(("upload", remote_path))
+            self.assertTrue(os.path.exists(local_path))
+            return StorageFileInfo(
+                remote_path=remote_path,
+                size_bytes=os.path.getsize(local_path),
+            )
+
+        source.download_file.side_effect = fake_download
+        target.upload_file.side_effect = fake_upload
+
+        result = StorageMigration(source, target, "/reddit", "reddit").execute()
+
+        self.assertEqual(result.downloaded, 2)
+        self.assertEqual(result.uploaded, 2)
+        self.assertEqual(
+            events,
+            [
+                ("download", "/reddit/post1.md"),
+                ("upload", "reddit/post1.md"),
+                ("download", "/reddit/post2.md"),
+                ("upload", "reddit/post2.md"),
+            ],
+        )
+
 
 # ---------------------------------------------------------------
 # Config validator: storage section
