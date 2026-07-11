@@ -2095,7 +2095,7 @@ enable_background_cleanup = true       # Automatic cache maintenance
 
 #### Content Recovery Explained:
 
-Reddit Stash includes a 3-provider cascade that attempts to recover deleted, removed, or unavailable content.
+Reddit Stash includes a 3-provider cascade for unavailable content. Wayback can provide a recovered URL, while Arctic Shift and PullPush contribute archived Reddit text and metadata only.
 
 #### Recovery Provider Settings:
 
@@ -2126,17 +2126,16 @@ Reddit Stash includes a 3-provider cascade that attempts to recover deleted, rem
     use_arctic_shift = false  # Disable third-party archive lookups
     ```
 
-* **`use_pushshift_api`** - Use PullPush.io (Pushshift successor)
+* **`use_pushshift_api`** - Use PullPush.io (Pushshift successor) for archive metadata
   - **Type**: Boolean
   - **Default**: `true`
   - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**: Reddit-specific archive of posts and comments
-  - **Best For**: Deleted/removed Reddit text content, metadata
-  - **Success Rate**: 40-70% for Reddit content (higher for older content)
-  - **Coverage**: Reddit posts/comments from 2005-present
+  - **What It Does**: Looks up archived Reddit posts and comments for Markdown enrichment
+  - **Best For**: Deleted or removed Reddit text content and metadata
+  - **Note**: Matches supply archived title, post body, or comment body. They do not provide a replacement media URL.
+  - **Availability**: Best-effort service. Archive completeness and uptime vary.
   - **Rate Limit**: 12 requests/minute (conservative, respects soft limit of 15)
-  - **Response Time**: 1-3 seconds average
-  - **Note**: Sometimes slower or down (community-run service)
+  - **Note**: The service can be slow or unavailable.
   - **Examples**:
     ```ini
     use_pushshift_api = true   # Enable (recommended for Reddit content)
@@ -2187,7 +2186,7 @@ Reddit Stash includes a 3-provider cascade that attempts to recover deleted, rem
   - **Cascade Example** (timeout=10s, 3 providers):
     - Wayback: Try for 10s → Success/Fail → Next
     - Arctic Shift: Try for archived Reddit text → Success/Fail → Next
-    - PullPush: Try for 10s → Success/Fail → Next
+    - PullPush: Look up archived text and metadata → Success/Fail → Next
     - Sequential total: 0-30 seconds per item (stops at first success)
     - Parallel mode: Collects enabled provider results before selecting the highest-quality recovery
   - **Examples**:

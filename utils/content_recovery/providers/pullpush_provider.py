@@ -5,7 +5,7 @@ This module implements content recovery using PullPush.io, a successor to
 Pushshift that archives Reddit data. Note that this service faces legal
 challenges from Reddit and has strict rate limits.
 
-Rate Limits (as of 2024):
+Configured request limits:
 - Soft limit: 15 requests/minute
 - Hard limit: 30 requests/minute
 - Long-term limit: 1000 requests/hour
@@ -28,7 +28,7 @@ PULLPUSH_BATCH_SIZE = 100
 
 
 class PullPushProvider:
-    """Provider for recovering Reddit content from PullPush.io API."""
+    """Provider for enriching Reddit recovery with PullPush archive metadata."""
 
     def __init__(self, timeout: int = 10):
         self.timeout = timeout
@@ -55,7 +55,7 @@ class PullPushProvider:
             url: Original Reddit URL to recover
 
         Returns:
-            RecoveryResult with status and recovered URL if successful
+            RecoveryResult with archived metadata when a matching record exists
         """
         start_time = time.time()
 
@@ -295,6 +295,6 @@ class PullPushProvider:
             'description': 'PullPush.io API - successor to Pushshift for Reddit data',
             'rate_limits': '15 req/min soft, 30 req/min hard, 1000 req/hour',
             'ethics': 'Controversial - facing legal challenges from Reddit',
-            'reliability': 'Medium - operational but under legal pressure',
+            'reliability': 'Best effort archive metadata; availability varies',
             'coverage': 'Reddit content only, comprehensive historical data'
         }
