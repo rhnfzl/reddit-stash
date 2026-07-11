@@ -4,7 +4,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 from utils.media_services.imgur_media import ImgurMediaDownloader
-from utils.service_abstractions import DownloadResult, DownloadStatus, ServiceConfig
+from utils.service_abstractions import (
+    DownloadResult,
+    DownloadStatus,
+    MediaMetadata,
+    MediaType,
+    ServiceConfig,
+)
 
 
 class TestImgurDirectApi(unittest.TestCase):
@@ -40,6 +46,46 @@ class TestImgurDirectApi(unittest.TestCase):
         self.assertIs(result, expected)
         download.assert_called_once_with('abc123', '/tmp/image.jpg')
         self.assertFalse(hasattr(downloader, '_pyimgur_client'))
+
+    def test_api_download_preserves_content_hash(self):
+        downloader = ImgurMediaDownloader(
+            ServiceConfig(name='Imgur', api_keys={'client_ids': ['client-id']})
+        )
+        api_response = Mock(status_code=200)
+        api_response.json.return_value = {
+            'success': True,
+            'data': {'link': 'https://i.imgur.com/abc123.jpg'},
+        }
+        downloaded = DownloadResult(
+            status=DownloadStatus.SUCCESS,
+            local_path='/tmp/image.jpg',
+            content_hash='content-checksum',
+            metadata=MediaMetadata(
+                url='https://i.imgur.com/abc123.jpg',
+                media_type=MediaType.IMAGE,
+            ),
+        )
+
+        with patch.object(downloader, '_api_get', return_value=api_response):
+            with patch.object(downloader, 'download_file', return_value=downloaded):
+                result = downloader._download_image_via_api('abc123', '/tmp/image.jpg')
+
+        self.assertEqual(result.content_hash, 'content-checksum')
+
+    def test_gallery_download_uses_gallery_endpoint(self):
+        downloader = ImgurMediaDownloader(
+            ServiceConfig(name='Imgur', api_keys={'client_ids': ['client-id']})
+        )
+        api_response = Mock(status_code=200)
+        api_response.json.return_value = {'success': True, 'data': {'images': []}}
+
+        with patch.object(downloader, '_api_get', return_value=api_response) as api_get:
+            downloader._download_gallery('gallery-id', '/tmp/gallery.jpg')
+
+        api_get.assert_called_once_with(
+            'https://api.imgur.com/3/gallery/gallery-id',
+            (5.0, 15.0),
+        )
 
 
 if __name__ == '__main__':

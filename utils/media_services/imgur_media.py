@@ -327,6 +327,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 return DownloadResult(
                     status=download_result.status,
                     local_path=download_result.local_path,
+                    content_hash=download_result.content_hash,
                     metadata=enhanced_metadata,
                     bytes_downloaded=download_result.bytes_downloaded,
                     download_time=download_result.download_time
@@ -395,8 +396,13 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 error_message=f"Album download failed: {str(e)}"
             )
 
-    def _download_album_direct(self, album_id: str, save_path: str) -> DownloadResult:
-        """Download album using direct API calls."""
+    def _download_album_direct(
+        self,
+        album_id: str,
+        save_path: str,
+        endpoint: str = 'album',
+    ) -> DownloadResult:
+        """Download an Imgur album or gallery through its API endpoint."""
         try:
             if not self._client_ids:
                 return DownloadResult(
@@ -405,7 +411,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 )
 
             response = self._api_get(
-                f'https://api.imgur.com/3/album/{album_id}',
+                f'https://api.imgur.com/3/{endpoint}/{album_id}',
                 (5.0, 15.0),
             )
             if response is None:
@@ -455,7 +461,11 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
 
             if downloaded_files:
                 metadata = MediaMetadata(
-                    url=f"https://imgur.com/a/{album_id}",
+                    url=(
+                        f"https://imgur.com/gallery/{album_id}"
+                        if endpoint == 'gallery'
+                        else f"https://imgur.com/a/{album_id}"
+                    ),
                     media_type=MediaType.ALBUM,
                     title=album_data.get('title'),
                     description=album_data.get('description')
@@ -480,9 +490,8 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             )
 
     def _download_gallery(self, gallery_id: str, save_path: str) -> DownloadResult:
-        """Download an Imgur gallery (similar to album)."""
-        # Gallery handling is similar to album, just different API endpoint
-        return self._download_album(gallery_id, save_path)
+        """Download an Imgur gallery through the gallery API endpoint."""
+        return self._download_album_direct(gallery_id, save_path, 'gallery')
 
     def _get_current_client_id(self) -> str:
         """Get current client ID for API calls (thread-safe)."""
