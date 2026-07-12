@@ -1,9 +1,7 @@
 # Core Reddit Stash dependencies (Updated Jul 2026)
-# Note: praw and pandas floors intentionally held at 7.x / 2.x. praw 8.x and
-# pandas 3.x are major releases with breaking changes not yet validated here.
-praw>=7.8.1                 # Reddit API wrapper
+praw>=8.0.0,<9.0.0          # Reddit API wrapper
 dropbox>=12.1.0             # Dropbox API client
-pandas>=2.3.2               # Data manipulation
+pandas>=3.0.0,<4.0.0        # Data manipulation
 tqdm>=4.68.4                # Progress bars
 requests>=2.34.2            # HTTP library
 

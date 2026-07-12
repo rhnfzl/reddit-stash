@@ -28,7 +28,7 @@ jobs:
 
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - name: Checkout repository
@@ -54,13 +54,14 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            # Shared tags always identify the documented Python 3.12 default.
+            type=ref,event=branch,enable=${{ matrix.python-version == '3.12' }}
+            type=ref,event=pr,enable=${{ matrix.python-version == '3.12' }}
+            type=semver,pattern={{version}},enable=${{ matrix.python-version == '3.12' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ matrix.python-version == '3.12' }}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && matrix.python-version == '3.12' }}
             type=raw,value=py${{ matrix.python-version }}-latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
+            type=sha,prefix=sha-,enable=${{ matrix.python-version == '3.12' }}
 
       - name: Build and push Docker image
         id: build-push
