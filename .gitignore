@@ -174,8 +174,9 @@ node_modules/
 .claude/
 BRANCH_DIFFERENCES.md
 archive/
-test_*.py
+/test_*.py
 .ruff_cache/
+.worktrees/
 test_downloads/
 docs/
 cleanup_corrupt_images.py

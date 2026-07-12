@@ -8,13 +8,14 @@ results, and provenance information for archived content.
 import time
 from enum import Enum
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, FrozenSet
 from datetime import datetime
 
 
 class RecoverySource(Enum):
     """Enumeration of content recovery sources."""
     WAYBACK_MACHINE = "wayback_machine"
+    ARCTIC_SHIFT = "arctic_shift"
     PULLPUSH_IO = "pullpush_io"
     REDDIT_PREVIEWS = "reddit_previews"
     REVEDDIT = "reveddit"
@@ -56,24 +57,43 @@ class RecoveryResult:
     metadata: Optional[RecoveryMetadata] = None
     error_message: Optional[str] = None
     source: Optional[RecoverySource] = None
+    attempted_sources: FrozenSet[RecoverySource] = frozenset()
+    negative_cache_sources: FrozenSet[RecoverySource] = frozenset()
 
     @classmethod
-    def success_result(cls, url: str, metadata: RecoveryMetadata) -> 'RecoveryResult':
+    def success_result(
+        cls,
+        url: Optional[str],
+        metadata: RecoveryMetadata,
+        attempted_sources: FrozenSet[RecoverySource] = frozenset(),
+    ) -> 'RecoveryResult':
         """Create a successful recovery result."""
         return cls(
             success=True,
             recovered_url=url,
             metadata=metadata,
-            source=metadata.source
+            source=metadata.source,
+            attempted_sources=attempted_sources | frozenset({metadata.source}),
         )
 
     @classmethod
-    def failure_result(cls, error: str, source: Optional[RecoverySource] = None) -> 'RecoveryResult':
+    def failure_result(
+        cls,
+        error: str,
+        source: Optional[RecoverySource] = None,
+        attempted_sources: FrozenSet[RecoverySource] = frozenset(),
+        negative_cache_sources: FrozenSet[RecoverySource] = frozenset(),
+    ) -> 'RecoveryResult':
         """Create a failed recovery result."""
         return cls(
             success=False,
             error_message=error,
-            source=source
+            source=source,
+            attempted_sources=(
+                attempted_sources | frozenset({source})
+                if source is not None else attempted_sources
+            ),
+            negative_cache_sources=negative_cache_sources,
         )
 
 
@@ -106,6 +126,7 @@ class RecoveryCacheEntry:
     cached_at: float = 0.0
     expires_at: float = 0.0
     metadata_json: Optional[str] = None
+    success: bool = True
 
     def __post_init__(self):
         if self.cached_at == 0.0:
@@ -114,4 +135,4 @@ class RecoveryCacheEntry:
     @property
     def is_expired(self) -> bool:
         """Check if cache entry has expired."""
-        return time.time() > self.expires_at
+        return time.time() >= self.expires_at

@@ -8,7 +8,6 @@ that can be used interchangeably with other storage backends.
 import hashlib
 import os
 import re
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
@@ -212,15 +211,21 @@ class DropboxStorageProvider:
             if not fname.startswith(".")
         ]
 
+        log_entry = None
+        regular_files = []
+        for entry in files_to_upload:
+            if entry[1] == "file_log.json":
+                log_entry = entry
+            else:
+                regular_files.append(entry)
+
         uploaded = 0
         skipped = 0
         failed = 0
         bytes_transferred = 0
         errors: List[str] = []
-        lock = threading.Lock()
 
         def _process(root_and_name):
-            nonlocal uploaded, skipped, failed, bytes_transferred
             root, fname = root_and_name
             sanitized = _sanitize_filename(fname)
             file_path = os.path.join(root, fname)
@@ -231,24 +236,37 @@ class DropboxStorageProvider:
             if dbx_path.lower() in dbx_hashes:
                 local_hash = _dropbox_content_hash(file_path)
                 if dbx_hashes[dbx_path.lower()] == local_hash:
-                    with lock:
-                        skipped += 1
-                    return
+                    return "skipped", 0, None
 
             try:
                 size = self._raw_upload(file_path, dbx_path)
-                with lock:
-                    uploaded += 1
-                    bytes_transferred += size
+                return "uploaded", size, None
             except Exception as exc:
-                with lock:
-                    failed += 1
-                    errors.append(f"{file_path}: {exc}")
+                return "failed", 0, f"{file_path}: {exc}"
+
+        def _record(status, size, error):
+            nonlocal uploaded, skipped, failed, bytes_transferred
+            if status == "uploaded":
+                uploaded += 1
+                bytes_transferred += size
+            elif status == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+                errors.append(error)
 
         with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-            futures = {pool.submit(_process, f): f for f in files_to_upload}
+            futures = {pool.submit(_process, f): f for f in regular_files}
             for future in as_completed(futures):
-                future.result()  # propagate exceptions in _process
+                _record(*future.result())
+
+        if log_entry:
+            if failed:
+                print(
+                    "Skipping file_log.json upload because one or more content files failed."
+                )
+            else:
+                _record(*_process(log_entry))
 
         elapsed = time.time() - start
         result = SyncResult(

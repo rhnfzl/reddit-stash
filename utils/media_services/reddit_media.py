@@ -21,6 +21,7 @@ from ..service_abstractions import (
 )
 from ..temp_file_utils import temp_files_cleanup
 from ..constants import FFMPEG_TIMEOUT_SECONDS
+from ..domain_matching import domain_matches
 from .base_downloader import BaseHTTPDownloader
 
 
@@ -66,7 +67,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 'external-preview.redd.it'
             ]
 
-            return any(domain.endswith(reddit_domain) for reddit_domain in reddit_domains)
+            return any(domain_matches(domain, reddit_domain) for reddit_domain in reddit_domains)
 
         except Exception:
             return False
@@ -220,18 +221,47 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                         if not video_result.is_success:
                             return video_result
 
-                    if audio_result.is_success:
-                        merged_result = self._merge_video_audio(
-                            video_result.local_path,
-                            audio_result.local_path,
-                            save_path
+                    if audio_result.is_success and video_result.local_path:
+                        audio_size = (
+                            os.path.getsize(audio_result.local_path)
+                            if audio_result.local_path and os.path.exists(audio_result.local_path)
+                            else audio_result.bytes_downloaded
                         )
-                        if merged_result.is_success:
+                        merged_size_estimate = os.path.getsize(video_result.local_path) + audio_size
+                        if not self._check_disk_space(merged_size_estimate, video_result.local_path):
                             return replace(
                                 video_result,
-                                local_path=merged_result.local_path,
-                                bytes_downloaded=video_result.bytes_downloaded + audio_result.bytes_downloaded
+                                error_message="Audio track not merged (insufficient disk space)",
                             )
+
+                        with tempfile.NamedTemporaryFile(
+                            dir=os.path.dirname(video_result.local_path) or '.',
+                            suffix='.mp4',
+                            delete=False,
+                        ) as temp_merged:
+                            temp_merged_path = temp_merged.name
+
+                        with temp_files_cleanup(temp_merged_path):
+                            merged_result = self._merge_video_audio(
+                                video_result.local_path,
+                                audio_result.local_path,
+                                temp_merged_path,
+                            )
+                            if merged_result.is_success:
+                                try:
+                                    os.replace(temp_merged_path, video_result.local_path)
+                                except OSError as error:
+                                    _logger.warning(
+                                        "Could not promote merged Reddit video, keeping video-only file: %s",
+                                        error,
+                                    )
+                                    return video_result
+                                return replace(
+                                    video_result,
+                                    # The merged file differs from the downloaded video stream.
+                                    content_hash=None,
+                                    bytes_downloaded=merged_result.bytes_downloaded,
+                                )
 
                     # Audio failed or merge failed, return video-only
                     return video_result

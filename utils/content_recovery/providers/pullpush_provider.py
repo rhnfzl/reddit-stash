@@ -5,7 +5,7 @@ This module implements content recovery using PullPush.io, a successor to
 Pushshift that archives Reddit data. Note that this service faces legal
 challenges from Reddit and has strict rate limits.
 
-Rate Limits (as of 2024):
+Configured request limits:
 - Soft limit: 15 requests/minute
 - Hard limit: 30 requests/minute
 - Long-term limit: 1000 requests/hour
@@ -16,16 +16,19 @@ API Documentation: https://pullpush.io/
 import time
 import requests
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Iterable
 from urllib.parse import urlparse
 import re
 
 from ..recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
-from ...rate_limiter import rate_limited
+from ...rate_limiter import rate_limited, rate_limit_manager
+
+
+PULLPUSH_BATCH_SIZE = 100
 
 
 class PullPushProvider:
-    """Provider for recovering Reddit content from PullPush.io API."""
+    """Provider for enriching Reddit recovery with PullPush archive metadata."""
 
     def __init__(self, timeout: int = 10):
         self.timeout = timeout
@@ -52,7 +55,7 @@ class PullPushProvider:
             url: Original Reddit URL to recover
 
         Returns:
-            RecoveryResult with status and recovered URL if successful
+            RecoveryResult with archived metadata when a matching record exists
         """
         start_time = time.time()
 
@@ -117,6 +120,15 @@ class PullPushProvider:
 
             path = parsed.path.lower()
 
+            # Match comment URL patterns before their parent submission URLs.
+            comment_match = re.search(r'/comments/[a-z0-9]+/[^/]+/([a-z0-9]+)', path)
+            if comment_match:
+                return {
+                    'type': 'comment',
+                    'id': comment_match.group(1),
+                    'subreddit': self._extract_subreddit(path)
+                }
+
             # Match submission URL patterns
             submission_patterns = [
                 r'/r/[^/]+/comments/([a-z0-9]+)',  # /r/subreddit/comments/ID
@@ -132,15 +144,6 @@ class PullPushProvider:
                         'id': match.group(1),
                         'subreddit': self._extract_subreddit(path)
                     }
-
-            # Match comment URL patterns
-            comment_match = re.search(r'/comments/[a-z0-9]+/[^/]+/([a-z0-9]+)', path)
-            if comment_match:
-                return {
-                    'type': 'comment',
-                    'id': comment_match.group(1),
-                    'subreddit': self._extract_subreddit(path)
-                }
 
         except Exception as e:
             self._logger.debug(f"Failed to parse Reddit URL {url}: {e}")
@@ -182,6 +185,48 @@ class PullPushProvider:
 
         return None
 
+    def fetch_metadata_by_ids(self, content_type: str, ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch a bounded batch of archived post or comment records by ID."""
+        endpoint = {
+            'posts': self.submission_endpoint,
+            'comments': self.comment_endpoint,
+        }.get(content_type)
+        if not endpoint:
+            raise ValueError(f'Unsupported PullPush content type: {content_type}')
+
+        unique_ids = list(dict.fromkeys(str(item_id) for item_id in ids if item_id))
+        records = {}
+
+        for start in range(0, len(unique_ids), PULLPUSH_BATCH_SIZE):
+            batch = unique_ids[start:start + PULLPUSH_BATCH_SIZE]
+            if not rate_limit_manager.acquire('pullpush_io', timeout=self.timeout):
+                self._logger.warning('PullPush metadata lookup deferred by the rate limiter')
+                break
+
+            try:
+                response = self.session.get(
+                    endpoint,
+                    params={'ids': ','.join(batch), 'size': len(batch)},
+                    timeout=self.timeout,
+                )
+                rate_limit_manager.report_response('pullpush_io', response.status_code)
+                response.raise_for_status()
+                payload = response.json()
+            except (requests.exceptions.RequestException, ValueError) as error:
+                self._logger.warning(f'PullPush metadata lookup failed: {error}')
+                continue
+
+            data = payload.get('data', []) if isinstance(payload, dict) else []
+            if not isinstance(data, list):
+                self._logger.warning('PullPush returned an unexpected response shape')
+                continue
+
+            for record in data:
+                if isinstance(record, dict) and record.get('id'):
+                    records[str(record['id'])] = record
+
+        return records
+
     def _search_comment(self, comment_id: str) -> Optional[Dict[str, Any]]:
         """Search for a Reddit comment by ID."""
         try:
@@ -214,67 +259,33 @@ class PullPushProvider:
 
     def _create_success_result(self, original_url: str, pullpush_data: Dict[str, Any],
                              duration: float) -> RecoveryResult:
-        """Create a successful recovery result with metadata."""
+        """Create a metadata-only recovery result from archived Reddit text."""
 
-        # Create reconstructed Reddit URL from archived data
         content_data = pullpush_data['data']
         content_type = pullpush_data['type']
         content_id = pullpush_data['id']
 
-        if content_type == 'submission':
-            subreddit = content_data.get('subreddit', 'unknown')
-            title_slug = self._create_title_slug(content_data.get('title', ''))
-            recovered_url = f"https://www.reddit.com/r/{subreddit}/comments/{content_id}/{title_slug}/"
-        else:  # comment
-            # For comments, we'd need the submission ID to create the full URL
-            # For now, just indicate the content was found
-            recovered_url = f"https://www.reddit.com/comments/{content_id}/"
-
-        # Assess content quality based on metadata
-        quality = self._assess_content_quality(content_data)
-
         metadata = RecoveryMetadata(
             source=RecoverySource.PULLPUSH_IO,
-            recovered_url=recovered_url,
+            recovered_url=None,
             recovery_timestamp=time.time(),
-            content_quality=quality,
+            content_quality=RecoveryQuality.METADATA_ONLY,
             attempt_duration=duration,
             additional_metadata={
                 'content_type': content_type,
+                'content_id': content_id,
                 'subreddit': content_data.get('subreddit'),
                 'author': content_data.get('author'),
                 'created_utc': content_data.get('created_utc'),
                 'score': content_data.get('score'),
+                'title': content_data.get('title'),
+                'selftext': content_data.get('selftext'),
+                'body': content_data.get('body'),
                 'archived_data_available': True
             }
         )
 
-        return RecoveryResult.success_result(recovered_url, metadata)
-
-    def _create_title_slug(self, title: str) -> str:
-        """Create URL-safe slug from submission title."""
-        if not title:
-            return "post"
-
-        # Convert to lowercase and replace non-alphanumeric with underscores
-        slug = re.sub(r'[^a-zA-Z0-9]+', '_', title.lower())
-        slug = slug.strip('_')[:50]  # Limit length
-        return slug or "post"
-
-    def _assess_content_quality(self, content_data: Dict[str, Any]) -> RecoveryQuality:
-        """Assess the quality of archived content."""
-        # Check if content appears to be deleted/removed
-        if content_data.get('removed_by_category') or content_data.get('selftext') == '[deleted]':
-            return RecoveryQuality.METADATA_ONLY
-
-        # Check content age and score for quality assessment
-        score = content_data.get('score', 0)
-        if score > 100:
-            return RecoveryQuality.HIGH_QUALITY
-        elif score > 10:
-            return RecoveryQuality.MEDIUM_QUALITY
-        else:
-            return RecoveryQuality.LOW_QUALITY
+        return RecoveryResult.success_result(None, metadata)
 
     def get_provider_info(self) -> Dict[str, Any]:
         """Get information about this recovery provider."""
@@ -284,6 +295,6 @@ class PullPushProvider:
             'description': 'PullPush.io API - successor to Pushshift for Reddit data',
             'rate_limits': '15 req/min soft, 30 req/min hard, 1000 req/hour',
             'ethics': 'Controversial - facing legal challenges from Reddit',
-            'reliability': 'Medium - operational but under legal pressure',
+            'reliability': 'Best effort archive metadata; availability varies',
             'coverage': 'Reddit content only, comprehensive historical data'
         }

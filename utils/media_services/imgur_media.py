@@ -2,8 +2,7 @@
 Imgur media downloader service.
 
 This module provides comprehensive support for downloading Imgur-hosted media
-including single images, albums, and galleries. Uses PyImgur library as primary
-method with fallback to direct API calls using requests.
+including single images, albums, and galleries through Imgur's direct API.
 Implements web-researched best practices for 2024.
 """
 
@@ -18,6 +17,8 @@ from ..service_abstractions import (
     DownloadResult, DownloadStatus,
     MediaMetadata, MediaType, ServiceConfig
 )
+from ..domain_matching import domain_matches
+from ..rate_limiter import rate_limit_manager
 from .base_downloader import BaseHTTPDownloader
 
 
@@ -31,7 +32,6 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
     - Galleries (imgur.com/gallery/ID)
     - Direct links (i.imgur.com/ID.ext)
 
-    Uses PyImgur when available, falls back to direct API calls.
     Respects Imgur's strict rate limits (~8 requests/minute).
     """
 
@@ -55,37 +55,12 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
         # Setup logging
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-        # Try to import PyImgur, fall back to direct API if not available
-        self._pyimgur_client = None
-        self._client_ids = []
+        self._client_ids = list(
+            self.config.api_keys.get('client_ids', []) if self.config.api_keys else []
+        )
         self._current_client_index = 0
         self._client_lock = threading.Lock()
-        self._setup_clients()
-
-    def _setup_clients(self):
-        """Setup PyImgur client and/or direct API credentials."""
-        # Try to import PyImgur
-        try:
-            import pyimgur
-            self._pyimgur_available = True
-
-            # Get client IDs from config (we'll set these up later via configuration)
-            client_ids = self.config.api_keys.get('client_ids', []) if self.config.api_keys else []
-            client_secrets = self.config.api_keys.get('client_secrets', []) if self.config.api_keys else []
-
-            if client_ids and len(client_ids) > 0:
-                # Use first client ID for PyImgur
-                client_secret = client_secrets[0] if client_secrets else None
-                try:
-                    self._pyimgur_client = pyimgur.Imgur(client_ids[0], client_secret)
-                    self._client_ids = client_ids
-                except Exception as e:
-                    self._logger.warning(f"Failed to initialize PyImgur client: {e}")
-                    self._pyimgur_client = None
-
-        except ImportError:
-            self._pyimgur_available = False
-            self._logger.info("PyImgur not available, using direct API calls only")
+        self._last_api_retry_after = 60
 
     def can_handle(self, url: str) -> bool:
         """Check if this service can handle the given URL."""
@@ -107,7 +82,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             'm.imgur.com'
         ]
 
-        return any(domain.endswith(imgur_domain) for imgur_domain in imgur_domains)
+        return any(domain_matches(domain, imgur_domain) for imgur_domain in imgur_domains)
 
     def get_metadata(self, url: str) -> Optional[MediaMetadata]:
         """Get metadata for Imgur media without downloading."""
@@ -119,11 +94,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             if not imgur_id:
                 return None
 
-            # Use PyImgur if available, otherwise direct API
-            if self._pyimgur_client:
-                return self._get_metadata_pyimgur(imgur_id, media_type, url)
-            else:
-                return self._get_metadata_direct_api(imgur_id, media_type, url)
+            return self._get_metadata_direct_api(imgur_id, media_type, url)
 
         except Exception as e:
             self._logger.debug(f"Failed to get Imgur metadata for {url}: {e}")
@@ -188,45 +159,45 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
 
         return None, 'unknown'
 
-    def _get_metadata_pyimgur(self, imgur_id: str, media_type: str, original_url: str) -> Optional[MediaMetadata]:
-        """Get metadata using PyImgur library."""
-        try:
+    def _api_get(self, url: str, timeout: tuple[float, float]):
+        """Fetch an Imgur API endpoint, rotating client IDs after a 429 response."""
+        retry_seconds = 60
+        for rotation in range(len(self._client_ids)):
             self._respect_rate_limit()
 
-            if media_type == 'album':
-                album = self._pyimgur_client.get_album(imgur_id)
-                return MediaMetadata(
-                    url=original_url,
-                    media_type=MediaType.ALBUM,
-                    title=album.title,
-                    description=album.description
-                )
-            elif media_type == 'gallery':
-                # Gallery items can be albums or images
-                gallery = self._pyimgur_client.get_gallery_item(imgur_id)
-                return MediaMetadata(
-                    url=original_url,
-                    media_type=MediaType.ALBUM if hasattr(gallery, 'images') else MediaType.IMAGE,
-                    title=getattr(gallery, 'title', None),
-                    description=getattr(gallery, 'description', None)
-                )
-            else:
-                # Single image
-                image = self._pyimgur_client.get_image(imgur_id)
-                return MediaMetadata(
-                    url=original_url,
-                    media_type=MediaType.IMAGE,
-                    file_size=getattr(image, 'size', None),
-                    width=getattr(image, 'width', None),
-                    height=getattr(image, 'height', None),
-                    format=getattr(image, 'type', None),
-                    title=getattr(image, 'title', None),
-                    description=getattr(image, 'description', None)
-                )
+            client_id = self._get_current_client_id()
+            response = self._session.get(
+                url,
+                headers={
+                    'Authorization': f'Client-ID {client_id}',
+                    'User-Agent': self.config.user_agent,
+                },
+                timeout=timeout,
+            )
 
-        except Exception as e:
-            self._logger.debug(f"PyImgur metadata extraction failed: {e}")
-            return None
+            if response.status_code != 429:
+                return response
+
+            retry_after = response.headers.get('Retry-After')
+            try:
+                retry_seconds = int(retry_after) if retry_after else 60
+            except (TypeError, ValueError):
+                retry_seconds = 60
+            try:
+                response.close()
+            except Exception:
+                pass
+
+            self._logger.debug(
+                "Imgur API rate limited (429), rotating client ID (%s/%s)",
+                rotation + 1,
+                len(self._client_ids),
+            )
+            self._rotate_client_id()
+
+        rate_limit_manager.report_response(self.config.name.lower(), 429, retry_seconds)
+        self._last_api_retry_after = retry_seconds
+        return None
 
     def _get_metadata_direct_api(self, imgur_id: str, media_type: str, original_url: str) -> Optional[MediaMetadata]:
         """Get metadata using direct API calls."""
@@ -241,26 +212,8 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             else:
                 url = f'https://api.imgur.com/3/image/{imgur_id}'
 
-            max_rotations = len(self._client_ids)
-            for rotation in range(max_rotations):
-                self._respect_rate_limit()
-
-                client_id = self._get_current_client_id()
-                headers = {
-                    'Authorization': f'Client-ID {client_id}',
-                    'User-Agent': self.config.user_agent
-                }
-
-                response = self._session.get(url, headers=headers, timeout=(5.0, 10.0))
-
-                if response.status_code == 429:
-                    self._logger.debug(f"Imgur API rate limited (429) for metadata, rotating client ID ({rotation + 1}/{max_rotations})")
-                    self._rotate_client_id()
-                    continue  # Retry with new client ID
-
-                break  # Non-429 response, proceed
-            else:
-                # All client IDs exhausted
+            response = self._api_get(url, (5.0, 10.0))
+            if response is None:
                 return None
 
             response.raise_for_status()
@@ -295,24 +248,8 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             return None
 
     def _download_single_image(self, imgur_id: str, save_path: str, original_url: str) -> DownloadResult:
-        """Download a single Imgur image using three-tier fallback system."""
+        """Download a single Imgur image through the API, then direct HTTP."""
         try:
-            # Tier 1: Try PyImgur first if available
-            if self._pyimgur_client:
-                self._logger.debug(f"Attempting PyImgur download for {imgur_id}")
-                result = self._download_image_pyimgur(imgur_id, save_path)
-                if result.status == DownloadStatus.SUCCESS:
-                    self._logger.debug(f"PyImgur download successful for {imgur_id}")
-                    return result
-                elif result.status == DownloadStatus.RATE_LIMITED:
-                    self._logger.debug(f"PyImgur rate limited for {imgur_id}, trying API fallback")
-                elif result.status == DownloadStatus.NOT_FOUND:
-                    self._logger.debug(f"PyImgur content not found for {imgur_id}: {result.error_message}")
-                    return result  # Don't retry for NOT_FOUND
-                else:
-                    self._logger.debug(f"PyImgur failed for {imgur_id}, trying API fallback: {result.error_message}")
-
-            # Tier 2: Try direct Imgur API v3 if we have client IDs
             if self._client_ids:
                 self._logger.debug(f"Attempting Imgur API download for {imgur_id}")
                 result = self._download_image_via_api(imgur_id, save_path)
@@ -327,7 +264,6 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 else:
                     self._logger.debug(f"Imgur API failed for {imgur_id}, trying direct fallback: {result.error_message}")
 
-            # Tier 3: Final fallback to direct HTTP download
             self._logger.debug(f"Attempting direct download for {imgur_id}")
             result = self._download_image_direct(imgur_id, save_path, original_url)
 
@@ -344,152 +280,6 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 error_message=f"All download methods failed: {str(e)}"
             )
 
-    def _download_image_pyimgur(self, imgur_id: str, save_path: str) -> DownloadResult:
-        """Download image using PyImgur."""
-        try:
-            self._respect_rate_limit()
-
-            image = self._pyimgur_client.get_image(imgur_id)
-
-            # Create directory if needed
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-            # Use PyImgur's download method
-            # Remove extension from filename since PyImgur adds its own extension
-            name_without_ext = os.path.splitext(os.path.basename(save_path))[0]
-            filename = image.download(path=os.path.dirname(save_path),
-                                    name=name_without_ext)
-
-            # Check for double extension issue and fix if needed
-            filename = self._fix_double_extension(filename, save_path)
-
-            # Get file size
-            file_size = os.path.getsize(filename) if os.path.exists(filename) else 0
-
-            # Create metadata
-            metadata = MediaMetadata(
-                url=image.link,
-                media_type=MediaType.IMAGE,
-                file_size=file_size,
-                width=getattr(image, 'width', None),
-                height=getattr(image, 'height', None),
-                format=getattr(image, 'type', None),
-                title=getattr(image, 'title', None)
-            )
-
-            return DownloadResult(
-                status=DownloadStatus.SUCCESS,
-                local_path=filename,
-                metadata=metadata,
-                bytes_downloaded=file_size
-            )
-
-        except Exception as e:
-            error_str = str(e).lower()
-
-            # Handle rate limiting (expected behavior for Imgur)
-            if "rate limit" in error_str:
-                self._logger.debug(f"PyImgur rate limit encountered for {imgur_id} (expected behavior)")
-                return DownloadResult(
-                    status=DownloadStatus.RATE_LIMITED,
-                    error_message="Imgur rate limit exceeded",
-                    retry_after=60
-                )
-
-            # Handle "file already exists" - this could be a valid existing file
-            elif "already exists" in error_str or "file exists" in error_str:
-                # Check potential file paths for existing valid files
-                save_dir = os.path.dirname(save_path)
-                base_name = os.path.basename(save_path)
-
-                # Generate possible file paths
-                potential_paths = [
-                    save_path,  # Original path
-                    os.path.join(save_dir, base_name + '.jpeg'),  # With .jpeg extension
-                    os.path.join(save_dir, base_name + '.jpg'),   # With .jpg extension
-                ]
-
-                # If base_name already has extension, try without it too
-                if '.' in base_name:
-                    name_without_ext = base_name.rsplit('.', 1)[0]
-                    potential_paths.extend([
-                        os.path.join(save_dir, name_without_ext + '.jpeg'),
-                        os.path.join(save_dir, name_without_ext + '.jpg'),
-                        os.path.join(save_dir, name_without_ext + '.png'),
-                        os.path.join(save_dir, name_without_ext + '.gif')
-                    ])
-
-                # Check for valid existing file
-                for check_path in potential_paths:
-                    if os.path.exists(check_path) and os.path.getsize(check_path) > 0:
-                        # Found valid existing file - return success
-                        file_size = os.path.getsize(check_path)
-
-                        # Create metadata for existing file
-                        metadata = MediaMetadata(
-                            url=image.link,
-                            media_type=MediaType.IMAGE,
-                            file_size=file_size,
-                            width=getattr(image, 'width', None),
-                            height=getattr(image, 'height', None),
-                            format=getattr(image, 'type', None),
-                            title=getattr(image, 'title', None)
-                        )
-
-                        return DownloadResult(
-                            status=DownloadStatus.SUCCESS,
-                            local_path=check_path,
-                            metadata=metadata,
-                            bytes_downloaded=file_size
-                        )
-
-                # No valid existing file found, try with overwrite
-                try:
-                    filename = image.download(path=os.path.dirname(save_path),
-                                            name=os.path.basename(save_path),
-                                            overwrite=True)
-
-                    # Get file size
-                    file_size = os.path.getsize(filename) if os.path.exists(filename) else 0
-
-                    # Create metadata
-                    metadata = MediaMetadata(
-                        url=image.link,
-                        media_type=MediaType.IMAGE,
-                        file_size=file_size,
-                        width=getattr(image, 'width', None),
-                        height=getattr(image, 'height', None),
-                        format=getattr(image, 'type', None),
-                        title=getattr(image, 'title', None)
-                    )
-
-                    return DownloadResult(
-                        status=DownloadStatus.SUCCESS,
-                        local_path=filename,
-                        metadata=metadata,
-                        bytes_downloaded=file_size
-                    )
-
-                except Exception as retry_e:
-                    return DownloadResult(
-                        status=DownloadStatus.FAILED,
-                        error_message=f"PyImgur download failed even with overwrite: {str(retry_e)}"
-                    )
-
-            # Handle deleted/not found content
-            elif any(phrase in error_str for phrase in ["does not exist", "not found", "404", "resource does not exist"]):
-                return DownloadResult(
-                    status=DownloadStatus.NOT_FOUND,
-                    error_message="Imgur content deleted or not found"
-                )
-
-            # Generic error handling
-            else:
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=f"PyImgur download failed: {str(e)}"
-                )
-
     def _download_image_via_api(self, imgur_id: str, save_path: str) -> DownloadResult:
         """Download image using direct Imgur API v3 calls."""
         try:
@@ -499,32 +289,15 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                     error_message="No Imgur client IDs available for API access"
                 )
 
-            api_url = f'https://api.imgur.com/3/image/{imgur_id}'
-            max_rotations = len(self._client_ids)
-
-            for rotation in range(max_rotations):
-                self._respect_rate_limit()
-
-                client_id = self._get_current_client_id()
-                headers = {
-                    'Authorization': f'Client-ID {client_id}',
-                    'User-Agent': self.config.user_agent
-                }
-
-                response = self._session.get(api_url, headers=headers, timeout=(5.0, 10.0))
-
-                if response.status_code == 429:
-                    self._logger.debug(f"Imgur API rate limited (429) for {imgur_id}, rotating client ID ({rotation + 1}/{max_rotations})")
-                    self._rotate_client_id()
-                    continue  # Retry with new client ID
-
-                break  # Non-429 response, proceed
-            else:
-                # All client IDs exhausted
+            response = self._api_get(
+                f'https://api.imgur.com/3/image/{imgur_id}',
+                (5.0, 10.0),
+            )
+            if response is None:
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
                     error_message="Imgur API rate limit exceeded (all client IDs exhausted)",
-                    retry_after=60
+                    retry_after=self._last_api_retry_after,
                 )
 
             if response.status_code == 404:
@@ -569,6 +342,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 return DownloadResult(
                     status=download_result.status,
                     local_path=download_result.local_path,
+                    content_hash=download_result.content_hash,
                     metadata=enhanced_metadata,
                     bytes_downloaded=download_result.bytes_downloaded,
                     download_time=download_result.download_time
@@ -629,11 +403,7 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
     def _download_album(self, album_id: str, save_path: str) -> DownloadResult:
         """Download an Imgur album."""
         try:
-            # Get album information
-            if self._pyimgur_client:
-                return self._download_album_pyimgur(album_id, save_path)
-            else:
-                return self._download_album_direct(album_id, save_path)
+            return self._download_album_direct(album_id, save_path)
 
         except Exception as e:
             return DownloadResult(
@@ -641,66 +411,13 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                 error_message=f"Album download failed: {str(e)}"
             )
 
-    def _download_album_pyimgur(self, album_id: str, save_path: str) -> DownloadResult:
-        """Download album using PyImgur."""
-        try:
-            self._respect_rate_limit()
-
-            album = self._pyimgur_client.get_album(album_id)
-
-            # Create album directory
-            album_dir = os.path.splitext(save_path)[0] + "_album"
-            os.makedirs(album_dir, exist_ok=True)
-
-            total_downloaded = 0
-            downloaded_files = []
-
-            for i, image in enumerate(album.images):
-                # Generate filename
-                file_ext = os.path.splitext(image.link)[1] or '.jpg'
-                filename = f"image_{i+1:03d}{file_ext}"
-
-                try:
-                    self._respect_rate_limit()
-                    downloaded_path = image.download(path=album_dir, name=filename)
-
-                    if os.path.exists(downloaded_path):
-                        file_size = os.path.getsize(downloaded_path)
-                        total_downloaded += file_size
-                        downloaded_files.append(downloaded_path)
-
-                except Exception as e:
-                    self._logger.warning(f"Failed to download album image {i+1}/{len(album.images)}: {e}")
-                    continue
-
-            if downloaded_files:
-                metadata = MediaMetadata(
-                    url=f"https://imgur.com/a/{album_id}",
-                    media_type=MediaType.ALBUM,
-                    title=getattr(album, 'title', None),
-                    description=getattr(album, 'description', None)
-                )
-
-                return DownloadResult(
-                    status=DownloadStatus.SUCCESS,
-                    local_path=album_dir,
-                    metadata=metadata,
-                    bytes_downloaded=total_downloaded
-                )
-            else:
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message="No images could be downloaded from album"
-                )
-
-        except Exception as e:
-            return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message=f"PyImgur album download failed: {str(e)}"
-            )
-
-    def _download_album_direct(self, album_id: str, save_path: str) -> DownloadResult:
-        """Download album using direct API calls."""
+    def _download_album_direct(
+        self,
+        album_id: str,
+        save_path: str,
+        endpoint: str = 'album',
+    ) -> DownloadResult:
+        """Download an Imgur album or gallery through its API endpoint."""
         try:
             if not self._client_ids:
                 return DownloadResult(
@@ -708,36 +425,15 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
                     error_message="No Imgur client IDs configured"
                 )
 
-            album_url = f'https://api.imgur.com/3/album/{album_id}'
-            max_rotations = len(self._client_ids)
-
-            for rotation in range(max_rotations):
-                self._respect_rate_limit()
-
-                client_id = self._get_current_client_id()
-                headers = {
-                    'Authorization': f'Client-ID {client_id}',
-                    'User-Agent': self.config.user_agent
-                }
-
-                response = self._session.get(
-                    album_url,
-                    headers=headers,
-                    timeout=(5.0, 15.0)
-                )
-
-                if response.status_code == 429:
-                    self._logger.debug(f"Imgur API rate limited (429) for album {album_id}, rotating client ID ({rotation + 1}/{max_rotations})")
-                    self._rotate_client_id()
-                    continue  # Retry with new client ID
-
-                break  # Non-429 response, proceed
-            else:
-                # All client IDs exhausted
+            response = self._api_get(
+                f'https://api.imgur.com/3/{endpoint}/{album_id}',
+                (5.0, 15.0),
+            )
+            if response is None:
                 return DownloadResult(
                     status=DownloadStatus.RATE_LIMITED,
                     error_message="Imgur rate limit exceeded (all client IDs exhausted)",
-                    retry_after=60
+                    retry_after=self._last_api_retry_after,
                 )
 
             response.raise_for_status()
@@ -780,7 +476,11 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
 
             if downloaded_files:
                 metadata = MediaMetadata(
-                    url=f"https://imgur.com/a/{album_id}",
+                    url=(
+                        f"https://imgur.com/gallery/{album_id}"
+                        if endpoint == 'gallery'
+                        else f"https://imgur.com/a/{album_id}"
+                    ),
                     media_type=MediaType.ALBUM,
                     title=album_data.get('title'),
                     description=album_data.get('description')
@@ -805,9 +505,8 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
             )
 
     def _download_gallery(self, gallery_id: str, save_path: str) -> DownloadResult:
-        """Download an Imgur gallery (similar to album)."""
-        # Gallery handling is similar to album, just different API endpoint
-        return self._download_album(gallery_id, save_path)
+        """Download an Imgur gallery through the gallery API endpoint."""
+        return self._download_album_direct(gallery_id, save_path, 'gallery')
 
     def _get_current_client_id(self) -> str:
         """Get current client ID for API calls (thread-safe)."""
@@ -839,61 +538,6 @@ class ImgurMediaDownloader(BaseHTTPDownloader):
         """Get the time when rate limit resets."""
         return None
 
-    def set_client_credentials(self, client_ids: List[str], client_secrets: Optional[List[str]] = None):
-        """
-        Set Imgur client credentials for API access.
-
-        Args:
-            client_ids: List of Imgur client IDs for rotation
-            client_secrets: Optional list of client secrets
-        """
+    def set_client_credentials(self, client_ids: List[str]):
+        """Set Imgur client IDs for API access."""
         self._client_ids = client_ids
-
-        # Try to setup PyImgur with first client ID
-        if self._pyimgur_available and client_ids:
-            try:
-                import pyimgur
-                client_secret = client_secrets[0] if client_secrets else None
-                self._pyimgur_client = pyimgur.Imgur(client_ids[0], client_secret)
-                self._logger.info(f"PyImgur client initialized with {len(client_ids)} client ID(s)")
-            except Exception as e:
-                self._logger.warning(f"Failed to initialize PyImgur with credentials: {e}")
-                self._pyimgur_client = None
-
-    def _fix_double_extension(self, actual_filename: str, intended_filename: str) -> str:
-        """
-        Fix double extension issue from PyImgur downloads.
-
-        PyImgur sometimes creates files like 'image.jpg.jpg' when the intended
-        filename already has an extension. This method detects and fixes such cases.
-
-        Args:
-            actual_filename: The filename PyImgur actually created
-            intended_filename: The filename we originally wanted
-
-        Returns:
-            The corrected filename (may be same as actual_filename if no issue)
-        """
-        if not os.path.exists(actual_filename):
-            return actual_filename
-
-        actual_base = os.path.basename(actual_filename)
-
-        # Check if we have a double extension pattern
-        name_parts = actual_base.split('.')
-        if len(name_parts) >= 3:  # e.g., ['image', 'gif', 'gif']
-            # Check if last two parts are the same extension
-            if name_parts[-1] == name_parts[-2] and name_parts[-1] in ['gif', 'jpg', 'jpeg', 'png', 'webp']:
-                # We have a double extension - fix it
-                correct_name = '.'.join(name_parts[:-1])  # Remove the duplicate extension
-                correct_path = os.path.join(os.path.dirname(actual_filename), correct_name)
-
-                try:
-                    os.rename(actual_filename, correct_path)
-                    self._logger.debug(f"Fixed double extension: {actual_base} -> {correct_name}")
-                    return correct_path
-                except OSError as e:
-                    self._logger.warning(f"Could not fix double extension for {actual_base}: {e}")
-                    return actual_filename
-
-        return actual_filename

@@ -8,6 +8,19 @@ from utils.gdpr_processor import process_gdpr_export
 from utils.config_validator import validate_configuration
 from utils.feature_flags import get_feature_summary
 
+
+def create_reddit_client():
+    """Create a Reddit client from the configured credentials."""
+    client_id, client_secret, username, password = load_config_and_env()
+    return praw.Reddit(
+        client_id=client_id,
+        client_secret=client_secret,
+        username=username,
+        password=password,
+        user_agent=f'Reddit Saved Saver by /u/{username}'
+    )
+
+
 def main():
     # Validate configuration before proceeding
     print("Validating configuration...")
@@ -44,25 +57,11 @@ def main():
     # Initialize Reddit API connection (only if API processing is needed)
     reddit = None
     if process_api:
-        client_id, client_secret, username, password = load_config_and_env()
-        reddit = praw.Reddit(
-            client_id=client_id,
-            client_secret=client_secret,
-            username=username,
-            password=password,
-            user_agent=f'Reddit Saved Saver by /u/{username}'
-        )
+        reddit = create_reddit_client()
     elif process_gdpr:
         # Try to load credentials for GDPR enrichment, but don't fail if missing
         try:
-            client_id, client_secret, username, password = load_config_and_env()
-            reddit = praw.Reddit(
-                client_id=client_id,
-                client_secret=client_secret,
-                username=username,
-                password=password,
-                user_agent=f'Reddit Saved Saver by /u/{username}'
-            )
+            reddit = create_reddit_client()
         except Exception:
             print("No API credentials available. GDPR export will run in CSV-only mode.")
             reddit = None

@@ -433,6 +433,15 @@ def setup_default_rate_limiters() -> None:
     )
     rate_limit_manager.register_service('wayback_machine', wayback_config)
 
+    # Arctic Shift is a shared public archive. Keep request volume modest.
+    arctic_shift_config = RateLimitConfig(
+        max_requests_per_minute=30,
+        burst_capacity=5,
+        adaptive_scaling=True,
+        retry_after_seconds=60,
+    )
+    rate_limit_manager.register_service('arctic_shift', arctic_shift_config)
+
     # PullPush.io - strict rate limits (15 req/min soft, 30 req/min hard)
     pullpush_config = RateLimitConfig(
         max_requests_per_minute=12,  # Stay well under 15 req/min soft limit

@@ -213,7 +213,7 @@ For detailed setup instructions, continue reading the [Setup](#setup) section.
 - ⏱️ **Rate Limit Management:** Implements dynamic sleep timers to respect Reddit's API rate limits.
 - 🔒 **GDPR Data Processing:** Optional processing of Reddit's GDPR export data.
 - 🖼️ **Enhanced Media Downloads:** Download images, videos, and other media with dramatically improved success rates (~80% vs previous ~10%), featuring intelligent fallback systems and modern web compatibility.
-- 🔄 **Content Recovery System:** 4-provider cascade for failed downloads (Wayback Machine, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs.
+- 🔄 **Content Recovery System:** 3-provider cascade for failed downloads and archived Reddit text (Wayback Machine, Arctic Shift, PullPush.io) with SQLite caching and automatic retry across runs.
 
 ## 🎯 Why Use Reddit Stash
 
@@ -1173,18 +1173,18 @@ Jump to any section or browse the complete settings index:
 |---------|----------------|---------|---------|
 | **[Settings]** | 8 | Core behavior (save paths, types, file checking) | [↓ View](#settings---core-application-behavior) |
 | **[Configuration]** | 4 | Reddit API credentials (use env vars!) | [↓ View](#configuration---reddit-api-credentials) |
-| **[Media]** | 12 | Media download controls (images, videos, albums) | [↓ View](#media---advanced-media-download-system) |
-| **[Imgur]** | 3 | Imgur API configuration (optional) | [↓ View](#imgur---imgur-api-configuration) |
-| **[Recovery]** | 9 | Content recovery system (4-provider cascade) | [↓ View](#recovery---content-recovery-system) |
+| **[Media]** | 14 | Media download controls (images, videos, albums) | [↓ View](#media---advanced-media-download-system) |
+| **[Imgur]** | 2 | Imgur API configuration (optional) | [↓ View](#imgur---imgur-api-configuration) |
+| **[Recovery]** | 11 | Content recovery system (3-provider cascade) | [↓ View](#recovery---content-recovery-system) |
 | **[Retry]** | 7 | Retry queue management (exponential backoff) | [↓ View](#retry---retry-queue-configuration) |
 | **[Storage]** | 5 | Cloud storage backend (Dropbox, S3) | [↓ View](#storage---cloud-storage-backend) |
-| **Total** | **48 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
+| **Total** | **51 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
 
 **Quick Tips:**
 - 🔒 **Security First**: Use environment variables for credentials, not settings.ini
 - ⚡ **Performance**: `check_type=LOG`, `max_concurrent_downloads=3-5`
 - 💾 **Storage**: Configure `max_image_size`, `max_video_size`, `max_daily_storage_mb`
-- 🔄 **Recovery**: Enable all 4 providers for best deleted content recovery
+- 🔄 **Recovery**: Enable all 3 active providers for best deleted content recovery
 - 📖 **Full Docs**: Each setting includes type, defaults, examples, and trade-offs
 
 ---
@@ -1365,9 +1365,10 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     - Expected files: `saved_posts.csv`, `saved_comments.csv`
   - **How It Works**:
     1. Reads post/comment IDs from CSV files
-    2. Fetches full content via Reddit API (one API call per item)
-    3. Saves with `GDPR_POST_` or `GDPR_COMMENT_` prefix
-    4. Respects rate limits (same 100 req/min as normal processing)
+    2. Fetches full content via Reddit API when credentials are available
+    3. In CSV-only mode, batches IDs through Arctic Shift and uses PullPush for archive records Arctic Shift does not return
+    4. Saves with `GDPR_POST_` or `GDPR_COMMENT_` prefix
+    5. Respects API and archive rate limits
   - **GDPR Export Process**:
     1. Visit https://www.reddit.com/settings/data-request
     2. Request data (takes 2-30 days to process)
@@ -1376,8 +1377,8 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     5. Place in `{save_directory}/gdpr_data/`
   - **Performance Impact**:
     - Processes AFTER regular API content
-    - Each item requires separate API call
-    - 1000 GDPR items ≈ 10-15 additional minutes
+    - API mode batches up to 100 item IDs per Reddit API call, then fetches batch misses individually
+    - CSV-only mode batches up to 500 IDs per archive request
   - **Deduplication**: Items already in log are skipped (no duplicates)
   - **Examples**:
     ```ini
@@ -1986,7 +1987,6 @@ max_daily_storage_mb = 1024           # Daily storage limit in MB
 [Imgur]
 # Optional: Comma-separated client IDs for rate limit rotation
 client_ids = None                      # Multiple Imgur client IDs
-client_secrets = None                  # Corresponding client secrets  
 recover_deleted = true                 # Attempt recovery of deleted content
 ```
 
@@ -2039,44 +2039,6 @@ recover_deleted = true                 # Attempt recovery of deleted content
     ```
   - **⚠️ Important**: Multiple client ID rotation is **only supported in settings.ini**, not via environment variables. If you need rotation across multiple Imgur apps, you must use settings.ini configuration.
 
-* **`client_secrets`** - Imgur application client secrets
-  - **Type**: String (comma-separated list in settings.ini, single value in env var)
-  - **Default**: `None`
-  - **Valid Values**: 
-    - `None`: No Imgur API access
-    - Comma-separated secrets matching `client_ids` order (settings.ini only)
-  - **MUST MATCH** `client_ids`:
-    - If `client_ids` has 3 IDs, `client_secrets` must have 3 secrets
-    - Order matters: `client_ids[0]` pairs with `client_secrets[0]`
-  - **Format Rules**:
-    - Same as client_ids: no spaces
-    - Each secret is alphanumeric, typically 40 characters
-    - Keep these SECRET (never commit to version control!)
-  - **Security Warning**:
-    - These are sensitive credentials
-    - Environment variables recommended for single app
-    - Never share or expose publicly
-  - **Configuration Methods**:
-    
-    | Method | Single Secret | Multiple Secrets | Recommended |
-    |--------|--------------|------------------|-------------|
-    | **Environment Variable** | ✅ Yes | ❌ No | ✅ Most secure |
-    | **settings.ini** | ✅ Yes | ✅ Yes | ⚠️ Only if multiple apps |
-    
-  - **Examples**:
-    ```ini
-    # settings.ini - Multiple secrets supported
-    client_secrets = None                                                    # No API
-    client_secrets = abcdef1234567890abcdef1234567890abcdef12              # Single
-    client_secrets = secret1_40chars,secret2_40chars,secret3_40chars        # Multiple ⚠️ settings.ini only
-    ```
-    ```bash
-    # Environment variable - Single secret only (RECOMMENDED)
-    export IMGUR_CLIENT_SECRET='abcdef1234567890abcdef1234567890abcdef12'
-    ```
-  - **Validation**: Script checks that count matches `client_ids`
-  - **⚠️ Note**: Multiple client secrets are **only supported in settings.ini**. For single app (most users), use environment variable for better security.
-
 * **`recover_deleted`** - Attempt recovery of deleted/unavailable Imgur content
   - **Type**: Boolean
   - **Default**: `true`
@@ -2113,11 +2075,12 @@ recover_deleted = true                 # Attempt recovery of deleted content
 
 ```ini
 [Recovery]
-# Recovery providers (4-provider cascade)
+# Active recovery providers (3-provider cascade)
 use_wayback_machine = true             # Internet Archive Wayback Machine
+use_arctic_shift = true                # Archived Reddit posts and comments
 use_pushshift_api = true               # PullPush.io (Pushshift successor) 
-use_reddit_previews = true             # Reddit's preview/thumbnail system
-use_reveddit_api = true                # Reveddit deleted content recovery
+use_reddit_previews = false            # Retained compatibility setting, not an active provider
+use_reveddit_api = false               # Retained compatibility setting, not an active provider
 
 # Performance settings
 timeout_seconds = 10                   # Per-provider timeout
@@ -2132,7 +2095,7 @@ enable_background_cleanup = true       # Automatic cache maintenance
 
 #### Content Recovery Explained:
 
-Reddit Stash includes a sophisticated 4-provider cascade system that attempts to recover deleted, removed, or unavailable content.
+Reddit Stash includes a 3-provider cascade for unavailable content. Wayback can provide a recovered URL, while Arctic Shift and PullPush contribute archived Reddit text and metadata only.
 
 #### Recovery Provider Settings:
 
@@ -2152,59 +2115,53 @@ Reddit Stash includes a sophisticated 4-provider cascade system that attempts to
     use_wayback_machine = false  # Disable to save time
     ```
 
-* **`use_pushshift_api`** - Use PullPush.io (Pushshift successor)
+* **`use_arctic_shift`** - Use Arctic Shift for archived Reddit post and comment text
+  - **Type**: Boolean
+  - **Default**: `true`
+  - **Use Case**: Recovers archived Reddit text for CSV-only GDPR exports and deleted Reddit permalinks
+  - **Note**: Archived titles and post/comment bodies are included in CSV-only Markdown exports. No media file is downloaded.
+  - **Examples**:
+    ```ini
+    use_arctic_shift = true   # Enable archive-backed text recovery
+    use_arctic_shift = false  # Disable third-party archive lookups
+    ```
+
+* **`use_pushshift_api`** - Use PullPush.io (Pushshift successor) for archive metadata
   - **Type**: Boolean
   - **Default**: `true`
   - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**: Reddit-specific archive of posts and comments
-  - **Best For**: Deleted/removed Reddit text content, metadata
-  - **Success Rate**: 40-70% for Reddit content (higher for older content)
-  - **Coverage**: Reddit posts/comments from 2005-present
+  - **What It Does**: Looks up archived Reddit posts and comments for Markdown enrichment
+  - **Best For**: Deleted or removed Reddit text content and metadata
+  - **Note**: Matches supply archived title, post body, or comment body. They do not provide a replacement media URL.
+  - **Availability**: Best-effort service. Archive completeness and uptime vary.
   - **Rate Limit**: 12 requests/minute (conservative, respects soft limit of 15)
-  - **Response Time**: 1-3 seconds average
-  - **Note**: Sometimes slower or down (community-run service)
+  - **Note**: The service can be slow or unavailable.
   - **Examples**:
     ```ini
     use_pushshift_api = true   # Enable (recommended for Reddit content)
     use_pushshift_api = false  # Disable if service unavailable
     ```
 
-* **`use_reddit_previews`** - Use Reddit's preview/thumbnail system
+* **`use_reddit_previews`** - Legacy Reddit preview compatibility setting
   - **Type**: Boolean
-  - **Default**: `true`
+  - **Default**: `false`
   - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**: Reddit's own cached preview images
-  - **Best For**: Recent posts with images, when original host is down
-  - **Success Rate**: 20-50% (only works if Reddit generated preview)
-  - **Coverage**: Images from posts where Reddit created thumbnails
-  - **Quality**: Usually lower resolution (preview quality, not original)
-  - **Rate Limit**: 30 requests/minute
-  - **Response Time**: <1 second (very fast)
-  - **Limitations**: 
-    - Only works for posts Reddit previewed
-    - Lower quality than originals
-    - May not work for very old posts
+  - **What It Does**: The application does not synthesize preview URLs because Reddit does not expose a reliable discovery path
+  - **Note**: This setting remains in configuration for compatibility but does not enable a recovery provider
   - **Examples**:
     ```ini
-    use_reddit_previews = true   # Enable (fast fallback)
-    use_reddit_previews = false  # Disable if quality matters
+    use_reddit_previews = false  # Keep unsupported preview probing disabled
     ```
 
-* **`use_reveddit_api`** - Use Reveddit deleted content recovery
+* **`use_reveddit_api`** - Legacy Reveddit compatibility setting
   - **Type**: Boolean
-  - **Default**: `true`
+  - **Default**: `false`
   - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**: Specialized service for recovering deleted Reddit content
-  - **Best For**: Recently deleted posts/comments (within days/weeks)
-  - **Success Rate**: 30-60% for recent deletions, lower for older
-  - **Coverage**: Reddit posts and comments deleted by users or moderators
-  - **Rate Limit**: 20 requests/minute
-  - **Response Time**: 2-5 seconds average
-  - **Note**: Most effective for recent deletions (<30 days)
+  - **What It Does**: Public Reveddit pages no longer expose archive content reliably, so the application does not send HTML probes to them
+  - **Note**: This setting remains in configuration for compatibility but does not enable a recovery provider
   - **Examples**:
     ```ini
-    use_reveddit_api = true   # Enable (good for recent deletions)
-    use_reveddit_api = false  # Disable to save time
+    use_reveddit_api = false  # Keep unsupported HTML probing disabled
     ```
 
 #### Recovery Performance Settings:
@@ -2226,12 +2183,12 @@ Reddit Stash includes a sophisticated 4-provider cascade system that attempts to
     | **10s** | Good (~70%) | Moderate | Default, balanced |
     | **20-30s** | Higher (~85%) | Slow | Thorough recovery, slow networks |
     
-  - **Cascade Example** (timeout=10s, 4 providers):
+  - **Cascade Example** (timeout=10s, 3 providers):
     - Wayback: Try for 10s → Success/Fail → Next
-    - PullPush: Try for 10s → Success/Fail → Next
-    - Reddit Preview: Try for 10s → Success/Fail → Next
-    - Reveddit: Try for 10s → Success/Fail → Give up
-    - Total: 0-40 seconds per item (stops at first success)
+    - Arctic Shift: Try for archived Reddit text → Success/Fail → Next
+    - PullPush: Look up archived text and metadata → Success/Fail → Next
+    - Sequential total: 0-30 seconds per item (stops at first success)
+    - Parallel mode: Collects enabled provider results before selecting the highest-quality recovery
   - **Examples**:
     ```ini
     timeout_seconds = 5    # Fast, may miss some content
@@ -2716,7 +2673,7 @@ The storage system lets you sync your Reddit archive to a cloud provider. Curren
 
 ### Settings Index (Alphabetical)
 
-Quick alphabetical reference of all 43 settings with links to detailed documentation:
+Quick alphabetical reference of all 51 settings with links to detailed documentation:
 
 #### A-C
 - **`base_retry_delay_high`** (Integer, default: 5) - High-priority retry delay | [→ Retry Section](#priority-based-delay-settings)
@@ -2728,7 +2685,6 @@ Quick alphabetical reference of all 43 settings with links to detailed documenta
 - **`client_id`** (String, default: None) - Reddit API client ID | [→ Configuration Section](#api-configuration-settings)
 - **`client_ids`** (String, default: None) - Imgur client IDs (multiple in settings.ini only) | [→ Imgur Section](#imgur-settings-explained)
 - **`client_secret`** (String, default: None) - Reddit API client secret | [→ Configuration Section](#api-configuration-settings)
-- **`client_secrets`** (String, default: None) - Imgur client secrets (multiple in settings.ini only) | [→ Imgur Section](#imgur-settings-explained)
 - **`create_thumbnails`** (Boolean, default: true) - Generate thumbnail versions | [→ Media Section](#media-settings-explained)
 
 #### D-I
@@ -2772,9 +2728,10 @@ Quick alphabetical reference of all 43 settings with links to detailed documenta
 - **`thumbnail_size`** (Integer, default: 800) - Thumbnail dimensions in pixels | [→ Media Section](#media-settings-explained)
 - **`timeout_seconds`** (Integer, default: 10) - Per-provider recovery timeout | [→ Recovery Section](#recovery-performance-settings)
 - **`unsave_after_download`** (Boolean, default: false) - Auto-unsave after download | [→ Settings Section](#core-settings-explained)
+- **`use_arctic_shift`** (Boolean, default: true) - Use Arctic Shift archive provider | [→ Recovery Section](#recovery-provider-settings)
 - **`use_pushshift_api`** (Boolean, default: true) - Use PullPush.io provider | [→ Recovery Section](#recovery-provider-settings)
-- **`use_reddit_previews`** (Boolean, default: true) - Use Reddit preview system | [→ Recovery Section](#recovery-provider-settings)
-- **`use_reveddit_api`** (Boolean, default: true) - Use Reveddit provider | [→ Recovery Section](#recovery-provider-settings)
+- **`use_reddit_previews`** (Boolean, default: false) - Retained legacy Reddit preview setting | [→ Recovery Section](#recovery-provider-settings)
+- **`use_reveddit_api`** (Boolean, default: false) - Retained legacy Reveddit setting | [→ Recovery Section](#recovery-provider-settings)
 - **`use_wayback_machine`** (Boolean, default: true) - Use Internet Archive | [→ Recovery Section](#recovery-provider-settings)
 - **`username`** (String, default: None) - Reddit username | [→ Configuration Section](#api-configuration-settings)
 
@@ -2922,7 +2879,7 @@ If you can't obtain API credentials, you can still create a structured index of 
    python reddit_stash.py
    ```
 
-In CSV-only mode, the script creates markdown files with Reddit links for each saved item, organized by subreddit. This gives you a searchable index of your saved content. If you later obtain API credentials, you can re-run with `process_api = true` to fetch full content for each item.
+In CSV-only mode, the script creates Markdown files with Reddit links for each saved item, organized by subreddit. It also adds archived titles and post or comment bodies from Arctic Shift when available, with PullPush as a fallback. No media file is downloaded from archive text. If you later obtain API credentials, you can re-run with `process_api = true` to fetch full content for each item.
 
 #### Setting Up Reddit Environment Variables
 
@@ -3184,7 +3141,7 @@ If you're switching from Dropbox to S3 (or vice versa), Reddit Stash includes a 
 
 - Migration copies **all files** including `file_log.json`, so your deduplication state is preserved
 - Existing files on the target are **not deleted** — migration only adds files
-- For large archives, migration may take a while (all files pass through your machine)
+- For large archives, migration may take a while. Files pass through your machine one at a time, so temporary space only needs to fit the largest file.
 - You can migrate in either direction: Dropbox → S3, or S3 → Dropbox
 
 ---
@@ -3521,16 +3478,17 @@ The script can process Reddit's GDPR data export to access your complete saved p
    ```
 
 #### Technical Details:
-- Uses PRAW's built-in rate limiting
+- Uses PRAW's built-in rate limiting when API credentials are available
+- Uses Arctic Shift batches and PullPush fallback for archived CSV-only text
 - Processes both submissions and comments
 - Maintains consistent file naming with "GDPR_" prefix
 - Integrates with existing file logging system
-- Handles API errors and retries gracefully
+- Handles API and archive errors gracefully
 
 #### Important Notes:
-- GDPR processing runs after regular API processing
-- Each item requires a separate API call to fetch full content
-- Rate limits are shared with regular API processing
+- GDPR processing runs after regular API processing when API mode is enabled
+- API mode batches Reddit item IDs, while CSV-only mode batches archive IDs
+- API rate limits are shared with regular API processing
 - Large exports may take significant time to process
 - Duplicate items are automatically skipped via file logging
 
@@ -3628,7 +3586,7 @@ Feel free to open issues or submit pull requests if you have any improvements or
 Have an idea for improving Reddit Stash? Feel free to suggest it in the issues or contribute a pull request!
 
 **✅ Recently Implemented:**
-- **Content Recovery System** - 4-provider cascade for failed downloads (Wayback Machine, PullPush.io, Reddit Previews, Reveddit) with SQLite caching and automatic retry across runs
+- **Content Recovery System** - 3-provider cascade for failed downloads and archived Reddit text (Wayback Machine, Arctic Shift, PullPush.io) with SQLite caching and automatic retry across runs
 - **Advanced Media Download System** - Modern web compatibility with HTTP/2 support and browser impersonation
 - **Comprehensive Rate Limiting** - Multi-layer rate limiting with provider-specific limits and intelligent backoff
 

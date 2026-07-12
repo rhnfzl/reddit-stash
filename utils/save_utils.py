@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import requests
 import threading
@@ -12,6 +13,7 @@ from utils.env_config import get_ignore_tls_errors
 from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
 from utils.feature_flags import get_media_config
 from utils.media_services.reddit_media import RedditMediaDownloader
+from utils.domain_matching import domain_matches
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,20 @@ _media_size_local = threading.local()
 def format_date(timestamp):
     """Format a UTC timestamp into a human-readable date."""
     return datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _write_yaml_frontmatter(file, fields):
+    """Write a YAML header with JSON-encoded scalar values."""
+    file.write('---\n')
+    for key, value in fields.items():
+        file.write(f'{key}: {json.dumps(value, ensure_ascii=False)}\n')
+    file.write('---\n\n')
+
+
+def _recovered_value(data, key, fallback):
+    """Return archived values while replacing explicit nulls with export defaults."""
+    value = data.get(key)
+    return fallback if value is None else value
 
 def extract_video_id(url):
     """Extract the video ID from a YouTube URL."""
@@ -129,7 +145,7 @@ def _is_image_url(url):
 
         # Known image hosting domains (even without extension)
         image_domains = ['i.redd.it', 'i.imgur.com', 'preview.redd.it', 'external-preview.redd.it']
-        if any(domain.endswith(d) for d in image_domains):
+        if any(domain_matches(domain, image_domain) for image_domain in image_domains):
             return True
 
         return False
@@ -322,6 +338,7 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
         # Check if this is a recovered item
         is_recovered = isinstance(submission, RecoveredItem)
 
+        recovery_banner = ''
         # If recovery_metadata is provided or item is recovered, add recovery banner
         if recovery_metadata or is_recovered:
             if is_recovered and hasattr(submission, 'recovery_result'):
@@ -329,34 +346,52 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
             if recovery_metadata:
                 recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
-                f.write(recovery_banner)
 
-        f.write('---\n')  # Start of frontmatter
-        f.write(f'id: {submission.id}\n')
+        frontmatter = {'id': submission.id}
 
         # Handle recovered items differently
         if is_recovered:
             # Extract data from recovery result
             recovered_data = submission.recovered_data if hasattr(submission, 'recovered_data') else {}
-            f.write(f'subreddit: {recovered_data.get("subreddit", "[unknown]")}\n')
-            f.write(f'timestamp: {recovered_data.get("created_utc", "unknown")}\n')
-            f.write(f'author: {recovered_data.get("author", "[deleted]")}\n')
-            f.write('recovered: true\n')
+            title = recovered_data.get('title') or getattr(submission, 'title', f'Recovered post {submission.id}')
+            frontmatter.update({
+                'title': title,
+                'subreddit': _recovered_value(recovered_data, 'subreddit', '[unknown]'),
+                'timestamp': _recovered_value(recovered_data, 'created_utc', 'unknown'),
+                'author': _recovered_value(recovered_data, 'author', '[deleted]'),
+                'recovered': True,
+                'permalink': getattr(submission, 'original_url', ''),
+            })
         else:
             # Normal PRAW object
-            f.write(f'subreddit: /r/{submission.subreddit.display_name}\n')
-            f.write(f'timestamp: {format_date(submission.created_utc)}\n')
-            f.write(f'author: /u/{submission.author.name if submission.author else "[deleted]"}\n')
+            title = submission.title
+            frontmatter.update({
+                'title': title,
+                'subreddit': f'/r/{submission.subreddit.display_name}',
+                'timestamp': format_date(submission.created_utc),
+                'author': f'/u/{submission.author.name if submission.author else "[deleted]"}',
+            })
 
         if not is_recovered and submission.link_flair_text:  # Check if flair exists and is not None
-            f.write(f'flair: {submission.link_flair_text}\n')
+            frontmatter['flair'] = submission.link_flair_text
 
         if not is_recovered:
-            f.write(f'comments: {submission.num_comments}\n')
-            f.write(f'permalink: https://reddit.com{submission.permalink}\n')
+            frontmatter['comments'] = submission.num_comments
+            frontmatter['permalink'] = f'https://reddit.com{submission.permalink}'
 
-        f.write('---\n\n')  # End of frontmatter
-        f.write(f'# {submission.title}\n\n')
+        _write_yaml_frontmatter(f, frontmatter)
+        if recovery_banner:
+            f.write(recovery_banner)
+        f.write(f'# {title}\n\n')
+
+        if is_recovered:
+            body = recovered_data.get('selftext') or recovered_data.get('body')
+            f.write(body or '[Archived content was not available.]')
+            if submission.original_url:
+                f.write(f'\n\n**Original URL:** [Link]({submission.original_url})')
+            f.write('\n')
+            return
+
         f.write(f'**Upvotes:** {submission.score} | **Permalink:** [Link](https://reddit.com{submission.permalink})\n\n')
 
         if submission.is_self:
@@ -412,6 +447,7 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
         # Check if this is a recovered item
         is_recovered = isinstance(comment, RecoveredItem)
 
+        recovery_banner = ''
         # If recovery_metadata is provided or item is recovered, add recovery banner
         if recovery_metadata or is_recovered:
             if is_recovered and hasattr(comment, 'recovery_result'):
@@ -419,24 +455,41 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
 
             if recovery_metadata:
                 recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
-                f.write(recovery_banner)
-
-        # Save the comment itself
-        f.write('---\n')  # Start of frontmatter
 
         if is_recovered:
-            # Handle recovered comment
             recovered_data = comment.recovered_data if hasattr(comment, 'recovered_data') else {}
-            f.write(f'Comment by {recovered_data.get("author", "[deleted]")}\n')
-            f.write('- **Recovered:** true\n')
-            f.write(f'{recovered_data.get("body", "[Content not available]")}\n\n')
+            author = _recovered_value(recovered_data, 'author', '[deleted]')
+            body = _recovered_value(recovered_data, 'body', '[Content not available]')
+            title = recovered_data.get('title') or f'Comment by {author}'
+            frontmatter = {
+                'id': comment.id,
+                'title': title,
+                'author': author,
+                'body': body,
+                'recovered': True,
+            }
         else:
-            # Normal PRAW comment
-            f.write(f'Comment by /u/{comment.author.name if comment.author else "[deleted]"}\n')
-            f.write(f'- **Upvotes:** {comment.score} | **Permalink:** [Link](https://reddit.com{comment.permalink})\n')
-            f.write(f'{comment.body}\n\n')
+            author = f'/u/{comment.author.name if comment.author else "[deleted]"}'
+            body = comment.body
+            title = f'Comment by {author}'
+            frontmatter = {
+                'id': comment.id,
+                'title': title,
+                'author': author,
+                'body': body,
+                'score': comment.score,
+                'permalink': f'https://reddit.com{comment.permalink}',
+            }
 
-        f.write('---\n\n')  # End of frontmatter
+        _write_yaml_frontmatter(f, frontmatter)
+        if recovery_banner:
+            f.write(recovery_banner)
+        f.write(f'# {title}\n\n')
+        f.write(f'{body}\n\n')
+        if is_recovered:
+            f.write('**Recovered:** Yes\n\n')
+        else:
+            f.write(f'**Upvotes:** {comment.score} | **Permalink:** [Link](https://reddit.com{comment.permalink})\n\n')
 
         # Save the parent context (skip for recovered items as we don't have parent info)
         if not is_recovered:

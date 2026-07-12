@@ -12,8 +12,11 @@ import re
 import hashlib
 import shutil
 import logging
+import socket
+import threading
+from contextlib import contextmanager, nullcontext
 from typing import Optional, Dict, Callable, Any
-from urllib.parse import urlparse, unquote
+from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass
 
 # Modern fast hashing with graceful fallback
@@ -24,12 +27,14 @@ except ImportError:
     BLAKE3_AVAILABLE = False
 try:
     from curl_cffi import requests
+    from curl_cffi import CurlOpt
     from curl_cffi.requests import RequestsError, Timeout, ConnectionError
     CURL_CFFI_AVAILABLE = True
 except ImportError:
     # Fallback to standard requests if curl_cffi is not available
     import requests
     from requests.exceptions import Timeout, ConnectionError, RequestException as RequestsError
+    CurlOpt = None
     CURL_CFFI_AVAILABLE = False
 from urllib3.util.retry import Retry
 
@@ -50,9 +55,19 @@ from ..service_abstractions import (
 )
 from ..rate_limiter import rate_limit_manager
 from ..url_transformer import url_transformer
+from ..url_security import get_url_validator
 from ..constants import (
     DOWNLOAD_CHUNK_SIZE, DISK_SPACE_SAFETY_FACTOR, MIN_MEDIA_FILE_SIZE
 )
+
+CROSS_ORIGIN_REDIRECT_HEADER_ALLOWLIST = frozenset({
+    "accept",
+    "accept-encoding",
+    "accept-language",
+    "cache-control",
+    "range",
+    "user-agent",
+})
 
 # Optional imports for format-specific validation
 try:
@@ -69,6 +84,13 @@ class FileIntegrityResult:
     error_message: Optional[str] = None
     file_size: Optional[int] = None
     checksum: Optional[str] = None
+
+
+class UnsafeRedirectError(ValueError):
+    """Raised when a redirect target fails URL security validation."""
+
+
+_dns_pin_lock = threading.RLock()
 
 
 def should_retry_download_error(exception):
@@ -191,6 +213,10 @@ class BaseHTTPDownloader:
             self._session.mount("http://", adapter)
             self._session.mount("https://", adapter)
 
+        # DNS pinning is ineffective if a proxy from the environment resolves the
+        # request elsewhere. Downloads must connect to the validated destination.
+        self._session.trust_env = False
+
         # Set enhanced headers for better compatibility
         # Accept header prioritizes images to prevent Reddit serving HTML wrapper pages
         self._session.headers.update({
@@ -212,29 +238,6 @@ class BaseHTTPDownloader:
         # Increased timeout to 90 seconds to handle Imgur's backoff periods
         if not rate_limit_manager.acquire(service_name, timeout=90):
             raise RuntimeError(f"Rate limit timeout for service '{service_name}'")
-
-    def _get_filename_from_url(self, url: str) -> str:
-        """Extract filename from URL, handling encoding issues."""
-        try:
-            parsed = urlparse(url)
-            filename = os.path.basename(parsed.path)
-
-            # Handle URL encoding issues (common with Reddit URLs)
-            filename = unquote(filename)
-
-            # If no filename in path, generate one from URL
-            if not filename or '.' not in filename:
-                # Use last part of path or generate from URL hash
-                path_parts = parsed.path.strip('/').split('/')
-                if path_parts and path_parts[-1]:
-                    filename = f"{path_parts[-1]}.unknown"
-                else:
-                    filename = f"media_{abs(hash(url)) % 10000}.unknown"
-
-            return filename
-        except Exception:
-            # Fallback to hash-based filename
-            return f"media_{abs(hash(url)) % 10000}.unknown"
 
     def _get_file_extension_from_headers(self, headers: Dict[str, str]) -> Optional[str]:
         """Determine file extension from Content-Type header."""
@@ -466,6 +469,130 @@ class BaseHTTPDownloader:
             # If URL parsing fails, consider it invalid
             return False
 
+    def _get_with_safe_redirects(
+        self,
+        url: str,
+        request_kwargs: Dict[str, Any],
+    ) -> tuple[Any, str]:
+        """Fetch a URL while validating every redirect target before requesting it."""
+        current_url = url
+        validator = get_url_validator()
+
+        for redirect_count in range(self.config.max_redirects + 1):
+            if not validator.is_safe_for_download(current_url):
+                raise UnsafeRedirectError(f"URL failed security validation: {current_url}")
+
+            resolved_addresses = validator.resolve_public_addresses(current_url)
+            if not resolved_addresses:
+                raise UnsafeRedirectError(
+                    f"URL could not be pinned to a public address: {current_url}"
+                )
+
+            request_kwargs, dns_pin = self._pin_resolved_addresses(
+                current_url,
+                request_kwargs,
+                resolved_addresses,
+            )
+
+            with dns_pin:
+                response = self._session.get(
+                    current_url,
+                    **{**request_kwargs, "allow_redirects": False},
+                )
+            status_code = getattr(response, "status_code", None)
+            location = response.headers.get("location")
+            if status_code not in {301, 302, 303, 307, 308}:
+                return response, current_url
+
+            if not location:
+                response.close()
+                raise UnsafeRedirectError("Redirect response is missing a location header")
+            if redirect_count == self.config.max_redirects:
+                response.close()
+                raise UnsafeRedirectError("Redirect limit exceeded")
+
+            response.close()
+            next_url = urljoin(current_url, location)
+            if self._get_origin(current_url) != self._get_origin(next_url):
+                headers = request_kwargs.get("headers")
+                if headers:
+                    request_kwargs = {
+                        **request_kwargs,
+                        "headers": {
+                            name: value
+                            for name, value in headers.items()
+                            if name.lower() in CROSS_ORIGIN_REDIRECT_HEADER_ALLOWLIST
+                        },
+                    }
+            current_url = next_url
+
+        raise UnsafeRedirectError("Redirect limit exceeded")
+
+    @staticmethod
+    def _get_origin(url: str) -> tuple[str, str, Optional[int]]:
+        """Return the canonical origin tuple for redirect credential checks."""
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        hostname = (parsed.hostname or "").lower()
+        default_port = {"http": 80, "https": 443}.get(scheme)
+        return scheme, hostname, parsed.port or default_port
+
+    def _pin_resolved_addresses(
+        self,
+        url: str,
+        request_kwargs: Dict[str, Any],
+        addresses: tuple[str, ...],
+    ) -> tuple[Dict[str, Any], Any]:
+        """Pin a request to the addresses that passed URL security validation."""
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            raise UnsafeRedirectError(f"URL has no hostname: {url}")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+        if CURL_CFFI_AVAILABLE and CurlOpt is not None:
+            curl_options = dict(request_kwargs.get("curl_options", {}))
+            curl_options[CurlOpt.RESOLVE] = [
+                f"{hostname}:{port}:{self._format_resolve_address(address)}"
+                for address in addresses
+            ]
+            return {**request_kwargs, "curl_options": curl_options}, nullcontext()
+
+        return request_kwargs, self._pin_standard_requests(hostname, addresses)
+
+    @staticmethod
+    def _format_resolve_address(address: str) -> str:
+        """Format IPv6 addresses for libcurl's host:port:address resolve syntax."""
+        return f"[{address}]" if ":" in address else address
+
+    @contextmanager
+    def _pin_standard_requests(self, hostname: str, addresses: tuple[str, ...]):
+        """Temporarily pin standard-requests DNS while retaining the URL hostname for TLS."""
+        original_getaddrinfo = socket.getaddrinfo
+        normalized_hostname = hostname.rstrip(".").lower()
+
+        def pinned_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            if str(host).rstrip(".").lower() != normalized_hostname:
+                return original_getaddrinfo(host, port, family, type, proto, flags)
+
+            return [
+                (
+                    socket.AF_INET6 if ":" in address else socket.AF_INET,
+                    type or socket.SOCK_STREAM,
+                    proto or socket.IPPROTO_TCP,
+                    "",
+                    (address, port, 0, 0) if ":" in address else (address, port),
+                )
+                for address in addresses
+            ]
+
+        with _dns_pin_lock:
+            socket.getaddrinfo = pinned_getaddrinfo
+            try:
+                yield
+            finally:
+                socket.getaddrinfo = original_getaddrinfo
+
     def _download_with_retry(self, url: str, save_path: str,
                            progress_callback: Optional[Callable[[int, int], None]] = None,
                            extra_headers: Optional[Dict[str, str]] = None) -> DownloadResult:
@@ -483,12 +610,13 @@ class BaseHTTPDownloader:
         request_kwargs = dict(
             stream=True,
             timeout=(self.config.connect_timeout, self.config.read_timeout),
-            allow_redirects=True
+            allow_redirects=False,
         )
         if extra_headers:
             request_kwargs['headers'] = extra_headers
 
-        with self._session.get(url, **request_kwargs) as response:
+        response, final_url = self._get_with_safe_redirects(url, request_kwargs)
+        with response:
             response.raise_for_status()
 
             # Validate content type for security
@@ -652,7 +780,7 @@ class BaseHTTPDownloader:
 
             # Create metadata
             metadata = MediaMetadata(
-                url=url,
+                url=final_url,
                 media_type=self._detect_media_type(response.headers),
                 file_size=downloaded,
                 format=self._get_file_extension_from_headers(response.headers)
@@ -667,6 +795,7 @@ class BaseHTTPDownloader:
             return DownloadResult(
                 status=DownloadStatus.SUCCESS,
                 local_path=fixed_save_path,
+                content_hash=integrity_result.checksum,
                 metadata=metadata,
                 bytes_downloaded=downloaded,
                 download_time=download_time
@@ -703,6 +832,11 @@ class BaseHTTPDownloader:
                 # Fallback without retry if tenacity not available
                 return self._download_with_retry(url, save_path, progress_callback, extra_headers)
 
+        except UnsafeRedirectError as e:
+            return DownloadResult(
+                status=DownloadStatus.INVALID_URL,
+                error_message=str(e),
+            )
         except Timeout as e:
             # Report timeout as server error
             service_name = self.config.name.lower()

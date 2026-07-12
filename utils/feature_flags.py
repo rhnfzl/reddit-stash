@@ -90,7 +90,6 @@ class MediaFeatureConfig:
         config = {
             'recover_deleted': self.config_parser.getboolean('Imgur', 'recover_deleted', fallback=True),
             'client_ids': None,
-            'client_secrets': None,
         }
 
         # Handle client IDs (comma-separated list)
@@ -98,17 +97,13 @@ class MediaFeatureConfig:
         if client_ids_str and client_ids_str.lower() != 'none':
             config['client_ids'] = [id.strip() for id in client_ids_str.split(',') if id.strip()]
 
-        # Handle client secrets (comma-separated list)
-        client_secrets_str = self.config_parser.get('Imgur', 'client_secrets', fallback='None')
-        if client_secrets_str and client_secrets_str.lower() != 'none':
-            config['client_secrets'] = [secret.strip() for secret in client_secrets_str.split(',') if secret.strip()]
-
         return config
 
     def get_recovery_config(self) -> Dict[str, Any]:
         """Get content recovery configuration."""
         return {
             'use_wayback_machine': self.config_parser.getboolean('Recovery', 'use_wayback_machine', fallback=True),
+            'use_arctic_shift': self.config_parser.getboolean('Recovery', 'use_arctic_shift', fallback=True),
             'use_pushshift_api': self.config_parser.getboolean('Recovery', 'use_pushshift_api', fallback=True),
             'use_reddit_previews': self.config_parser.getboolean('Recovery', 'use_reddit_previews', fallback=True),
             'use_reveddit_api': self.config_parser.getboolean('Recovery', 'use_reveddit_api', fallback=False),

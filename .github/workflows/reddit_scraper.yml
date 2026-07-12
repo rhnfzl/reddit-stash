@@ -46,7 +46,7 @@ jobs:
     - name: Verify critical scripts exist
       run: |
         missing=0
-        for script in reddit_stash.py dropbox_utils.py storage_utils.py; do
+        for script in reddit_stash.py storage_utils.py; do
           if [ ! -f "$script" ]; then
             echo "::error::Missing critical script: $script"
             missing=$((missing + 1))
@@ -110,7 +110,7 @@ jobs:
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
         DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       run: |
-        python dropbox_utils.py --download
+        STORAGE_PROVIDER=dropbox python storage_utils.py --download
 
     # --- Storage: Download (S3) ---
     - name: Install S3 dependencies
@@ -154,7 +154,7 @@ jobs:
         DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
         DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       run: |
-        python dropbox_utils.py --upload
+        STORAGE_PROVIDER=dropbox python storage_utils.py --upload
 
     # --- Storage: Upload (S3) ---
     - name: Upload to S3

@@ -9,7 +9,8 @@ import unittest
 import tempfile
 import os
 import time
-from unittest.mock import Mock, patch, MagicMock
+import threading
+from unittest.mock import Mock, patch
 from typing import Optional
 
 # Import system components
@@ -151,6 +152,52 @@ class TestRecoveryIntegration(unittest.TestCase):
                 else:
                     print("    ❌ FAILED: No file downloaded")
                     self.fail("Expected successful download after recovery")
+
+    def test_trusted_url_recovery_validates_the_recovered_url(self):
+        """Trusted media hosts must still validate recovered URLs."""
+        original_url = "https://i.redd.it/failing_image.jpg"
+        recovered_url = "https://web.archive.org/web/20220101/https://example.com/failing_image.jpg"
+        recovery_service = MockRecoveryService({original_url: recovered_url})
+
+        def downloader_for(url):
+            return MockDownloader(should_fail=url == original_url, fail_count=999)
+
+        with patch.object(self.download_manager, '_recovery_service', recovery_service):
+            with patch.object(self.download_manager, '_get_service_for_url') as mock_get_service:
+                with patch('utils.media_download_manager.get_url_validator') as mock_get_validator:
+                    mock_validator = Mock()
+                    mock_validator.validate_url.return_value = Mock(is_valid=True, cleaned_url=None)
+                    mock_get_validator.return_value = mock_validator
+                    mock_get_service.side_effect = lambda url: ('generic', downloader_for(url))
+
+                    result_path = self.download_manager.download_media(original_url, self.temp_dir)
+
+        self.assertEqual(result_path, os.path.join(self.temp_dir, "downloaded_file.jpg"))
+        self.assertEqual(recovery_service.attempt_count, 1)
+        mock_validator.validate_url.assert_called_once_with(recovered_url)
+
+    def test_trusted_url_recovery_rejects_an_invalid_recovered_url(self):
+        """Recovered URLs must pass validation before a second download."""
+        original_url = "https://i.redd.it/failing_image.jpg"
+        recovered_url = "https://invalid.example/failing_image.jpg"
+        recovery_service = MockRecoveryService({original_url: recovered_url})
+        original_downloader = MockDownloader(should_fail=True, fail_count=999)
+
+        with patch.object(self.download_manager, '_recovery_service', recovery_service):
+            with patch.object(self.download_manager, '_get_service_for_url', return_value=('generic', original_downloader)) as mock_get_service:
+                with patch('utils.media_download_manager.get_url_validator') as mock_get_validator:
+                    mock_validator = Mock()
+                    mock_validator.validate_url.return_value = Mock(
+                        is_valid=False,
+                        issues=['blocked for test'],
+                    )
+                    mock_get_validator.return_value = mock_validator
+
+                    result_path = self.download_manager.download_media(original_url, self.temp_dir)
+
+        self.assertIsNone(result_path)
+        mock_validator.validate_url.assert_called_once_with(recovered_url)
+        mock_get_service.assert_called_once_with(original_url)
 
     def test_recovery_failure_leads_to_blacklist(self):
         """Test that failed recovery leads to URL blacklisting."""
@@ -350,17 +397,83 @@ class TestRecoveryIntegration(unittest.TestCase):
                 os.unlink(temp_cache.name)
 
 
-class TestRecoveryPerformance(unittest.TestCase):
-    """Performance tests for recovery system."""
+class TestRecoveryCacheManagerRegistry(unittest.TestCase):
+    """Test cache-manager registry isolation."""
 
-    def test_recovery_timeout_compliance(self):
-        """Test that recovery attempts respect timeout settings."""
-        print("\n⏱️ Testing recovery timeout compliance...")
+    def test_cache_manager_is_shared_for_concurrent_same_path_requests(self):
+        from utils import sqlite_manager
+
+        sqlite_manager._cache_managers.clear()
+        start = threading.Barrier(4)
+        creation_lock = threading.Lock()
+        creation_count = 0
+        release_creation = threading.Event()
+        results = []
+
+        def create_manager(_path):
+            nonlocal creation_count
+            with creation_lock:
+                creation_count += 1
+                if creation_count == 4:
+                    release_creation.set()
+            release_creation.wait(timeout=0.1)
+            return object()
+
+        def get_manager():
+            start.wait()
+            results.append(sqlite_manager.get_cache_manager('concurrent-cache.db'))
+
+        try:
+            with patch('utils.sqlite_manager.ThreadLocalSQLiteManager', side_effect=create_manager):
+                threads = [threading.Thread(target=get_manager) for _ in range(4)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+            self.assertEqual(creation_count, 1)
+            self.assertEqual(len({id(manager) for manager in results}), 1)
+        finally:
+            sqlite_manager._cache_managers.clear()
+
+    def test_cache_managers_keep_different_paths_isolated(self):
+        from utils import sqlite_manager
+
+        sqlite_manager._cache_managers.clear()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_path = os.path.join(temp_dir, 'first.db')
+            second_path = os.path.join(temp_dir, 'second.db')
+            first = sqlite_manager.get_cache_manager(first_path)
+            second = sqlite_manager.get_cache_manager(second_path)
+
+            try:
+                first.execute_query('CREATE TABLE entries (value TEXT)')
+                first.execute_query("INSERT INTO entries VALUES ('first')")
+                with second.get_connection() as connection:
+                    table = connection.execute(
+                        "SELECT name FROM sqlite_master WHERE name = 'entries'"
+                    ).fetchone()
+
+                self.assertIsNot(first, second)
+                self.assertIsNone(table)
+            finally:
+                first.close_connection()
+                second.close_connection()
+                sqlite_manager._cache_managers.clear()
+
+
+class TestRecoveryProviderIsolation(unittest.TestCase):
+    """Recovery tests that never contact external archives."""
+
+    def test_sequential_recovery_uses_injected_provider(self):
+        """Sequential recovery records an injected provider result."""
+        print("\nTesting injected recovery provider...")
 
         # Create recovery service with short timeout
         mock_config = Mock()
         mock_config.get_recovery_config.return_value = {
             'use_wayback_machine': True,
+            'use_arctic_shift': False,
             'use_pushshift_api': False,
             'use_reddit_previews': False,
             'use_reveddit_api': False,
@@ -369,62 +482,56 @@ class TestRecoveryPerformance(unittest.TestCase):
         }
 
         recovery_service = ContentRecoveryService(config=mock_config)
+        provider = Mock()
+        provider.attempt_recovery.return_value = RecoveryResult.failure_result(
+            "Archive unavailable", RecoverySource.WAYBACK_MACHINE
+        )
+        recovery_service.providers = {RecoverySource.WAYBACK_MACHINE: provider}
 
-        test_url = "https://httpbin.org/delay/5"  # URL that delays 5 seconds
+        test_url = "https://example.com/missing-image.jpg"
 
-        print(f"  Testing timeout with: {test_url}")
-        start_time = time.time()
-        result = recovery_service.attempt_recovery(test_url)
-        duration = time.time() - start_time
+        result = recovery_service._attempt_sequential_recovery(test_url, None)
 
-        print(f"    Duration: {duration:.2f}s")
-        print(f"    Result: {'✅ Success' if result.success else '❌ Failed'}")
+        self.assertFalse(result.success)
+        self.assertEqual(result.attempted_sources, frozenset({RecoverySource.WAYBACK_MACHINE}))
+        provider.attempt_recovery.assert_called_once_with(test_url)
 
-        # Should complete within reasonable time (allowing for some overhead)
-        self.assertLess(duration, 10, "Recovery should respect timeout settings")
-
-    def test_parallel_vs_sequential_performance(self):
-        """Compare parallel vs sequential recovery performance."""
-        print("\n⚡ Testing parallel vs sequential performance...")
+    def test_parallel_and_sequential_recovery_use_injected_providers(self):
+        """Both orchestration modes report deterministic provider failures."""
+        print("\nTesting injected providers in both recovery modes...")
 
         mock_config = Mock()
         mock_config.get_recovery_config.return_value = {
             'use_wayback_machine': True,
-            'use_pushshift_api': True,
-            'use_reddit_previews': True,
-            'use_reveddit_api': True,
+            'use_arctic_shift': False,
+            'use_pushshift_api': False,
+            'use_reddit_previews': False,
+            'use_reveddit_api': False,
             'timeout_seconds': 10,
             'cache_duration_hours': 24
         }
 
         recovery_service = ContentRecoveryService(config=mock_config)
-        test_url = "https://httpbin.org/status/404"
+        providers = {}
+        for source in (RecoverySource.WAYBACK_MACHINE, RecoverySource.ARCTIC_SHIFT):
+            provider = Mock()
+            provider.attempt_recovery.return_value = RecoveryResult.failure_result(
+                "Archive unavailable", source
+            )
+            providers[source] = provider
+        recovery_service.providers = providers
+        test_url = "https://example.com/missing-image.jpg"
 
-        # Test sequential mode
-        print("  Testing sequential recovery...")
-        start_time = time.time()
-        result_sequential = recovery_service.attempt_recovery(test_url, async_mode=False)
-        sequential_duration = time.time() - start_time
+        result_sequential = recovery_service._attempt_sequential_recovery(test_url, None)
+        result_parallel = recovery_service._attempt_parallel_recovery(test_url, None)
 
-        # Small delay to avoid caching
-        time.sleep(1)
-
-        # Test parallel mode
-        print("  Testing parallel recovery...")
-        start_time = time.time()
-        result_parallel = recovery_service.attempt_recovery(test_url, async_mode=True)
-        parallel_duration = time.time() - start_time
-
-        print(f"    Sequential: {sequential_duration:.2f}s ({'✅' if result_sequential.success else '❌'})")
-        print(f"    Parallel: {parallel_duration:.2f}s ({'✅' if result_parallel.success else '❌'})")
-
-        # Both attempts should have same success/failure result
-        self.assertEqual(result_sequential.success, result_parallel.success)
-
-        # Log performance difference (don't assert since external services vary)
-        if sequential_duration > 0:
-            speedup = sequential_duration / parallel_duration
-            print(f"    Parallel speedup: {speedup:.2f}x")
+        expected_sources = frozenset(providers)
+        self.assertFalse(result_sequential.success)
+        self.assertFalse(result_parallel.success)
+        self.assertEqual(result_sequential.attempted_sources, expected_sources)
+        self.assertEqual(result_parallel.attempted_sources, expected_sources)
+        for provider in providers.values():
+            self.assertEqual(provider.attempt_recovery.call_count, 2)
 
 
 if __name__ == '__main__':
@@ -438,7 +545,7 @@ if __name__ == '__main__':
     # Add test classes
     test_classes = [
         TestRecoveryIntegration,
-        TestRecoveryPerformance,
+        TestRecoveryProviderIsolation,
     ]
 
     for test_class in test_classes:
