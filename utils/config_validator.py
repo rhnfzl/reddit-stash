@@ -154,9 +154,6 @@ class ConfigValidator:
         """Check if required dependencies are available for media features."""
         optional_imports = {
             'PIL': 'pillow',
-            'requests_cache': 'requests-cache',
-            'bs4': 'beautifulsoup4',
-            'html5lib': 'html5lib'
         }
         missing_deps = []
         for module, package in optional_imports.items():
