@@ -1,5 +1,5 @@
 # Use a slim Python base image for smaller size
-# Supports Python 3.11 through 3.13 (default: 3.12)
+# Supports Python 3.10 through 3.13 (default: 3.12)
 ARG PYTHON_VERSION=3.12
 FROM python:${PYTHON_VERSION}-slim
 
