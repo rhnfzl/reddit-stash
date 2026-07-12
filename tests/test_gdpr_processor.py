@@ -99,6 +99,32 @@ class TestGdprExportProcessing(unittest.TestCase):
         reddit.info.assert_called_once_with(fullnames=['t3_post123', 't3_post456'])
         reddit.submission.assert_not_called()
 
+    def test_archive_id_treats_missing_values_as_empty(self):
+        # With pandas removed, empty CSV cells arrive as '' (not NaN); _archive_id
+        # must still normalize missing ids to '' and strip the t1_/t3_ prefixes.
+        from utils.gdpr_processor import _archive_id
+        self.assertEqual(_archive_id(''), '')
+        self.assertEqual(_archive_id(None), '')
+        self.assertEqual(_archive_id('   '), '')
+        self.assertEqual(_archive_id('t3_abc123'), 'abc123')
+        self.assertEqual(_archive_id('t1_def456'), 'def456')
+        self.assertEqual(_archive_id('ghi789'), 'ghi789')
+
+    def test_read_csv_rows_returns_empty_string_for_missing_cells(self):
+        # A row with an empty id must read back as '' rather than raising or
+        # producing a NaN float, so downstream null checks keep working.
+        from utils.gdpr_processor import _archive_id, _read_csv_rows
+        path = self.gdpr_directory / 'saved_posts.csv'
+        with path.open('w', newline='', encoding='utf-8') as export_file:
+            export_file.write('id,permalink\n')
+            export_file.write('post123,/r/test/comments/post123/\n')
+            export_file.write(',\n')
+        rows = _read_csv_rows(str(path))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['id'], 'post123')
+        self.assertEqual(rows[1]['id'], '')
+        self.assertEqual(_archive_id(rows[1]['id']), '')
+
 
 if __name__ == '__main__':
     unittest.main()

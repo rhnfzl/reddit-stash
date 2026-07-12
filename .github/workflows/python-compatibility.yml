@@ -58,7 +58,6 @@ jobs:
           # Test that all core modules can be imported
           python -c "import praw; print(f'PRAW version: {praw.__version__}')"
           python -c "import dropbox; print('Dropbox SDK imported successfully')"
-          python -c "import pandas; print(f'Pandas version: {pandas.__version__}')"
           python -c "import tqdm; print(f'tqdm version: {tqdm.__version__}')"
           python -c "import requests; print(f'Requests version: {requests.__version__}')"
 

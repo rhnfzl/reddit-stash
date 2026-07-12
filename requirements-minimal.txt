@@ -4,7 +4,6 @@
 # Core dependencies - required for basic functionality
 praw>=8.0.0,<9.0.0          # Reddit API wrapper
 dropbox>=12.1.0             # Dropbox API client
-pandas>=3.0.0,<4.0.0        # Data manipulation
 tqdm>=4.68.4                # Progress bars
 requests>=2.34.2            # HTTP library (fallback for curl-cffi)
 
