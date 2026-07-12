@@ -1,7 +1,7 @@
 import os
 import json
+import csv
 import logging
-import pandas as pd
 from tqdm import tqdm
 from utils.file_operations import save_to_file
 from utils.save_utils import save_submission, save_comment_and_context
@@ -24,6 +24,16 @@ def get_gdpr_directory(save_directory):
     if not os.path.exists(gdpr_dir):
         print(f"GDPR data directory not found at: {gdpr_dir}")
     return gdpr_dir
+
+
+def _read_csv_rows(path):
+    """Read a GDPR export CSV into a list of row dicts using the stdlib csv module.
+
+    Uses utf-8-sig so a byte-order mark (which pandas stripped automatically) does not
+    leak into the first column name. Empty cells arrive as '' rather than a NaN float.
+    """
+    with open(path, newline='', encoding='utf-8-sig') as handle:
+        return list(csv.DictReader(handle))
 
 
 def _save_csv_only_post(
@@ -265,7 +275,7 @@ def _yaml_frontmatter(fields):
 
 def _archive_id(item_id):
     """Normalize a Reddit fullname to the base36 ID used in archive responses."""
-    if pd.isna(item_id):
+    if item_id is None or str(item_id).strip() == '':
         return ''
     normalized_id = str(item_id).strip()
     return normalized_id[3:] if normalized_id.startswith(('t1_', 't3_')) else normalized_id
@@ -359,14 +369,15 @@ def process_gdpr_export(
     posts_file = os.path.join(gdpr_dir, 'saved_posts.csv')
     if os.path.exists(posts_file):
         print("\nProcessing saved posts from GDPR export...")
-        df = pd.read_csv(posts_file)
+        rows = _read_csv_rows(posts_file)
+        ids = [row.get('id', '') for row in rows]
         archived_posts = (
-            _fetch_from_archive(df['id'].tolist(), 'posts', archive_client, archive_fallback)
+            _fetch_from_archive(ids, 'posts', archive_client, archive_fallback)
             if csv_only_mode else {}
         )
-        reddit_posts = _fetch_reddit_items(reddit, df['id'].tolist(), 't3') if not csv_only_mode else {}
+        reddit_posts = _fetch_reddit_items(reddit, ids, 't3') if not csv_only_mode else {}
 
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing GDPR Posts"):
+        for row in tqdm(rows, total=len(rows), desc="Processing GDPR Posts"):
             try:
                 if csv_only_mode:
                     count, size = _save_csv_only_post(
@@ -423,14 +434,15 @@ def process_gdpr_export(
     comments_file = os.path.join(gdpr_dir, 'saved_comments.csv')
     if os.path.exists(comments_file):
         print("\nProcessing saved comments from GDPR export...")
-        df = pd.read_csv(comments_file)
+        rows = _read_csv_rows(comments_file)
+        ids = [row.get('id', '') for row in rows]
         archived_comments = (
-            _fetch_from_archive(df['id'].tolist(), 'comments', archive_client, archive_fallback)
+            _fetch_from_archive(ids, 'comments', archive_client, archive_fallback)
             if csv_only_mode else {}
         )
-        reddit_comments = _fetch_reddit_items(reddit, df['id'].tolist(), 't1') if not csv_only_mode else {}
+        reddit_comments = _fetch_reddit_items(reddit, ids, 't1') if not csv_only_mode else {}
 
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing GDPR Comments"):
+        for row in tqdm(rows, total=len(rows), desc="Processing GDPR Comments"):
             try:
                 if csv_only_mode:
                     count, size = _save_csv_only_comment(
