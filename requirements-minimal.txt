@@ -3,7 +3,7 @@
 
 # Core dependencies - required for basic functionality
 praw>=8.0.3,<9.0.0          # Reddit API wrapper
-dropbox>=12.1.0             # Dropbox API client
+dropbox>=12.2.4             # Dropbox API client
 tqdm>=4.70.1                # Progress bars
 requests>=2.34.2            # HTTP library (fallback for curl-cffi)
 
@@ -12,10 +12,10 @@ urllib3>=2.8.0              # HTTP connection pooling
 tenacity>=9.2.1             # Intelligent retry strategies
 
 # File integrity
-blake3>=1.0.10                # Fast cryptographic hashing
+blake3>=1.0.11                # Fast cryptographic hashing
 
 # Basic media processing
-pillow>=12.3.0              # Image processing
+pillow>=13.0.0              # Image processing
 
 # Note: curl-cffi is excluded - the system will fallback to standard requests
 # For enhanced browser impersonation and HTTP/2 support, use requirements.txt instead
