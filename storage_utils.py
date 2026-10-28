@@ -20,6 +20,8 @@ Exit codes: 0 success, 2 failure, 3 skipped (lease held, lost race, or fresh).
 import argparse
 import configparser
 import os
+import shutil
+import signal
 import socket
 import sys
 from datetime import datetime, timedelta, timezone
@@ -182,7 +184,7 @@ def _run_backup() -> bool:
         return False
 
 
-def _sync_cycle(provider, lease, prefix: str, require_stale) -> int:
+def _sync_cycle(provider, lease, prefix: str, local_dir: str, require_stale) -> int:
     """Body of --cycle while holding the lease; returns the exit code."""
     if require_stale is not None:
         last = lease.last_success(lease.body)
@@ -191,7 +193,6 @@ def _sync_cycle(provider, lease, prefix: str, require_stale) -> int:
                   f"{require_stale}h; nothing to do.")
             return EXIT_CYCLE_SKIPPED
 
-    local_dir = _load_local_dir()
     result = provider.download_directory(prefix, local_dir, check_type="LOG")
     if result.failed or result.errors:
         print(f"Download failed: {result.errors[:3]}")
@@ -212,18 +213,44 @@ def _sync_cycle(provider, lease, prefix: str, require_stale) -> int:
     return 0
 
 
-def cmd_cycle(args):
-    """Lease -> download log -> back up -> upload -> release, in one process."""
+class _Terminated(BaseException):
+    """Raised on SIGTERM so cleanup runs; BaseException so `except Exception` cannot swallow it."""
+
+
+def _raise_terminated(signum, frame):
+    raise _Terminated()
+
+
+def _has_files(path: str) -> bool:
+    return any(files for _root, _dirs, files in os.walk(path))
+
+
+def _clear_dir(path: str) -> None:
+    """Empty the save directory this cycle filled (it was empty when the cycle started)."""
+    for name in os.listdir(path):
+        full = os.path.join(path, name)
+        if os.path.isdir(full) and not os.path.islink(full):
+            shutil.rmtree(full)
+        else:
+            os.remove(full)
+
+
+def _cycle(args) -> int:
     if not _coordination_enabled():
         print("--cycle needs STORAGE_COORDINATION=true.")
-        sys.exit(EXIT_CYCLE_FAILED)
+        return EXIT_CYCLE_FAILED
     config = load_storage_config()
     problems = _coordination_problems(config)
+    local_dir = _load_local_dir()
+    if _has_files(local_dir):
+        # Leftover local files may be older than S3 and would be uploaded over newer copies.
+        problems.append(f"the save directory '{local_dir}' must be empty; use a separate "
+                        "folder (e.g. storage_utils.py --download) for a local copy")
     if problems:
         print("Coordinated run refused:")
         for problem in problems:
             print(f"  - {problem}")
-        sys.exit(EXIT_CYCLE_FAILED)
+        return EXIT_CYCLE_FAILED
 
     provider = get_storage_provider(config)
     provider.connect()
@@ -232,15 +259,37 @@ def cmd_cycle(args):
     lease = provider.lease(prefix, args.runner or _default_runner())
 
     if not lease.acquire():
-        sys.exit(EXIT_CYCLE_SKIPPED)
+        return EXIT_CYCLE_SKIPPED
     code = EXIT_CYCLE_FAILED
     try:
-        code = _sync_cycle(provider, lease, prefix, args.require_stale)
+        code = _sync_cycle(provider, lease, prefix, local_dir, args.require_stale)
     finally:
-        # Release even on errors; only a successful run refreshes last_success.
-        lease.release(success=code == 0)
+        # Release even on errors or SIGTERM; only a successful run refreshes last_success.
+        try:
+            released = lease.release(success=code == 0)
+        except Exception as exc:
+            print(f"Lease release failed: {type(exc).__name__}: {exc}")
+            released = False
+        if code == 0 and not released:
+            print("The lease was not released cleanly, so this run is not reported as successful.")
+            code = EXIT_CYCLE_FAILED
         if code != EXIT_CYCLE_SKIPPED:
             _ping_healthcheck(code == 0)
+        _clear_dir(local_dir)
+    return code
+
+
+def cmd_cycle(args):
+    """Lease -> download log -> back up -> upload -> release, in one process."""
+    signal.signal(signal.SIGTERM, _raise_terminated)
+    try:
+        code = _cycle(args)
+    except _Terminated:
+        print("Terminated (SIGTERM); lease released.")
+        code = EXIT_CYCLE_FAILED
+    except Exception as exc:
+        print(f"Coordinated run failed: {type(exc).__name__}: {exc}")
+        code = EXIT_CYCLE_FAILED
     sys.exit(code)
 
 

@@ -525,22 +525,32 @@ class S3StorageProvider:
         condition = {"IfMatch": self._log_etag} if self._log_etag else {"IfNoneMatch": "*"}
         with open(local_path, "rb") as f:
             data = f.read()
+        key = remote_key.lstrip("/")
         try:
             resp = self._s3.put_object(
-                Bucket=self._bucket, Key=remote_key.lstrip("/"), Body=data,
+                Bucket=self._bucket, Key=key, Body=data,
                 ServerSideEncryption="AES256", StorageClass="STANDARD",
                 Metadata={BLAKE3_META_KEY: compute_file_hash(local_path)},
                 **condition,
             )
-        except self._s3.exceptions.ClientError as exc:
-            if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") in (404, 409, 412):
+            self._log_etag = resp["ETag"]
+        except Exception as exc:
+            # botocore retries: a 412 or timeout can follow our own write landing.
+            try:
+                current = self._s3.get_object(Bucket=self._bucket, Key=key)
+                landed = current["Body"].read() == data
+            except Exception:
+                landed = False
+            if landed:
+                self._log_etag = current["ETag"]
+            elif getattr(exc, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode") in (404, 409, 412):
                 raise RuntimeError(
                     "file_log.json changed in S3 since this run downloaded it; "
                     "not overwriting another runner's log"
                 ) from exc
-            raise
-        self._log_etag = resp["ETag"]
-        return StorageFileInfo(remote_path=remote_key.lstrip("/"), size_bytes=len(data))
+            else:
+                raise
+        return StorageFileInfo(remote_path=key, size_bytes=len(data))
 
     def _download_log_only(self, remote_directory: str, local_directory: str,
                            start: float) -> SyncResult:

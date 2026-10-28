@@ -166,10 +166,11 @@ class S3Lease:
             self._body = body
             return True
         except Exception as exc:
+            # A conflict, a timeout or a 5xx can all hide our own write having landed.
+            if self._resolve_conflict():
+                return True
             if _status(exc) not in _CONFLICT_STATUSES:
                 raise
-        if self._resolve_conflict():
-            return True
         print("Another runner acquired the lease first; skipping.")
         return False
 
@@ -196,11 +197,11 @@ class S3Lease:
             self._body = body
             return True
         except Exception as exc:
+            current, etag = self.read()
+            if current and current.get("lease_id") == self.lease_id and current.get("state") == "idle":
+                self._body, self._etag = current, etag  # our release landed; the response was lost
+                return True
             if _status(exc) not in _CONFLICT_STATUSES:
                 raise
-        current, etag = self.read()
-        if current and current.get("lease_id") == self.lease_id and current.get("state") == "idle":
-            self._body, self._etag = current, etag  # our release landed; the response was lost
-            return True
         print("WARNING: lease was taken over before release; leaving the new holder's lease untouched.")
         return False

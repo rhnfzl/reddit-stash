@@ -1,9 +1,16 @@
 #!/bin/bash
 set -e
 
-# Function to handle shutdown signals gracefully
+CHILD_PID=""
+
+# Function to handle shutdown signals gracefully. A running Python child gets the
+# signal too and is waited for, so storage_utils.py --cycle can release its S3 lease.
 cleanup() {
     echo "$(date): Received shutdown signal. Exiting gracefully..."
+    if [ -n "$CHILD_PID" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
+        kill -TERM "$CHILD_PID" 2>/dev/null || true
+        wait "$CHILD_PID" 2>/dev/null || true
+    fi
     exit 0
 }
 
@@ -23,6 +30,22 @@ fi
 # Get the Python script to run (default: reddit_stash.py)
 PYTHON_SCRIPT=${1:-"reddit_stash.py"}
 SCRIPT_ARGS="${@:2}"  # All arguments after the first one
+
+# Run the script as a child (bash only runs traps between commands, so a foreground
+# child would never be told to stop). Exit code 3 from --cycle means "skipped:
+# another runner holds the lease or the last run is recent", which is not a failure.
+run_python() {
+    python "$PYTHON_SCRIPT" $SCRIPT_ARGS &
+    CHILD_PID=$!
+    local status=0
+    wait "$CHILD_PID" || status=$?
+    CHILD_PID=""
+    if [ "$status" -eq 3 ] && [[ " $SCRIPT_ARGS " == *" --cycle "* ]]; then
+        echo "$(date): Skipped (another runner is active or the last run is recent)"
+        status=0
+    fi
+    return "$status"
+}
 
 # Validate schedule interval (must be positive integer)
 if ! [[ "$SCHEDULE_INTERVAL" =~ ^[0-9]+$ ]] || [ "$SCHEDULE_INTERVAL" -lt 60 ]; then
@@ -50,7 +73,7 @@ if [ "$SCHEDULE_MODE" = "periodic" ]; then
 
     # Run the first execution immediately
     echo "$(date): Running initial execution..."
-    if python "$PYTHON_SCRIPT" $SCRIPT_ARGS; then
+    if run_python; then
         echo "$(date): Initial execution completed successfully"
     else
         echo "$(date): Initial execution failed, but continuing with schedule..."
@@ -74,7 +97,7 @@ if [ "$SCHEDULE_MODE" = "periodic" ]; then
         done
 
         echo "$(date): Running scheduled execution..."
-        if python "$PYTHON_SCRIPT" $SCRIPT_ARGS; then
+        if run_python; then
             echo "$(date): Scheduled execution completed successfully"
         else
             echo "$(date): Scheduled execution failed, continuing with next cycle..."
@@ -82,6 +105,6 @@ if [ "$SCHEDULE_MODE" = "periodic" ]; then
     done
 else
     echo "$(date): Running Reddit Stash once..."
-    python "$PYTHON_SCRIPT" $SCRIPT_ARGS
+    run_python
     echo "$(date): Single execution completed"
 fi
