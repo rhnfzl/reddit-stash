@@ -165,7 +165,8 @@ def _ping_healthcheck(success: bool) -> None:
         import requests
         requests.get(url if success else f"{url.rstrip('/')}/fail", timeout=10)
     except Exception as exc:
-        print(f"Healthcheck ping failed: {exc}")
+        # Only the type: the message would contain the ping URL, which is a secret.
+        print(f"Healthcheck ping failed: {type(exc).__name__}")
 
 
 def _run_backup() -> bool:
