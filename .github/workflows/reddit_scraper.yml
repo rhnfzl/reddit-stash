@@ -34,7 +34,7 @@ jobs:
       
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       timeout-minutes: 1
 
     - name: TruffleHog OSS
@@ -71,7 +71,7 @@ jobs:
 
     # Set up Python with built-in caching
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v7
       with:
         python-version: '3.12'
         cache: 'pip'

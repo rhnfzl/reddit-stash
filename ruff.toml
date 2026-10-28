@@ -1,0 +1,4 @@
+# Explicit rule set: ruff 0.17 widened its defaults, which turned CI red without
+# any code change. These are the rules this project has always been linted with.
+[lint]
+select = ["E4", "E7", "E9", "F"]
