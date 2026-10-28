@@ -93,7 +93,7 @@ def clean_items(reddit_dir="reddit", file_log_path="reddit/file_log.json",
                     should_remove = True
                 elif saved and any(pattern in key for pattern in ['SAVED_POST', 'SAVED_COMMENT']):
                     should_remove = True
-                elif comments and key.endswith('-Submission-COMMENT'):  # User comments
+                elif comments and key.endswith(('-Comment-COMMENT', '-Submission-COMMENT')):  # User comments
                     should_remove = True
                 elif submissions and key.endswith('-Submission-POST'):  # User submissions
                     should_remove = True

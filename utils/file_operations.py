@@ -57,33 +57,25 @@ def get_existing_files_from_log(file_log):
     existing_files = get_existing_keys(file_log)
     return existing_files
 
+_DIR_CATEGORIES = ("UPVOTE_COMMENT", "SAVED_COMMENT", "UPVOTE_POST", "SAVED_POST", "COMMENT", "POST")
+
 def get_existing_files_from_dir(save_directory):
-    """Build a set of all existing files in the save directory using os.walk."""
+    """Build the set of saved keys from the files on disk.
+
+    Keys use the same "{id}-{subreddit}-{type}-{category}" format as save_to_file(),
+    otherwise every DIR run re-saves (and on failure deletes) existing backups.
+    """
     existing_files = set()
     for root, dirs, files in os.walk(save_directory):
+        subreddit_name = os.path.basename(root)
         for file in files:
-            # Extract the unique key format (id-subreddit-content_type) from the file path
             filename = os.path.splitext(file)[0]
-            subreddit_name = os.path.basename(root)
-            content_type = None
-            
-            if filename.startswith("POST_"):
-                file_id = filename.split("POST_")[1]
-                content_type = "Submission"
-            elif filename.startswith("COMMENT_"):
-                file_id = filename.split("COMMENT_")[1]
-                content_type = "Comment"
-            elif filename.startswith("SAVED_POST_"):
-                file_id = filename.split("SAVED_POST_")[1]
-                content_type = "Submission"
-            elif filename.startswith("SAVED_COMMENT_"):
-                file_id = filename.split("SAVED_COMMENT_")[1]
-                content_type = "Comment"
-            else:
-                continue
-            
-            unique_key = f"{file_id}-{subreddit_name}-{content_type}"
-            existing_files.add(unique_key)
+            for category in _DIR_CATEGORIES:
+                if filename.startswith(f"{category}_"):
+                    file_id = filename[len(category) + 1:]
+                    content_type = "Comment" if category.endswith("COMMENT") else "Submission"
+                    existing_files.add(f"{file_id}-{subreddit_name}-{content_type}-{category}")
+                    break
     return existing_files
 
 def save_to_file(content, file_path, save_function, existing_files, file_log, save_directory, created_dirs_cache, category="POST", unsave=False, ignore_tls_errors=None):
@@ -132,6 +124,7 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
             created_dirs_cache.add(sub_dir)
 
     # Proceed with saving the file
+    previous_entry = file_log.get(unique_key)
     try:
         # Reset media size tracker before saving
         _reset_media_tracker()
@@ -174,7 +167,7 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
             pass
         # Replaces any entry log_file() inserted before a failed checkpoint, so the
         # item is retried next run (up to MAX_ITEM_FAILURES) instead of looking saved.
-        record_failure(file_log, unique_key, e)
+        record_failure(file_log, unique_key, e, previous_entry)
         return None, 0  # Indicate that the file could not be saved, no media size
 
 def handle_dynamic_sleep(item):

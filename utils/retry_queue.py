@@ -300,6 +300,20 @@ class SQLiteRetryQueue:
             except sqlite3.Error as e:
                 self._logger.error(f"Failed to add item to retry queue: {e}")
 
+    def reset_stale_in_progress(self) -> int:
+        """Return rows stuck in_progress to pending so they are retried again."""
+        with self._lock:
+            try:
+                with self.sqlite_manager.get_connection() as conn:
+                    cursor = conn.execute(
+                        "UPDATE retry_queue SET status = 'pending' WHERE status = 'in_progress'"
+                    )
+                    conn.commit()
+                    return cursor.rowcount
+            except sqlite3.Error as e:
+                self._logger.error(f"Failed to reset stale retries: {e}")
+                return 0
+
     def get_pending_retries(self, service_name: Optional[str] = None,
                           limit: int = 50) -> List[Dict[str, Any]]:
         """Get pending retry items, optionally filtered by service."""

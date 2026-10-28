@@ -40,15 +40,23 @@ def get_existing_keys(log_data):
 
 def get_given_up_keys(log_data):
     """Failure entries that reached MAX_ITEM_FAILURES and are no longer retried."""
-    return [key for key, entry in log_data.items()
-            if isinstance(entry, dict) and entry.get('status') == 'failed'
-            and not is_retryable_failure(entry)]
+    return [key for key, entry in log_data.items() if is_given_up(entry)]
 
-def record_failure(log_data, unique_key, error):
+def is_given_up(entry):
+    """True for a failure entry that used up all MAX_ITEM_FAILURES attempts."""
+    return (isinstance(entry, dict) and entry.get('status') == 'failed'
+            and entry.get('attempts', 0) >= MAX_ITEM_FAILURES)
+
+def record_failure(log_data, unique_key, error, previous=None):
     """Count a failed save. Failure entries carry no 'type'/'file_path', so readers
-    that select saved items by type (clean_items, reddit-stash-insights) skip them."""
+    that select saved items by type (clean_items, reddit-stash-insights) skip them.
+
+    previous: the entry as it was before the save started; log_file() may already
+    have replaced it when a checkpoint fails, which would reset the attempt count.
+    """
     with _log_lock:
-        previous = log_data.get(unique_key)
+        if previous is None:
+            previous = log_data.get(unique_key)
         attempts = previous.get('attempts', 0) if isinstance(previous, dict) and previous.get('status') == 'failed' else 0
         log_data[unique_key] = {
             'status': 'failed',

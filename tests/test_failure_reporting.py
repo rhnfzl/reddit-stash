@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from utils.constants import MAX_ITEM_FAILURES
-from utils.file_operations import save_to_file, _process_submissions_batch
+from utils.file_operations import save_to_file, _process_submissions_batch, get_existing_files_from_dir
 from utils.log_utils import get_existing_keys, get_given_up_keys, is_file_logged
 from utils.media_download_manager import _relink_markdown
 from utils.storage.base import SyncResult
@@ -75,6 +75,37 @@ class TestSaveToFileFailures(unittest.TestCase):
         self.assertIn(KEY, get_existing_keys(file_log))
         self.assertTrue(is_file_logged(file_log, KEY))
         self.assertEqual(get_given_up_keys(file_log), [KEY])
+
+    def test_checkpoint_failure_after_log_write_keeps_attempt_count(self):
+        file_log = {KEY: {"status": "failed", "attempts": 3, "last_error": "x"}}
+
+        def log_then_fail(log, key, info, save_directory):
+            log[key] = info  # log_file replaced the failure entry, then the checkpoint failed
+            raise OSError("disk full")
+
+        with patch("utils.file_operations.log_file", side_effect=log_then_fail):
+            self._save(lambda content, f, **kw: f.write("ok"), file_log)
+
+        self.assertEqual(file_log[KEY]["attempts"], 4)
+
+    def test_dir_scan_keys_match_save_keys_so_saved_files_are_skipped(self):
+        os.makedirs(os.path.dirname(self.file_path))
+        with open(self.file_path, "w") as f:
+            f.write("existing backup")
+        existing = get_existing_files_from_dir(self.save_dir)
+
+        def boom(content, f, **kwargs):
+            raise RuntimeError("must not be called")
+
+        class Submission:  # key uses the class name, like praw's Submission
+            id = "abc"
+            subreddit = Mock(display_name="python")
+
+        status, _ = save_to_file(Submission(), self.file_path, boom, existing, {}, self.save_dir, set())
+
+        self.assertIs(status, True)
+        with open(self.file_path) as f:
+            self.assertEqual(f.read(), "existing backup")
 
     def test_success_after_failure_replaces_the_failure_entry(self):
         file_log = {KEY: {"status": "failed", "attempts": 2, "last_error": "x"}}
@@ -178,6 +209,15 @@ class TestRelinkMarkdown(unittest.TestCase):
 
             self.assertEqual(self._read(own), f"![Gallery Image 2]({local})\n")
 
+    def test_blockquoted_comment_image_is_relinked(self):
+        with tempfile.TemporaryDirectory() as d:
+            own = self._write(d, "SAVED_COMMENT_abc.md", f"> ![Image]({self.URL})\n")
+            local = os.path.join(d, "abc.jpg")
+
+            _relink_markdown(self.URL, local)
+
+            self.assertEqual(self._read(own), f"> ![Image]({local})\n")
+
     def test_failed_write_keeps_the_original_post(self):
         with tempfile.TemporaryDirectory() as d:
             own = self._write(d, "POST_abc.md", f"![Image]({self.URL})\n")
@@ -208,6 +248,20 @@ class TestRetryCountDoesNotReset(unittest.TestCase):
             with queue.sqlite_manager.get_connection() as conn:
                 count = conn.execute("SELECT retry_count FROM retry_queue WHERE url = ?", (url,)).fetchone()
             self.assertEqual(count[0], 1)
+
+    def test_rows_stuck_in_progress_become_pending_again(self):
+        from utils.retry_queue import SQLiteRetryQueue
+
+        with tempfile.TemporaryDirectory() as d:
+            queue = SQLiteRetryQueue(os.path.join(d, "q.db"))
+            url = "https://i.imgur.com/y.jpg"
+            queue.add_failed_download(url, "timeout", "imgur")
+            with queue.sqlite_manager.get_connection() as conn:
+                conn.execute("UPDATE retry_queue SET status = 'in_progress', next_retry_at = 0")
+                conn.commit()
+
+            self.assertEqual(queue.reset_stale_in_progress(), 1)
+            self.assertEqual([r["url"] for r in queue.get_pending_retries()], [url])
 
 
 class TestConfigFailureExit(unittest.TestCase):

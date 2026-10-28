@@ -191,6 +191,25 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
         self.assertNotIn('Content was not fetched from Reddit.', content)
         self.assertTrue(file_log['GDPR_COMMENT_comment456']['archive_enriched'])
 
+    def test_given_up_post_is_not_retried_even_when_archive_text_arrives(self):
+        self._write_export('saved_posts.csv', [
+            {'id': 'post123', 'permalink': '/r/python/comments/post123/example/'},
+        ])
+        file_log = {'GDPR_POST_post123': {'status': 'failed', 'attempts': 5, 'last_error': 'x'}}
+
+        processed, skipped, _, failed = process_gdpr_export(
+            None,
+            self.save_directory,
+            set(),
+            set(),
+            file_log,
+            archive_client=_ArchiveClient(posts={'post123': {'selftext': 'Recovered body'}}),
+        )
+
+        self.assertEqual((processed, skipped, failed), (0, 1, 0))
+        self.assertEqual(file_log['GDPR_POST_post123']['attempts'], 5)
+        self.assertEqual(list(Path(self.save_directory).glob('r_python/GDPR_POST_post123.md')), [])
+
     def test_metadata_only_archive_record_keeps_a_post_upgradeable(self):
         self._write_export('saved_posts.csv', [
             {'id': 'post123', 'permalink': '/r/python/comments/post123/example/'},

@@ -495,6 +495,10 @@ class MediaDownloadManager:
         stats = {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
 
         try:
+            # Only this pass marks rows in_progress; any left over are from an earlier
+            # run that crashed or returned a cached file without completing the row.
+            self._retry_queue.reset_stale_in_progress()
+
             # Get pending retries from the retry queue
             pending_retries = self._retry_queue.get_pending_retries(limit=max_retries)
 
@@ -585,7 +589,7 @@ def _relink_markdown(url: str, local_path: str) -> None:
                 lines = f.readlines()
             changed = False
             for i, line in enumerate(lines):
-                if remote_link in line and line.startswith(("![", "**Video:** [")):
+                if remote_link in line and line.lstrip("> ").startswith(("![", "**Video:** [")):
                     lines[i] = line.replace(remote_link, f"]({local_path})")
                     changed = True
             if changed:

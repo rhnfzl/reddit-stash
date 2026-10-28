@@ -8,7 +8,7 @@ from utils.save_utils import save_submission, save_comment_and_context
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
 from utils.path_security import create_reddit_file_path
-from utils.log_utils import log_file, is_file_logged, record_failure
+from utils.log_utils import log_file, is_file_logged, is_given_up, record_failure
 from utils.content_recovery.arctic_shift import ArcticShiftClient
 from utils.content_recovery.providers.pullpush_provider import PullPushProvider
 
@@ -59,6 +59,8 @@ def _save_csv_only_post(
     file_path = path_result.safe_path
     already_saved = unique_key in existing_files or is_file_logged(file_log, unique_key)
     archive_enriched = _has_archive_text(archived_data, ('title', 'selftext'))
+    if is_given_up(file_log.get(unique_key)):
+        return 0, 0  # failed MAX_ITEM_FAILURES times; no longer retried
     if already_saved and not (archive_enriched and _is_link_only_csv_export(file_path)):
         return 0, 0  # skipped
 
@@ -109,6 +111,8 @@ def _save_csv_only_comment(
     file_path = path_result.safe_path
     already_saved = unique_key in existing_files or is_file_logged(file_log, unique_key)
     archive_enriched = _has_archive_text(archived_data, ('body',))
+    if is_given_up(file_log.get(unique_key)):
+        return 0, 0  # failed MAX_ITEM_FAILURES times; no longer retried
     if already_saved and not (archive_enriched and _is_link_only_csv_export(file_path)):
         return 0, 0  # skipped
 
@@ -160,6 +164,7 @@ def _write_csv_only_export(
     save_directory,
 ):
     """Write a new or archive-enriched CSV-only export and update its log entry."""
+    previous_entry = file_log.get(unique_key)
 
     try:
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -176,7 +181,7 @@ def _write_csv_only_export(
                  save_directory)
     except Exception as e:
         # Never leave a key from a failed write looking saved; retry next run.
-        record_failure(file_log, unique_key, e)
+        record_failure(file_log, unique_key, e, previous_entry)
         raise
     existing_files.add(unique_key)
     return 1, file_size
