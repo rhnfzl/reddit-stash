@@ -14,6 +14,12 @@ trap cleanup SIGTERM SIGINT
 SCHEDULE_MODE=${SCHEDULE_MODE:-"once"}
 SCHEDULE_INTERVAL=${SCHEDULE_INTERVAL:-7200}  # Default: 2 hours (7200 seconds)
 
+# Accept both "storage_utils.py --upload" and "python storage_utils.py --upload";
+# this script already runs python, so a leading "python" would become "python python".
+if [[ "$1" == "python" || "$1" == "python3" ]]; then
+    shift
+fi
+
 # Get the Python script to run (default: reddit_stash.py)
 PYTHON_SCRIPT=${1:-"reddit_stash.py"}
 SCRIPT_ARGS="${@:2}"  # All arguments after the first one

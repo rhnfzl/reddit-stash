@@ -1,0 +1,14 @@
+# Keep credentials, local backup data and repo metadata out of image layers
+.env
+.env.*
+.git
+.github
+reddit/
+*.db
+*.db-*
+*.png
+.agent-harness/
+.codex/
+.entire/
+.venv/
+__pycache__/

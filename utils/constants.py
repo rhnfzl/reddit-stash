@@ -105,6 +105,7 @@ URL_VALIDATION_TIMEOUT = 5.0  # Timeout for URL validation checks
 # Processing Pipeline
 DYNAMIC_SLEEP_BASE_SECONDS = 0.005  # Courtesy delay between items (PRAW handles API rate limiting)
 DYNAMIC_SLEEP_MAX_SECONDS = 0.5  # Cap on adaptive sleep time
+MAX_ITEM_FAILURES = 5  # Stop retrying a post/comment after this many failed runs
 FILE_LOG_CHECKPOINT_INTERVAL = 200  # Save file_log.json every N items (trade-off: crash loss vs I/O)
 
 # Trusted Media Domains (skip URL validation for these)

@@ -1,19 +1,19 @@
-# Core Reddit Stash dependencies (Updated Jul 2026)
-praw>=8.0.0,<9.0.0          # Reddit API wrapper
-dropbox>=12.1.0             # Dropbox API client
-tqdm>=4.68.4                # Progress bars
+# Core Reddit Stash dependencies (Updated Oct 2026)
+praw>=8.0.3,<9.0.0          # Reddit API wrapper
+dropbox>=12.2.4             # Dropbox API client
+tqdm>=4.70.1                # Progress bars
 requests>=2.34.2            # HTTP library
 
 # Media download dependencies
-urllib3>=2.7.0              # HTTP connection pooling
-curl-cffi>=0.13.0            # HTTP/2 + browser TLS fingerprinting
-tenacity>=9.1.4             # Intelligent retry strategies
+urllib3>=2.8.0              # HTTP connection pooling
+curl-cffi>=0.17.0            # HTTP/2 + browser TLS fingerprinting
+tenacity>=9.2.1             # Intelligent retry strategies
 
 # File integrity
-blake3>=1.0.9                # Fast cryptographic hashing for file integrity
+blake3>=1.0.11                # Fast cryptographic hashing for file integrity
 
 # Optional media processing dependencies
-pillow>=11.3.0              # Image processing
+pillow>=13.0.0              # Image processing
 
 # Note: All other dependencies (threading, sqlite3, json, logging, etc.)
 # are part of Python standard library and don't need to be listed here

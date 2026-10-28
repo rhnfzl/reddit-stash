@@ -8,7 +8,7 @@ from utils.save_utils import save_submission, save_comment_and_context
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
 from utils.path_security import create_reddit_file_path
-from utils.log_utils import log_file, is_file_logged
+from utils.log_utils import log_file, is_file_logged, is_given_up, record_failure
 from utils.content_recovery.arctic_shift import ArcticShiftClient
 from utils.content_recovery.providers.pullpush_provider import PullPushProvider
 
@@ -53,12 +53,14 @@ def _save_csv_only_post(
     subreddit = _extract_subreddit_from_permalink(permalink)
     path_result = create_reddit_file_path(save_directory, subreddit, "GDPR_POST", post_id)
     if not path_result.is_safe:
-        logger.error(f"Unsafe path for GDPR post {post_id}: {path_result.issues}")
-        return 0, 0
+        # Raise so the caller counts it as failed; (0, 0) means "already saved".
+        raise ValueError(f"Unsafe path for GDPR post {post_id}: {path_result.issues}")
 
     file_path = path_result.safe_path
     already_saved = unique_key in existing_files or is_file_logged(file_log, unique_key)
     archive_enriched = _has_archive_text(archived_data, ('title', 'selftext'))
+    if is_given_up(file_log.get(unique_key)):
+        return 0, 0  # failed MAX_ITEM_FAILURES times; no longer retried
     if already_saved and not (archive_enriched and _is_link_only_csv_export(file_path)):
         return 0, 0  # skipped
 
@@ -103,12 +105,14 @@ def _save_csv_only_comment(
     subreddit = _extract_subreddit_from_permalink(permalink)
     path_result = create_reddit_file_path(save_directory, subreddit, "GDPR_COMMENT", comment_id)
     if not path_result.is_safe:
-        logger.error(f"Unsafe path for GDPR comment {comment_id}: {path_result.issues}")
-        return 0, 0
+        # Raise so the caller counts it as failed; (0, 0) means "already saved".
+        raise ValueError(f"Unsafe path for GDPR comment {comment_id}: {path_result.issues}")
 
     file_path = path_result.safe_path
     already_saved = unique_key in existing_files or is_file_logged(file_log, unique_key)
     archive_enriched = _has_archive_text(archived_data, ('body',))
+    if is_given_up(file_log.get(unique_key)):
+        return 0, 0  # failed MAX_ITEM_FAILURES times; no longer retried
     if already_saved and not (archive_enriched and _is_link_only_csv_export(file_path)):
         return 0, 0  # skipped
 
@@ -160,19 +164,25 @@ def _write_csv_only_export(
     save_directory,
 ):
     """Write a new or archive-enriched CSV-only export and update its log entry."""
+    previous_entry = file_log.get(unique_key)
 
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(content)
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content)
 
-    file_size = os.path.getsize(file_path)
-    log_file(file_log, unique_key,
-             {
-                 'file_path': file_path,
-                 'type': content_type,
-                 'id': item_id,
-                 'archive_enriched': archive_enriched,
-             },
-             save_directory)
+        file_size = os.path.getsize(file_path)
+        log_file(file_log, unique_key,
+                 {
+                     'file_path': file_path,
+                     'type': content_type,
+                     'id': item_id,
+                     'archive_enriched': archive_enriched,
+                 },
+                 save_directory)
+    except Exception as e:
+        # Never leave a key from a failed write looking saved; retry next run.
+        record_failure(file_log, unique_key, e, previous_entry)
+        raise
     existing_files.add(unique_key)
     return 1, file_size
 
@@ -350,6 +360,7 @@ def process_gdpr_export(
     """
     processed_count = 0
     skipped_count = 0
+    failed_count = 0
     total_size = 0
 
     csv_only_mode = reddit is None
@@ -402,7 +413,7 @@ def process_gdpr_export(
                     )
                     if not path_result.is_safe:
                         logger.error(f"Unsafe path for GDPR submission {submission.id}: {path_result.issues}")
-                        skipped_count += 1
+                        failed_count += 1
                         continue
 
                     file_path = path_result.safe_path
@@ -418,6 +429,9 @@ def process_gdpr_export(
                         created_dirs_cache,
                         ignore_tls_errors=ignore_tls_errors,
                     )
+                    if already_saved is None:
+                        failed_count += 1
+                        continue
                     if already_saved:
                         skipped_count += 1
                         continue
@@ -428,7 +442,7 @@ def process_gdpr_export(
 
             except Exception as e:
                 print(f"Error processing GDPR post {row['id']}: {e}")
-                skipped_count += 1
+                failed_count += 1
 
     # Process saved comments
     comments_file = os.path.join(gdpr_dir, 'saved_comments.csv')
@@ -467,7 +481,7 @@ def process_gdpr_export(
                     )
                     if not path_result.is_safe:
                         logger.error(f"Unsafe path for GDPR comment {comment.id}: {path_result.issues}")
-                        skipped_count += 1
+                        failed_count += 1
                         continue
 
                     file_path = path_result.safe_path
@@ -483,6 +497,9 @@ def process_gdpr_export(
                         created_dirs_cache,
                         ignore_tls_errors=ignore_tls_errors,
                     )
+                    if already_saved is None:
+                        failed_count += 1
+                        continue
                     if already_saved:
                         skipped_count += 1
                         continue
@@ -493,6 +510,6 @@ def process_gdpr_export(
 
             except Exception as e:
                 print(f"Error processing GDPR comment {row['id']}: {e}")
-                skipped_count += 1
+                failed_count += 1
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, failed_count

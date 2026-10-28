@@ -1,5 +1,5 @@
 # Use a slim Python base image for smaller size
-# Supports Python 3.10 through 3.13 (default: 3.12)
+# Supports Python 3.11 through 3.14 (default: 3.12)
 ARG PYTHON_VERSION=3.12
 FROM python:${PYTHON_VERSION}-slim
 
@@ -37,12 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy only the requirements first to leverage Docker cache
-COPY requirements.txt .
+COPY requirements.txt requirements-s3.txt ./
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-# Uncomment to enable S3 storage backend:
-# RUN pip install --no-cache-dir -r requirements-s3.txt
+# Install dependencies (boto3 included so provider=s3 works in the published image)
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-s3.txt
 
 # Copy the application code
 COPY . .

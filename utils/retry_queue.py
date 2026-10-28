@@ -266,6 +266,15 @@ class SQLiteRetryQueue:
         with self._lock:
             try:
                 with self.sqlite_manager.get_connection() as conn:
+                    # A failing retry is already in the queue as in_progress; replacing it
+                    # would reset retry_count to 0 so the item never reaches max_retries.
+                    # process_pending_retries() records that failure via mark_retry_completed.
+                    if conn.execute(
+                        "SELECT 1 FROM retry_queue WHERE url = ? AND service_name = ? AND status = 'in_progress'",
+                        (url, service_name),
+                    ).fetchone():
+                        return
+
                     # Use INSERT OR REPLACE to handle duplicates
                     conn.execute("""
                         INSERT OR REPLACE INTO retry_queue
@@ -290,6 +299,20 @@ class SQLiteRetryQueue:
 
             except sqlite3.Error as e:
                 self._logger.error(f"Failed to add item to retry queue: {e}")
+
+    def reset_stale_in_progress(self) -> int:
+        """Return rows stuck in_progress to pending so they are retried again."""
+        with self._lock:
+            try:
+                with self.sqlite_manager.get_connection() as conn:
+                    cursor = conn.execute(
+                        "UPDATE retry_queue SET status = 'pending' WHERE status = 'in_progress'"
+                    )
+                    conn.commit()
+                    return cursor.rowcount
+            except sqlite3.Error as e:
+                self._logger.error(f"Failed to reset stale retries: {e}")
+                return 0
 
     def get_pending_retries(self, service_name: Optional[str] = None,
                           limit: int = 50) -> List[Dict[str, Any]]:

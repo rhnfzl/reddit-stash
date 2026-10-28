@@ -68,6 +68,16 @@ def _get_remote_directory(provider_name: str) -> str:
     return config.dropbox_directory.lstrip("/")
 
 
+def _exit_on_failure(result, max_shown: int = 5) -> None:
+    """Print transfer errors and exit non-zero so callers never treat a failed sync as done."""
+    if result.errors:
+        print(f"\n{len(result.errors)} error(s) occurred:")
+        for err in result.errors[:max_shown]:
+            print(f"  - {err}")
+    if result.failed or result.errors:
+        sys.exit(1)
+
+
 def cmd_download(args):
     """Download files from the configured storage provider."""
     config = load_storage_config()
@@ -92,11 +102,7 @@ def cmd_download(args):
         print(f"Downloading directory from {provider.get_provider_name()}...")
 
     result = provider.download_directory(remote_dir, local_dir, check_type=check_type)
-
-    if result.errors:
-        print(f"\n{len(result.errors)} error(s) occurred:")
-        for err in result.errors[:5]:
-            print(f"  - {err}")
+    _exit_on_failure(result)
 
 
 def cmd_upload(args):
@@ -118,11 +124,7 @@ def cmd_upload(args):
 
     print(f"Uploading to {provider.get_provider_name()}...")
     result = provider.upload_directory(local_dir, remote_dir)
-
-    if result.errors:
-        print(f"\n{len(result.errors)} error(s) occurred:")
-        for err in result.errors[:5]:
-            print(f"  - {err}")
+    _exit_on_failure(result)
 
 
 def cmd_migrate(args):
@@ -154,10 +156,7 @@ def cmd_migrate(args):
     if args.execute:
         print("\nExecuting migration...")
         result = migration.execute()
-        if result.errors:
-            print(f"\n{len(result.errors)} error(s):")
-            for err in result.errors[:10]:
-                print(f"  - {err}")
+        _exit_on_failure(result, max_shown=10)
     else:
         plan = migration.dry_run()
         if plan.file_count > 0:

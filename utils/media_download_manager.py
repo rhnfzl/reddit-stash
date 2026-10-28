@@ -495,6 +495,10 @@ class MediaDownloadManager:
         stats = {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
 
         try:
+            # Only this pass marks rows in_progress; any left over are from an earlier
+            # run that crashed or returned a cached file without completing the row.
+            self._retry_queue.reset_stale_in_progress()
+
             # Get pending retries from the retry queue
             pending_retries = self._retry_queue.get_pending_retries(limit=max_retries)
 
@@ -542,11 +546,12 @@ class MediaDownloadManager:
                     if result_path:
                         self._logger.info(f"Successfully retried download: {url}")
                         stats["successful"] += 1
+                        _relink_markdown(url, result_path)
                         # Mark as completed (success=True) - this is handled in download_media
                     else:
                         self._logger.warning(f"Retry failed for {url}")
                         stats["failed"] += 1
-                        # Mark as failed (success=False) - this is handled in download_media
+                        self._retry_queue.mark_retry_completed(url, success=False)
 
                 except Exception as e:
                     self._logger.error(f"Exception during retry of {url}: {e}")
@@ -559,6 +564,46 @@ class MediaDownloadManager:
             self._logger.error(f"Error processing pending retries: {e}")
 
         return stats
+
+
+def _relink_markdown(url: str, local_path: str) -> None:
+    """Point the owning post's media line at the now-downloaded file.
+
+    Only the markdown named after the media's item id is touched (media file
+    "<id>.jpg" or "<id>_<gallery_item>.jpg" belongs to "<CATEGORY>_<id>.md"), and
+    only lines save_utils writes for media, so quoted text keeps its links.
+    shortcut: transformed URLs (e.g. v.redd.it DASH) do not match and keep the
+    remote link; the media file is still saved next to the post.
+    """
+    directory = os.path.dirname(local_path)
+    item_id = os.path.splitext(os.path.basename(local_path))[0].split("_")[0]
+    remote_link = f"]({url})"
+    try:
+        names = [n for n in os.listdir(directory) if n.endswith(f"_{item_id}.md")]
+    except OSError:
+        return
+    for name in names:
+        md_path = os.path.join(directory, name)
+        try:
+            with open(md_path, encoding="utf-8") as f:
+                lines = f.readlines()
+            changed = False
+            for i, line in enumerate(lines):
+                if remote_link in line and line.lstrip("> ").startswith(("![", "**Video:** [")):
+                    lines[i] = line.replace(remote_link, f"]({local_path})")
+                    changed = True
+            if changed:
+                # Write a sibling temp file and swap it in, so a failed write never empties the post.
+                fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".md.tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+                    os.replace(tmp_path, md_path)
+                except BaseException:
+                    os.unlink(tmp_path)
+                    raise
+        except OSError as e:
+            logging.warning(f"Could not relink {md_path}: {e}")
 
 
 # Global manager instance
