@@ -24,6 +24,8 @@ services:
       S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
       STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
+      STORAGE_COORDINATION: ${STORAGE_COORDINATION:-}
+      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
     volumes:
       # Mount local reddit directory for persistent data
       - ./reddit:/app/reddit
@@ -52,6 +54,8 @@ services:
       S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
       STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
+      STORAGE_COORDINATION: ${STORAGE_COORDINATION:-}
+      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
     volumes:
       - ./reddit:/app/reddit
       - ./settings.ini:/app/settings.ini:ro
@@ -73,6 +77,8 @@ services:
       S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
       STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
+      STORAGE_COORDINATION: ${STORAGE_COORDINATION:-}
+      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
     volumes:
       - ./reddit:/app/reddit
       - ./settings.ini:/app/settings.ini:ro

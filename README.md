@@ -3097,6 +3097,31 @@ Plus minimal costs for PUT/GET requests (~$0.005/1000 requests). Most users will
 
 ---
 
+#### Running on More Than One Machine (S3 Coordination)
+
+If more than one runner backs up to the same S3 bucket (for example a home server
+plus GitHub Actions as a fallback), turn on coordination so they never sync at the
+same time:
+
+```bash
+export STORAGE_COORDINATION=true
+python storage_utils.py --cycle                       # lease -> download -> back up -> upload -> release
+python storage_utils.py --cycle --require-stale 6     # only run if the last success is older than 6h
+```
+
+- The lease lives at `<dropbox_directory>/.reddit-stash/control/lock.json` and also records
+  the last successful run. It uses S3 conditional writes, so it needs AWS S3 (boto3 >= 1.43).
+- `file_log.json` is only uploaded if no other runner changed it since this run downloaded it.
+- Exit codes: `0` success, `2` failure, `3` skipped (another runner holds the lease, or the
+  last success is recent enough).
+- While coordination is on, `--upload` and `--migrate --execute` are refused; use `--cycle`.
+- Not supported with coordination yet: Dropbox, custom S3 endpoints, `check_type = DIR`,
+  `unsave_after_download = true`, `process_gdpr = true`.
+- Optional: set `HEALTHCHECK_URL` (e.g. a healthchecks.io ping URL) to be alerted when
+  successful runs stop.
+- Every runner must be stopped before the lease expires (210 minutes), e.g. with a hard
+  timeout of 170 minutes.
+
 #### Migrating Between Storage Providers
 
 If you're switching from Dropbox to S3 (or vice versa), Reddit Stash includes a built-in migration tool that copies all your data between providers.
