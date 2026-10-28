@@ -3115,6 +3115,9 @@ python storage_utils.py --cycle --require-stale 6     # only run if the last suc
 - Exit codes: `0` success, `2` failure, `3` skipped (another runner holds the lease, or the
   last success is recent enough).
 - While coordination is on, `--upload` and `--migrate --execute` are refused; use `--cycle`.
+- `--cycle` needs an empty `save_directory` and empties it again afterwards, because leftover
+  local files may be older than S3 and would overwrite newer copies. For a local copy of your
+  backup, download S3 into a separate folder.
 - Not supported with coordination yet: Dropbox, custom S3 endpoints, `check_type = DIR`,
   `unsave_after_download = true`, `process_gdpr = true`.
 - Optional: set `HEALTHCHECK_URL` (e.g. a healthchecks.io ping URL) to be alerted when
