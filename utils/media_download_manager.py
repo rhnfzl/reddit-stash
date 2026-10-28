@@ -547,7 +547,7 @@ class MediaDownloadManager:
                     else:
                         self._logger.warning(f"Retry failed for {url}")
                         stats["failed"] += 1
-                        # Mark as failed (success=False) - this is handled in download_media
+                        self._retry_queue.mark_retry_completed(url, success=False)
 
                 except Exception as e:
                     self._logger.error(f"Exception during retry of {url}: {e}")
@@ -563,24 +563,41 @@ class MediaDownloadManager:
 
 
 def _relink_markdown(url: str, local_path: str) -> None:
-    """Point markdown that fell back to the remote URL at the now-downloaded file.
+    """Point the owning post's media line at the now-downloaded file.
 
-    shortcut: only markdown in the media's own directory is checked and only exact
-    `(url)` links match; transformed URLs (e.g. v.redd.it DASH) keep the remote link.
+    Only the markdown named after the media's item id is touched (media file
+    "<id>.jpg" or "<id>_<gallery_item>.jpg" belongs to "<CATEGORY>_<id>.md"), and
+    only lines save_utils writes for media, so quoted text keeps its links.
+    shortcut: transformed URLs (e.g. v.redd.it DASH) do not match and keep the
+    remote link; the media file is still saved next to the post.
     """
     directory = os.path.dirname(local_path)
+    item_id = os.path.splitext(os.path.basename(local_path))[0].split("_")[0]
+    remote_link = f"]({url})"
     try:
-        names = [n for n in os.listdir(directory) if n.endswith(".md")]
+        names = [n for n in os.listdir(directory) if n.endswith(f"_{item_id}.md")]
     except OSError:
         return
     for name in names:
         md_path = os.path.join(directory, name)
         try:
             with open(md_path, encoding="utf-8") as f:
-                text = f.read()
-            if f"({url})" in text:
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(text.replace(f"({url})", f"({local_path})"))
+                lines = f.readlines()
+            changed = False
+            for i, line in enumerate(lines):
+                if remote_link in line and line.startswith(("![", "**Video:** [")):
+                    lines[i] = line.replace(remote_link, f"]({local_path})")
+                    changed = True
+            if changed:
+                # Write a sibling temp file and swap it in, so a failed write never empties the post.
+                fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".md.tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+                    os.replace(tmp_path, md_path)
+                except BaseException:
+                    os.unlink(tmp_path)
+                    raise
         except OSError as e:
             logging.warning(f"Could not relink {md_path}: {e}")
 

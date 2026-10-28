@@ -6,7 +6,7 @@ import prawcore
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from praw.models import Submission, Comment
-from utils.log_utils import log_file, save_file_log
+from utils.log_utils import log_file, save_file_log, get_existing_keys, get_given_up_keys, record_failure
 from utils.save_utils import save_submission, save_comment_and_context, _reset_media_tracker, _get_media_size
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
@@ -54,7 +54,7 @@ def create_directory(subreddit_name, save_directory, created_dirs_cache):
 
 def get_existing_files_from_log(file_log):
     """Return a set of unique keys (subreddit + id) based on the JSON log."""
-    existing_files = set(file_log.keys())
+    existing_files = get_existing_keys(file_log)
     return existing_files
 
 def get_existing_files_from_dir(save_directory):
@@ -132,7 +132,6 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
             created_dirs_cache.add(sub_dir)
 
     # Proceed with saving the file
-    was_logged = unique_key in file_log
     try:
         # Reset media size tracker before saving
         _reset_media_tracker()
@@ -173,10 +172,9 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
                 os.remove(file_path)
         except OSError:
             pass
-        # log_file() may have inserted the key before its checkpoint failed; drop it
-        # so the item is retried next run instead of being recorded as backed up.
-        if not was_logged:
-            file_log.pop(unique_key, None)
+        # Replaces any entry log_file() inserted before a failed checkpoint, so the
+        # item is retried next run (up to MAX_ITEM_FAILURES) instead of looking saved.
+        record_failure(file_log, unique_key, e)
         return None, 0  # Indicate that the file could not be saved, no media size
 
 def handle_dynamic_sleep(item):
@@ -408,7 +406,7 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
         existing_files = get_existing_files_from_log(file_log)
     elif check_type == 'DIR':
         print("Check type is DIR. Using directory scan to find existing files.")
-        existing_files = get_existing_files_from_dir(save_directory)
+        existing_files = get_existing_files_from_dir(save_directory) | set(get_given_up_keys(file_log))
     else:
         raise ValueError(f"Unknown check_type: {check_type}")
 

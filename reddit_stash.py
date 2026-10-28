@@ -4,10 +4,11 @@ import sys
 from utils.file_path_validate import validate_and_set_directory
 from utils.file_operations import save_user_activity
 from utils.env_config import load_config_and_env
-from utils.log_utils import load_file_log, save_file_log
+from utils.log_utils import load_file_log, save_file_log, get_existing_keys, get_given_up_keys
 from utils.gdpr_processor import process_gdpr_export
 from utils.config_validator import validate_configuration
 from utils.feature_flags import get_feature_summary
+from utils.constants import MAX_ITEM_FAILURES
 
 
 def create_reddit_client():
@@ -105,7 +106,7 @@ def main():
     # Process GDPR export if enabled (works with or without API credentials)
     if process_gdpr:
         # Initialize tracking sets
-        existing_files = set(file_log.keys())
+        existing_files = get_existing_keys(file_log)
         created_dirs_cache = set()
 
         print("\nProcessing GDPR export data...")
@@ -117,17 +118,26 @@ def main():
         total_failed += gdpr_stats[3]
         # GDPR processing currently doesn't track media downloads separately
 
-    retry_pending_media()
-
     # Final save of file log to persist any remaining batched entries
     save_file_log(file_log, save_directory)
+
+    # Best effort, after the log is safe: a retry problem must not fail a finished backup.
+    try:
+        retry_pending_media()
+    except Exception as e:
+        print(f"⚠ Media retry pass skipped: {e}")
 
     # Print final statistics with separate storage reporting
     print(f"\nProcessing completed. {total_processed} items processed, "
           f"{total_skipped} items skipped, {total_failed} items failed.")
     if total_failed:
         # Failed items are left out of the log, so the next run retries them.
-        print(f"⚠ {total_failed} item(s) failed and will be retried on the next run.")
+        print(f"⚠ {total_failed} item(s) failed; each is retried on later runs "
+              f"up to {MAX_ITEM_FAILURES} times.")
+    given_up = get_given_up_keys(file_log)
+    if given_up:
+        print(f"⚠ {len(given_up)} item(s) failed {MAX_ITEM_FAILURES} times and are no longer retried "
+              f"(delete their entries in file_log.json to try again): {', '.join(given_up[:10])}")
     print(f"Markdown file storage: {total_size / (1024 * 1024):.2f} MB")
     print(f"Media file storage: {total_media_size / (1024 * 1024):.2f} MB")
     print(f"Total combined storage: {(total_size + total_media_size) / (1024 * 1024):.2f} MB")

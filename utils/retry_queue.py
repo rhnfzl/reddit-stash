@@ -266,6 +266,15 @@ class SQLiteRetryQueue:
         with self._lock:
             try:
                 with self.sqlite_manager.get_connection() as conn:
+                    # A failing retry is already in the queue as in_progress; replacing it
+                    # would reset retry_count to 0 so the item never reaches max_retries.
+                    # process_pending_retries() records that failure via mark_retry_completed.
+                    if conn.execute(
+                        "SELECT 1 FROM retry_queue WHERE url = ? AND service_name = ? AND status = 'in_progress'",
+                        (url, service_name),
+                    ).fetchone():
+                        return
+
                     # Use INSERT OR REPLACE to handle duplicates
                     conn.execute("""
                         INSERT OR REPLACE INTO retry_queue
