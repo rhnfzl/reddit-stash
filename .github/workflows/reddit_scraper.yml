@@ -21,10 +21,11 @@ on:
   
   workflow_dispatch:           # Manual trigger option
 
-# Prevent multiple workflow runs executing simultaneously
+# Prevent multiple workflow runs executing simultaneously. A new run waits for the
+# current one instead of cancelling it, so an upload is never cut off half-way.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-script:

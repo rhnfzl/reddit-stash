@@ -82,7 +82,7 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
             },
         )
 
-        processed, skipped, _ = process_gdpr_export(
+        processed, skipped, _, _ = process_gdpr_export(
             None,
             self.save_directory,
             set(),
@@ -108,7 +108,7 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
             posts={'post123': {'title': 'Fallback title', 'selftext': 'Fallback body'}},
         )
 
-        processed, skipped, _ = process_gdpr_export(
+        processed, skipped, _, _ = process_gdpr_export(
             None,
             self.save_directory,
             set(),
@@ -131,7 +131,7 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
         existing_files = set()
         file_log = {}
 
-        first_processed, _, _ = process_gdpr_export(
+        first_processed, _, _, _ = process_gdpr_export(
             None,
             self.save_directory,
             existing_files,
@@ -139,7 +139,7 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
             file_log,
             archive_client=_ArchiveClient(),
         )
-        second_processed, second_skipped, _ = process_gdpr_export(
+        second_processed, second_skipped, _, _ = process_gdpr_export(
             None,
             self.save_directory,
             existing_files,
@@ -173,7 +173,7 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
             file_log,
             archive_client=_ArchiveClient(),
         )
-        processed, skipped, _ = process_gdpr_export(
+        processed, skipped, _, _ = process_gdpr_export(
             None,
             self.save_directory,
             existing_files,
@@ -210,7 +210,7 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
         self.assertIn('Content was not fetched from Reddit.', first_export.read_text(encoding='utf-8'))
         self.assertFalse(file_log['GDPR_POST_post123']['archive_enriched'])
 
-        processed, skipped, _ = process_gdpr_export(
+        processed, skipped, _, _ = process_gdpr_export(
             None,
             self.save_directory,
             existing_files,
@@ -241,7 +241,7 @@ class TestGdprArchiveEnrichment(unittest.TestCase):
         comment_file = next(Path(self.save_directory).glob('r_python/GDPR_COMMENT_comment456.md'))
         comment_file.unlink()
 
-        processed, skipped, _ = process_gdpr_export(
+        processed, skipped, _, _ = process_gdpr_export(
             None,
             self.save_directory,
             existing_files,

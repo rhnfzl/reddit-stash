@@ -350,6 +350,7 @@ def process_gdpr_export(
     """
     processed_count = 0
     skipped_count = 0
+    failed_count = 0
     total_size = 0
 
     csv_only_mode = reddit is None
@@ -402,7 +403,7 @@ def process_gdpr_export(
                     )
                     if not path_result.is_safe:
                         logger.error(f"Unsafe path for GDPR submission {submission.id}: {path_result.issues}")
-                        skipped_count += 1
+                        failed_count += 1
                         continue
 
                     file_path = path_result.safe_path
@@ -418,6 +419,9 @@ def process_gdpr_export(
                         created_dirs_cache,
                         ignore_tls_errors=ignore_tls_errors,
                     )
+                    if already_saved is None:
+                        failed_count += 1
+                        continue
                     if already_saved:
                         skipped_count += 1
                         continue
@@ -428,7 +432,7 @@ def process_gdpr_export(
 
             except Exception as e:
                 print(f"Error processing GDPR post {row['id']}: {e}")
-                skipped_count += 1
+                failed_count += 1
 
     # Process saved comments
     comments_file = os.path.join(gdpr_dir, 'saved_comments.csv')
@@ -467,7 +471,7 @@ def process_gdpr_export(
                     )
                     if not path_result.is_safe:
                         logger.error(f"Unsafe path for GDPR comment {comment.id}: {path_result.issues}")
-                        skipped_count += 1
+                        failed_count += 1
                         continue
 
                     file_path = path_result.safe_path
@@ -483,6 +487,9 @@ def process_gdpr_export(
                         created_dirs_cache,
                         ignore_tls_errors=ignore_tls_errors,
                     )
+                    if already_saved is None:
+                        failed_count += 1
+                        continue
                     if already_saved:
                         skipped_count += 1
                         continue
@@ -493,6 +500,6 @@ def process_gdpr_export(
 
             except Exception as e:
                 print(f"Error processing GDPR comment {row['id']}: {e}")
-                skipped_count += 1
+                failed_count += 1
 
-    return processed_count, skipped_count, total_size
+    return processed_count, skipped_count, total_size, failed_count

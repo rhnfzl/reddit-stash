@@ -542,6 +542,7 @@ class MediaDownloadManager:
                     if result_path:
                         self._logger.info(f"Successfully retried download: {url}")
                         stats["successful"] += 1
+                        _relink_markdown(url, result_path)
                         # Mark as completed (success=True) - this is handled in download_media
                     else:
                         self._logger.warning(f"Retry failed for {url}")
@@ -559,6 +560,29 @@ class MediaDownloadManager:
             self._logger.error(f"Error processing pending retries: {e}")
 
         return stats
+
+
+def _relink_markdown(url: str, local_path: str) -> None:
+    """Point markdown that fell back to the remote URL at the now-downloaded file.
+
+    shortcut: only markdown in the media's own directory is checked and only exact
+    `(url)` links match; transformed URLs (e.g. v.redd.it DASH) keep the remote link.
+    """
+    directory = os.path.dirname(local_path)
+    try:
+        names = [n for n in os.listdir(directory) if n.endswith(".md")]
+    except OSError:
+        return
+    for name in names:
+        md_path = os.path.join(directory, name)
+        try:
+            with open(md_path, encoding="utf-8") as f:
+                text = f.read()
+            if f"({url})" in text:
+                with open(md_path, "w", encoding="utf-8") as f:
+                    f.write(text.replace(f"({url})", f"({local_path})"))
+        except OSError as e:
+            logging.warning(f"Could not relink {md_path}: {e}")
 
 
 # Global manager instance

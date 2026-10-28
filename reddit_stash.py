@@ -1,5 +1,6 @@
 import praw
 import configparser
+import sys
 from utils.file_path_validate import validate_and_set_directory
 from utils.file_operations import save_user_activity
 from utils.env_config import load_config_and_env
@@ -21,6 +22,16 @@ def create_reddit_client():
     )
 
 
+def retry_pending_media():
+    """Retry media downloads that failed earlier and are due for another attempt."""
+    from utils.retry_queue import get_retry_queue
+    if not get_retry_queue().get_pending_retries(limit=1):
+        return
+    from utils.media_download_manager import get_media_manager
+    stats = get_media_manager().process_pending_retries()
+    print(f"Media retries: {stats['successful']} recovered, {stats['failed']} still failing.")
+
+
 def main():
     # Validate configuration before proceeding
     print("Validating configuration...")
@@ -39,7 +50,7 @@ def main():
     except Exception as e:
         print(f"❌ Configuration validation failed: {e}")
         print("\nFor detailed configuration information, check your settings.ini file.")
-        return
+        sys.exit(1)
 
     # Load configuration
     config_parser = configparser.ConfigParser()
@@ -76,6 +87,7 @@ def main():
     # Initialize counters for processed statistics
     total_processed = 0
     total_skipped = 0
+    total_failed = 0
     total_size = 0
     total_media_size = 0
 
@@ -87,7 +99,8 @@ def main():
         total_processed = api_stats[0]
         total_skipped = api_stats[1]
         total_size = api_stats[2]
-        total_media_size = api_stats[3] if len(api_stats) > 3 else 0
+        total_media_size = api_stats[3]
+        total_failed = api_stats[4]
 
     # Process GDPR export if enabled (works with or without API credentials)
     if process_gdpr:
@@ -101,14 +114,20 @@ def main():
         total_processed += gdpr_stats[0]
         total_skipped += gdpr_stats[1]
         total_size += gdpr_stats[2]
+        total_failed += gdpr_stats[3]
         # GDPR processing currently doesn't track media downloads separately
+
+    retry_pending_media()
 
     # Final save of file log to persist any remaining batched entries
     save_file_log(file_log, save_directory)
 
     # Print final statistics with separate storage reporting
     print(f"\nProcessing completed. {total_processed} items processed, "
-          f"{total_skipped} items skipped.")
+          f"{total_skipped} items skipped, {total_failed} items failed.")
+    if total_failed:
+        # Failed items are left out of the log, so the next run retries them.
+        print(f"⚠ {total_failed} item(s) failed and will be retried on the next run.")
     print(f"Markdown file storage: {total_size / (1024 * 1024):.2f} MB")
     print(f"Media file storage: {total_media_size / (1024 * 1024):.2f} MB")
     print(f"Total combined storage: {(total_size + total_media_size) / (1024 * 1024):.2f} MB")

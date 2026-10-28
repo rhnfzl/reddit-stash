@@ -87,7 +87,11 @@ def get_existing_files_from_dir(save_directory):
     return existing_files
 
 def save_to_file(content, file_path, save_function, existing_files, file_log, save_directory, created_dirs_cache, category="POST", unsave=False, ignore_tls_errors=None):
-    """Save content to a file using the specified save function."""
+    """Save content to a file using the specified save function.
+
+    Returns (status, media_size): status is True when the item was already saved,
+    False when it was saved now, and None when saving failed.
+    """
     from .praw_helpers import RecoveredItem
 
     # Check if this is a recovered item
@@ -128,6 +132,7 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
             created_dirs_cache.add(sub_dir)
 
     # Proceed with saving the file
+    was_logged = unique_key in file_log
     try:
         # Reset media size tracker before saving
         _reset_media_tracker()
@@ -168,7 +173,11 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
                 os.remove(file_path)
         except OSError:
             pass
-        return False, 0  # Indicate that the file could not be saved, no media size
+        # log_file() may have inserted the key before its checkpoint failed; drop it
+        # so the item is retried next run instead of being recorded as backed up.
+        if not was_logged:
+            file_log.pop(unique_key, None)
+        return None, 0  # Indicate that the file could not be saved, no media size
 
 def handle_dynamic_sleep(item):
     """Handle dynamic sleep based on the type of Reddit item."""
@@ -221,12 +230,13 @@ def _fetch_items(reddit_instance, fetch_method_name, limit, label):
 
 
 def _merge_results(*results):
-    """Merge (processed, skipped, size, media_size) tuples from parallel threads."""
+    """Merge (processed, skipped, size, media_size, failed) tuples from parallel threads."""
     processed = sum(r[0] for r in results)
     skipped = sum(r[1] for r in results)
     size = sum(r[2] for r in results)
     media_size = sum(r[3] for r in results)
-    return processed, skipped, size, media_size
+    failed = sum(r[4] for r in results)
+    return processed, skipped, size, media_size, failed
 
 
 def _process_submissions_batch(submissions, save_directory, existing_files, created_dirs_cache,
@@ -234,10 +244,11 @@ def _process_submissions_batch(submissions, save_directory, existing_files, crea
                                tqdm_desc="Processing Submissions", tqdm_position=0):
     """Process a batch of submissions in a single thread.
 
-    Returns (processed_count, skipped_count, total_size, total_media_size).
+    Returns (processed_count, skipped_count, total_size, total_media_size, failed_count).
     """
     processed_count = 0
     skipped_count = 0
+    failed_count = 0
     total_size = 0
     total_media_size = 0
 
@@ -247,6 +258,7 @@ def _process_submissions_batch(submissions, save_directory, existing_files, crea
         )
         if not path_result.is_safe:
             logger.error(f"Unsafe path for submission {submission.id}: {path_result.issues}")
+            failed_count += 1
             continue
 
         file_path = path_result.safe_path
@@ -255,6 +267,9 @@ def _process_submissions_batch(submissions, save_directory, existing_files, crea
             save_directory, created_dirs_cache, category=category,
             unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
+        if save_result is None:
+            failed_count += 1
+            continue
         if save_result:
             skipped_count += 1
             continue
@@ -268,7 +283,7 @@ def _process_submissions_batch(submissions, save_directory, existing_files, crea
             pass
         handle_dynamic_sleep(submission)
 
-    return processed_count, skipped_count, total_size, total_media_size
+    return processed_count, skipped_count, total_size, total_media_size, failed_count
 
 
 def _process_comments_batch(comments, save_directory, existing_files, created_dirs_cache,
@@ -276,10 +291,11 @@ def _process_comments_batch(comments, save_directory, existing_files, created_di
                             tqdm_desc="Processing Comments", tqdm_position=1):
     """Process a batch of comments in a single thread.
 
-    Returns (processed_count, skipped_count, total_size, total_media_size).
+    Returns (processed_count, skipped_count, total_size, total_media_size, failed_count).
     """
     processed_count = 0
     skipped_count = 0
+    failed_count = 0
     total_size = 0
     total_media_size = 0
 
@@ -289,6 +305,7 @@ def _process_comments_batch(comments, save_directory, existing_files, created_di
         )
         if not path_result.is_safe:
             logger.error(f"Unsafe path for comment {comment.id}: {path_result.issues}")
+            failed_count += 1
             continue
 
         file_path = path_result.safe_path
@@ -297,6 +314,9 @@ def _process_comments_batch(comments, save_directory, existing_files, created_di
             save_directory, created_dirs_cache, category=category,
             unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
+        if save_result is None:
+            failed_count += 1
+            continue
         if save_result:
             skipped_count += 1
             continue
@@ -310,7 +330,7 @@ def _process_comments_batch(comments, save_directory, existing_files, created_di
             pass
         handle_dynamic_sleep(comment)
 
-    return processed_count, skipped_count, total_size, total_media_size
+    return processed_count, skipped_count, total_size, total_media_size, failed_count
 
 
 def _process_mixed_items(items, save_directory, existing_files, created_dirs_cache,
@@ -322,10 +342,11 @@ def _process_mixed_items(items, save_directory, existing_files, created_dirs_cac
     Items from one PRAW fetch share the same reddit instance, so they must be
     processed in one thread to avoid concurrent access to the shared session.
 
-    Returns (processed_count, skipped_count, total_size, total_media_size).
+    Returns (processed_count, skipped_count, total_size, total_media_size, failed_count).
     """
     processed_count = 0
     skipped_count = 0
+    failed_count = 0
     total_size = 0
     total_media_size = 0
 
@@ -344,6 +365,7 @@ def _process_mixed_items(items, save_directory, existing_files, created_dirs_cac
         )
         if not path_result.is_safe:
             logger.error(f"Unsafe path for item {item.id}: {path_result.issues}")
+            failed_count += 1
             continue
 
         file_path = path_result.safe_path
@@ -352,6 +374,9 @@ def _process_mixed_items(items, save_directory, existing_files, created_dirs_cac
             save_directory, created_dirs_cache, category=category,
             unsave=unsave, ignore_tls_errors=ignore_tls_errors
         )
+        if save_result is None:
+            failed_count += 1
+            continue
         if save_result:
             skipped_count += 1
             continue
@@ -365,7 +390,7 @@ def _process_mixed_items(items, save_directory, existing_files, created_dirs_cac
             pass
         handle_dynamic_sleep(item)
 
-    return processed_count, skipped_count, total_size, total_media_size
+    return processed_count, skipped_count, total_size, total_media_size, failed_count
 
 
 def save_user_activity(reddit, save_directory, file_log, unsave=False):
@@ -442,7 +467,7 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
             results = [f.result() for f in [f1, f2, f3, f4]]
 
         # Phase 3: Merge all counters
-        processed_count, skipped_count, total_size, total_media_size = _merge_results(*results)
+        processed_count, skipped_count, total_size, total_media_size, failed_count = _merge_results(*results)
 
     elif save_type == 'ACTIVITY':
         # Parallel fetch: submissions + comments
@@ -464,20 +489,20 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
                 _process_comments_batch, comments,
                 category="COMMENT", tqdm_desc="Comments", tqdm_position=1, **shared_args
             )
-            processed_count, skipped_count, total_size, total_media_size = _merge_results(
+            processed_count, skipped_count, total_size, total_media_size, failed_count = _merge_results(
                 f1.result(), f2.result()
             )
 
     elif save_type == 'SAVED':
         saved_items = _fetch_items(reddit, 'saved', 1000, 'saved')
-        processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
+        processed_count, skipped_count, total_size, total_media_size, failed_count = _process_mixed_items(
             saved_items, sub_category="SAVED_POST", comment_category="SAVED_COMMENT",
             unsave=unsave, tqdm_desc="Saved Items", **shared_args
         )
 
     elif save_type == 'UPVOTED':
         upvoted_items = _fetch_items(reddit, 'upvoted', 1000, 'upvoted')
-        processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
+        processed_count, skipped_count, total_size, total_media_size, failed_count = _process_mixed_items(
             upvoted_items, sub_category="UPVOTE_POST", comment_category="UPVOTE_COMMENT",
             tqdm_desc="Upvoted Items", **shared_args
         )
@@ -488,4 +513,4 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
     # Save the updated file log (all threads are done at this point)
     save_file_log(file_log, save_directory)
 
-    return processed_count, skipped_count, total_size, total_media_size
+    return processed_count, skipped_count, total_size, total_media_size, failed_count

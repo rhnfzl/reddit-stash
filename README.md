@@ -45,7 +45,7 @@ Each post and comment is formatted with:
 
 When Reddit Stash completes processing, you'll receive detailed storage information:
 ```
-Processing completed. 150 items processed, 25 items skipped.
+Processing completed. 150 items processed, 25 items skipped, 0 items failed.
 Markdown file storage: 12.45 MB
 Media file storage: 89.32 MB
 Total combined storage: 101.77 MB

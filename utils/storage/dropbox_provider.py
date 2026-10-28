@@ -174,7 +174,11 @@ class DropboxStorageProvider:
                     break
                 result = self._dbx.files_list_folder_continue(result.cursor)
         except _ApiError as err:
-            print(f"Failed to list Dropbox folder {remote_directory}: {err}")
+            # A missing folder is a legitimate empty remote (first run); any other
+            # error would hand callers a partial listing that looks complete.
+            if err.error.is_path() and err.error.get_path().is_not_found():
+                return []
+            raise RuntimeError(f"Failed to list Dropbox folder {remote_directory}: {err}") from err
         return result_list
 
     def get_file_info(self, remote_path: str) -> Optional[StorageFileInfo]:
@@ -201,8 +205,12 @@ class DropboxStorageProvider:
 
         # Build remote file hash map (Dropbox hashes)
         dbx_hashes = {}
-        for info in self.list_files(remote_directory):
-            dbx_hashes[info.remote_path] = info.content_hash
+        try:
+            for info in self.list_files(remote_directory):
+                dbx_hashes[info.remote_path] = info.content_hash
+        except RuntimeError as err:
+            # Hashes only skip unchanged files; uploading everything is still correct.
+            print(f"{err} -- uploading all files without change detection.")
 
         files_to_upload = [
             (root, fname)
