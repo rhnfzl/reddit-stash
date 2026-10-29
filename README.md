@@ -3125,6 +3125,25 @@ python storage_utils.py --cycle --require-stale 6     # only run if the last suc
 - Every runner must be stopped before the lease expires (210 minutes), e.g. with a hard
   timeout of 170 minutes.
 
+**In GitHub Actions**, set these repository variables (Settings > Secrets and variables >
+Actions > Variables):
+
+| Variable | Value | Effect |
+|---|---|---|
+| `STORAGE_COORDINATION` | `true` | The scheduled workflow runs one `--cycle` instead of separate download/upload steps |
+| `RUN_MODE` | `github` (default) | The schedule in `reddit_scraper.yml` runs as usual |
+| `RUN_MODE` | `failover` | Another machine is the main runner. The schedule does nothing; `reddit_fallback.yml` runs only when dispatched |
+| `RUN_MODE` | `homelab` | GitHub never runs a backup |
+
+`reddit_fallback.yml` needs `STORAGE_COORDINATION=true` and has no schedule. A watcher (or you) dispatches it, and it only backs up
+when the last success is older than `require_stale` hours (default 6):
+
+```bash
+gh workflow run reddit_fallback.yml -f require_stale=6
+```
+
+Set the optional `HEALTHCHECK_URL` as a repository secret.
+
 #### Migrating Between Storage Providers
 
 If you're switching from Dropbox to S3 (or vice versa), Reddit Stash includes a built-in migration tool that copies all your data between providers.

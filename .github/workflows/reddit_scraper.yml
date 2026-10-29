@@ -27,8 +27,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+# Repository variables (Settings > Secrets and variables > Actions > Variables):
+# - RUN_MODE: github (default) runs on this schedule; homelab or failover means another
+#   machine is the main runner, so the schedule does nothing here (failover still allows
+#   reddit_fallback.yml).
+# - STORAGE_COORDINATION: true runs one coordinated `storage_utils.py --cycle` (S3 only).
 jobs:
+  cycle:
+    if: vars.RUN_MODE != 'homelab' && vars.RUN_MODE != 'failover' && vars.STORAGE_COORDINATION == 'true'
+    uses: ./.github/workflows/_cycle.yml
+    with:
+      runner: github-schedule
+    secrets: inherit
+
   run-script:
+    if: vars.RUN_MODE != 'homelab' && vars.RUN_MODE != 'failover' && vars.STORAGE_COORDINATION != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 180  # Kill job if it runs longer than 3 hours (needed for extensive media downloads and recovery cascade)
       

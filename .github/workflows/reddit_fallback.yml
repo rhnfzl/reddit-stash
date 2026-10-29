@@ -1,0 +1,27 @@
+name: Reddit Stash Fallback
+
+# Dispatch-only backup for when another runner (e.g. a home server) is the main one.
+# A watcher dispatches this when the last successful run in S3 is too old. It needs
+# S3 with coordination (see README "Running on More Than One Machine").
+on:
+  workflow_dispatch:
+    inputs:
+      require_stale:
+        description: Only run when the last success is older than this many hours
+        type: string
+        default: '6'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    # RUN_MODE=homelab means GitHub never runs. Without coordination the scheduled job
+    # syncs without a lease, so a fallback run could overlap it.
+    if: vars.RUN_MODE != 'homelab' && vars.STORAGE_COORDINATION == 'true'
+    uses: ./.github/workflows/_cycle.yml
+    with:
+      runner: github-fallback
+      require_stale: ${{ inputs.require_stale }}
+    secrets: inherit
