@@ -17,8 +17,9 @@ concurrency:
 
 jobs:
   cycle:
-    # RUN_MODE=homelab means GitHub never runs; any other value allows the fallback.
-    if: vars.RUN_MODE != 'homelab'
+    # RUN_MODE=homelab means GitHub never runs. Without coordination the scheduled job
+    # syncs without a lease, so a fallback run could overlap it.
+    if: vars.RUN_MODE != 'homelab' && vars.STORAGE_COORDINATION == 'true'
     uses: ./.github/workflows/_cycle.yml
     with:
       runner: github-fallback

@@ -3135,7 +3135,7 @@ Actions > Variables):
 | `RUN_MODE` | `failover` | Another machine is the main runner. The schedule does nothing; `reddit_fallback.yml` runs only when dispatched |
 | `RUN_MODE` | `homelab` | GitHub never runs a backup |
 
-`reddit_fallback.yml` has no schedule. A watcher (or you) dispatches it, and it only backs up
+`reddit_fallback.yml` needs `STORAGE_COORDINATION=true` and has no schedule. A watcher (or you) dispatches it, and it only backs up
 when the last success is older than `require_stale` hours (default 6):
 
 ```bash

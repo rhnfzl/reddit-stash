@@ -57,10 +57,10 @@ jobs:
         REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
         IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
         HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
-        RUNNER_NAME: ${{ inputs.runner }}
+        CYCLE_RUNNER: ${{ inputs.runner }}
         REQUIRE_STALE: ${{ inputs.require_stale }}
       run: |
-        args=(--cycle --runner "$RUNNER_NAME")
+        args=(--cycle --runner "$CYCLE_RUNNER")
         if [ -n "$REQUIRE_STALE" ]; then
           args+=(--require-stale "$REQUIRE_STALE")
         fi
