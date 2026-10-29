@@ -1,0 +1,73 @@
+name: Coordinated Cycle
+
+# Reusable job for STORAGE_COORDINATION runs: one `storage_utils.py --cycle` takes the
+# S3 lease, downloads the log, backs up Reddit, uploads and releases the lease.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Name recorded in the S3 lease
+        type: string
+        required: true
+      require_stale:
+        description: Only run when the last success is older than this many hours (empty = always)
+        type: string
+        default: ''
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    # Must stay below the 210 minute lease TTL so the lease never expires mid-run.
+    timeout-minutes: 180
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      timeout-minutes: 1
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+        cache-dependency-path: |
+          requirements.txt
+          requirements-s3.txt
+
+    - name: Install dependencies
+      env:
+        PIP_DISABLE_PIP_VERSION_CHECK: 1
+        PIP_ROOT_USER_ACTION: ignore
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt -r requirements-s3.txt
+
+    - name: Run coordinated cycle
+      env:
+        STORAGE_COORDINATION: 'true'
+        STORAGE_PROVIDER: s3
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
+        REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+        REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+        REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+        REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+        IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
+        HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+        RUNNER_NAME: ${{ inputs.runner }}
+        REQUIRE_STALE: ${{ inputs.require_stale }}
+      run: |
+        args=(--cycle --runner "$RUNNER_NAME")
+        if [ -n "$REQUIRE_STALE" ]; then
+          args+=(--require-stale "$REQUIRE_STALE")
+        fi
+        status=0
+        python storage_utils.py "${args[@]}" || status=$?
+        if [ "$status" -eq 3 ]; then
+          echo "Skipped: another runner holds the lease or the last success is recent."
+          exit 0
+        fi
+        exit "$status"
