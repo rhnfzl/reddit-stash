@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 
 from utils.storage.base import StorageFileInfo, SyncResult
 from utils.storage.content_hash import compute_file_hash, hashes_match
+from utils.storage.s3_lease import S3Lease, is_control_key
 
 # Lazy import — boto3 may not be installed
 _boto3 = None
@@ -78,6 +79,11 @@ class S3StorageProvider:
         self._endpoint_url = endpoint_url
         self._s3 = None
         self._transfer_config = None
+        # Coordinated runs (storage_utils --cycle) set require_log_snapshot so
+        # file_log.json is only committed if nobody changed it since our download.
+        self.require_log_snapshot = False
+        self._log_snapshot_taken = False
+        self._log_etag: Optional[str] = None  # None with a snapshot = log was absent
 
         if self._storage_class not in VALID_STORAGE_CLASSES:
             raise ValueError(
@@ -187,6 +193,8 @@ class S3StorageProvider:
 
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
+                if is_control_key(obj["Key"]):
+                    continue  # lease/heartbeat object, never synced
                 result.append(StorageFileInfo(
                     remote_path=obj["Key"],
                     size_bytes=obj["Size"],
@@ -247,12 +255,10 @@ class S3StorageProvider:
 
     def _do_upload_directory(self, local_directory: str, remote_directory: str,
                              start: float, is_cancelled) -> SyncResult:
-        files = [
-            (root, fname)
-            for root, _dirs, fnames in os.walk(local_directory)
-            for fname in fnames
-            if not fname.startswith(".")
-        ]
+        files = []
+        for root, dirs, fnames in os.walk(local_directory):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]  # never walk into .reddit-stash/ etc.
+            files.extend((root, fname) for fname in fnames if not fname.startswith("."))
 
         # Separate file_log.json to upload last
         log_entry = None
@@ -271,7 +277,7 @@ class S3StorageProvider:
             uploaded = 0
             if log_entry:
                 try:
-                    self.upload_file(
+                    self._upload_log(
                         os.path.join(log_entry[0], log_entry[1]),
                         f"{remote_directory.strip('/')}/file_log.json"
                         if remote_directory.strip("/") else "file_log.json",
@@ -365,8 +371,19 @@ class S3StorageProvider:
             if failed > 0 or is_cancelled():
                 print(f"SKIPPING file_log.json upload: {failed} file(s) failed or upload was cancelled.")
                 print("This prevents marking items as processed when their backup files are missing.")
-            else:
+            elif not self.require_log_snapshot:
                 _upload_one(*log_entry, show_progress=False)
+            else:
+                log_path = os.path.join(*log_entry)
+                prefix = remote_directory.strip("/")
+                rel = os.path.relpath(log_path, local_directory).replace(os.sep, "/")
+                try:
+                    info = self._upload_log(log_path, f"{prefix}/{rel}" if prefix else rel)
+                    uploaded += 1
+                    bytes_transferred += info.size_bytes
+                except Exception as exc:
+                    failed += 1
+                    errors.append(f"{log_path}: {exc}")
 
         elapsed = time.time() - start
         result = SyncResult(
@@ -475,12 +492,75 @@ class S3StorageProvider:
         if self._s3 is None:
             raise RuntimeError("Call connect() before using the S3 provider.")
 
+    def lease(self, prefix: str, runner: str) -> S3Lease:
+        """Run lease for the dataset stored under prefix."""
+        self._require_client()
+        return S3Lease(self._s3, self._bucket, prefix, runner)
+
+    def _download_log_snapshot(self, remote_key: str, local_path: str, start: float) -> SyncResult:
+        """Download file_log.json and remember the ETag of exactly this body."""
+        try:
+            resp = self._s3.get_object(Bucket=self._bucket, Key=remote_key)
+        except self._s3.exceptions.ClientError as exc:
+            if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404:
+                self._log_etag, self._log_snapshot_taken = None, True
+                print("No existing log file in S3 — starting fresh.")
+                return SyncResult(elapsed_seconds=time.time() - start)
+            print(f"Failed to download log file from S3: {exc}")
+            return SyncResult(failed=1, elapsed_seconds=time.time() - start, errors=[str(exc)])
+        data = resp["Body"].read()
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        with open(local_path, "wb") as f:
+            f.write(data)
+        self._log_etag, self._log_snapshot_taken = resp["ETag"], True
+        print(f"Log file downloaded to {local_path}.")
+        return SyncResult(downloaded=1, bytes_transferred=len(data), elapsed_seconds=time.time() - start)
+
+    def _upload_log(self, local_path: str, remote_key: str) -> StorageFileInfo:
+        """Upload file_log.json; in coordinated runs only if it is unchanged since download."""
+        if not self.require_log_snapshot:
+            return self.upload_file(local_path, remote_key)
+        if not self._log_snapshot_taken:
+            raise RuntimeError("file_log.json was not downloaded in this run; refusing to overwrite it")
+        condition = {"IfMatch": self._log_etag} if self._log_etag else {"IfNoneMatch": "*"}
+        with open(local_path, "rb") as f:
+            data = f.read()
+        key = remote_key.lstrip("/")
+        try:
+            resp = self._s3.put_object(
+                Bucket=self._bucket, Key=key, Body=data,
+                ServerSideEncryption="AES256", StorageClass="STANDARD",
+                Metadata={BLAKE3_META_KEY: compute_file_hash(local_path)},
+                **condition,
+            )
+            self._log_etag = resp["ETag"]
+        except Exception as exc:
+            # botocore retries: a 412 or timeout can follow our own write landing.
+            try:
+                current = self._s3.get_object(Bucket=self._bucket, Key=key)
+                landed = current["Body"].read() == data
+            except Exception:
+                landed = False
+            if landed:
+                self._log_etag = current["ETag"]
+            elif getattr(exc, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode") in (404, 409, 412):
+                raise RuntimeError(
+                    "file_log.json changed in S3 since this run downloaded it; "
+                    "not overwriting another runner's log"
+                ) from exc
+            else:
+                raise
+        return StorageFileInfo(remote_path=key, size_bytes=len(data))
+
     def _download_log_only(self, remote_directory: str, local_directory: str,
                            start: float) -> SyncResult:
         """Download only file_log.json."""
         prefix = remote_directory.strip("/")
         remote_key = f"{prefix}/file_log.json" if prefix else "file_log.json"
         local_path = os.path.join(local_directory, "file_log.json")
+
+        if self.require_log_snapshot:
+            return self._download_log_snapshot(remote_key, local_path, start)
 
         try:
             info = self.download_file(remote_key, local_path)

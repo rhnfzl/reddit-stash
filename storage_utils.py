@@ -9,11 +9,22 @@ Usage:
     python storage_utils.py --upload
     python storage_utils.py --migrate --source dropbox --target s3          # dry-run
     python storage_utils.py --migrate --source dropbox --target s3 --execute  # actual
+    python storage_utils.py --cycle [--runner NAME] [--require-stale HOURS]
+
+--cycle (needs STORAGE_COORDINATION=true, AWS S3) takes an S3 lease, downloads
+file_log.json, runs reddit_stash, uploads, and releases the lease, so several
+runners (e.g. a homelab plus GitHub Actions) never sync at the same time.
+Exit codes: 0 success, 2 failure, 3 skipped (lease held, lost race, or fresh).
 """
 
 import argparse
 import configparser
+import os
+import shutil
+import signal
+import socket
 import sys
+from datetime import datetime, timedelta, timezone
 
 from utils.file_path_validate import validate_and_set_directory
 from utils.storage.base import StorageProvider
@@ -105,8 +116,186 @@ def cmd_download(args):
     _exit_on_failure(result)
 
 
+EXIT_CYCLE_FAILED = 2
+EXIT_CYCLE_SKIPPED = 3
+
+
+def _coordination_enabled() -> bool:
+    return os.environ.get("STORAGE_COORDINATION", "").strip().lower() in ("1", "true", "yes")
+
+
+def _refuse_when_coordinated(command: str) -> None:
+    """Uncoordinated writes could overwrite a runner that holds the lease."""
+    if _coordination_enabled():
+        print(f"Refusing {command}: STORAGE_COORDINATION is on, so only --cycle may write to storage.")
+        sys.exit(EXIT_CYCLE_FAILED)
+
+
+def _coordination_problems(config) -> list:
+    """Settings that coordinated runs do not support (yet), as readable messages."""
+    problems = []
+    if config.provider != StorageProvider.S3:
+        problems.append("coordination needs provider = s3")
+    if config.s3_endpoint_url and "amazonaws.com" not in config.s3_endpoint_url:
+        problems.append("coordination is only verified on AWS S3, not custom endpoints")
+    if not config.dropbox_directory.strip("/"):
+        problems.append("coordination needs a non-empty dropbox_directory (the S3 key prefix)")
+    parser = configparser.ConfigParser()
+    parser.read("settings.ini")
+    if parser.getboolean("Settings", "unsave_after_download", fallback=False):
+        problems.append("unsave_after_download = true can lose items if an upload fails")
+    if parser.getboolean("Settings", "process_gdpr", fallback=False):
+        problems.append("process_gdpr = true needs the CSV export on every runner")
+    if _load_check_type() != "LOG":
+        problems.append("coordination needs check_type = LOG")
+    return problems
+
+
+def _default_runner() -> str:
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    if run_id:
+        return f"github:{run_id}:{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+    return socket.gethostname()
+
+
+def _ping_healthcheck(success: bool) -> None:
+    """Optional dead-man's-switch ping (e.g. healthchecks.io); never fails the run."""
+    url = os.environ.get("HEALTHCHECK_URL")
+    if not url:
+        return
+    try:
+        import requests
+        requests.get(url if success else f"{url.rstrip('/')}/fail", timeout=10)
+    except Exception as exc:
+        # Only the type: the message would contain the ping URL, which is a secret.
+        print(f"Healthcheck ping failed: {type(exc).__name__}")
+
+
+def _run_backup() -> bool:
+    """Run reddit_stash in this process; True when it finished without error."""
+    import reddit_stash
+    try:
+        reddit_stash.main()
+        return True
+    except SystemExit as exc:
+        return exc.code in (0, None)
+    except Exception as exc:
+        print(f"Backup run failed: {exc}")
+        return False
+
+
+def _sync_cycle(provider, lease, prefix: str, local_dir: str, require_stale) -> int:
+    """Body of --cycle while holding the lease; returns the exit code."""
+    if require_stale is not None:
+        last = lease.last_success(lease.body)
+        if last and datetime.now(timezone.utc) - last < timedelta(hours=require_stale):
+            print(f"Last successful run was at {last:%Y-%m-%d %H:%M} UTC, within "
+                  f"{require_stale}h; nothing to do.")
+            return EXIT_CYCLE_SKIPPED
+
+    result = provider.download_directory(prefix, local_dir, check_type="LOG")
+    if result.failed or result.errors:
+        print(f"Download failed: {result.errors[:3]}")
+        return EXIT_CYCLE_FAILED
+
+    if not _run_backup():
+        return EXIT_CYCLE_FAILED
+
+    if not lease.still_held():
+        print("Lease expired or was taken over during processing; not uploading.")
+        return EXIT_CYCLE_FAILED
+
+    result = provider.upload_directory(local_dir, prefix)
+    if result.failed or result.errors:
+        for err in result.errors[:5]:
+            print(f"  - {err}")
+        return EXIT_CYCLE_FAILED
+    return 0
+
+
+class _Terminated(BaseException):
+    """Raised on SIGTERM so cleanup runs; BaseException so `except Exception` cannot swallow it."""
+
+
+def _raise_terminated(signum, frame):
+    raise _Terminated()
+
+
+def _has_files(path: str) -> bool:
+    return any(files for _root, _dirs, files in os.walk(path))
+
+
+def _clear_dir(path: str) -> None:
+    """Empty the save directory this cycle filled (it was empty when the cycle started)."""
+    for name in os.listdir(path):
+        full = os.path.join(path, name)
+        if os.path.isdir(full) and not os.path.islink(full):
+            shutil.rmtree(full)
+        else:
+            os.remove(full)
+
+
+def _cycle(args) -> int:
+    if not _coordination_enabled():
+        print("--cycle needs STORAGE_COORDINATION=true.")
+        return EXIT_CYCLE_FAILED
+    config = load_storage_config()
+    problems = _coordination_problems(config)
+    local_dir = _load_local_dir()
+    if _has_files(local_dir):
+        # Leftover local files may be older than S3 and would be uploaded over newer copies.
+        problems.append(f"the save directory '{local_dir}' must be empty; use a separate "
+                        "folder (e.g. storage_utils.py --download) for a local copy")
+    if problems:
+        print("Coordinated run refused:")
+        for problem in problems:
+            print(f"  - {problem}")
+        return EXIT_CYCLE_FAILED
+
+    provider = get_storage_provider(config)
+    provider.connect()
+    provider.require_log_snapshot = True
+    prefix = config.dropbox_directory.strip("/")
+    lease = provider.lease(prefix, args.runner or _default_runner())
+
+    if not lease.acquire():
+        return EXIT_CYCLE_SKIPPED
+    code = EXIT_CYCLE_FAILED
+    try:
+        code = _sync_cycle(provider, lease, prefix, local_dir, args.require_stale)
+    finally:
+        # Release even on errors or SIGTERM; only a successful run refreshes last_success.
+        try:
+            released = lease.release(success=code == 0)
+        except Exception as exc:
+            print(f"Lease release failed: {type(exc).__name__}: {exc}")
+            released = False
+        if code == 0 and not released:
+            print("The lease was not released cleanly, so this run is not reported as successful.")
+            code = EXIT_CYCLE_FAILED
+        if code != EXIT_CYCLE_SKIPPED:
+            _ping_healthcheck(code == 0)
+        _clear_dir(local_dir)
+    return code
+
+
+def cmd_cycle(args):
+    """Lease -> download log -> back up -> upload -> release, in one process."""
+    signal.signal(signal.SIGTERM, _raise_terminated)
+    try:
+        code = _cycle(args)
+    except _Terminated:
+        print("Terminated (SIGTERM); lease released.")
+        code = EXIT_CYCLE_FAILED
+    except Exception as exc:
+        print(f"Coordinated run failed: {type(exc).__name__}: {exc}")
+        code = EXIT_CYCLE_FAILED
+    sys.exit(code)
+
+
 def cmd_upload(args):
     """Upload files to the configured storage provider."""
+    _refuse_when_coordinated("--upload")
     config = load_storage_config()
     provider = get_storage_provider(config)
 
@@ -129,6 +318,8 @@ def cmd_upload(args):
 
 def cmd_migrate(args):
     """Migrate files between storage providers."""
+    if args.execute:
+        _refuse_when_coordinated("--migrate --execute")
     from utils.storage.migration import StorageMigration
 
     source = _get_provider_for_name(args.source)
@@ -175,11 +366,18 @@ def main():
     group.add_argument("--download", action="store_true", help="Download from storage provider")
     group.add_argument("--upload", action="store_true", help="Upload to storage provider")
     group.add_argument("--migrate", action="store_true", help="Migrate between providers")
+    group.add_argument("--cycle", action="store_true",
+                       help="Coordinated run: lease, download, back up, upload, release (S3)")
 
     # Migration-specific arguments
     parser.add_argument("--source", choices=["dropbox", "s3"], help="Migration source provider")
     parser.add_argument("--target", choices=["dropbox", "s3"], help="Migration target provider")
     parser.add_argument("--execute", action="store_true", help="Execute migration (default is dry-run)")
+
+    # Cycle-specific arguments
+    parser.add_argument("--runner", help="Name recorded in the lease (default: GitHub run or hostname)")
+    parser.add_argument("--require-stale", type=float, metavar="HOURS",
+                        help="Skip unless the last successful run is older than HOURS")
 
     args = parser.parse_args()
 
@@ -191,6 +389,8 @@ def main():
         cmd_download(args)
     elif args.upload:
         cmd_upload(args)
+    elif args.cycle:
+        cmd_cycle(args)
 
 
 if __name__ == "__main__":
