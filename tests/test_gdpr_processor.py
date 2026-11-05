@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from utils.content_recovery.recovery_config import RecoveryConfig
 from utils.file_operations import RunStats, SaveContext, SaveStatus
-from utils.gdpr_processor import _COMMENTS, _POSTS, process_gdpr_export
+from utils.gdpr_processor import _COMMENTS, _POSTS, _UPVOTED_COMMENTS, process_gdpr_export
 
 
 class TestGdprExportProcessing(unittest.TestCase):
@@ -134,6 +134,37 @@ class TestGdprExportProcessing(unittest.TestCase):
         self.assertEqual(set(file_log), {'post123-test-Mock-POST', 'comment123-test-Mock-POST'})
         self.assertTrue((Path(self.save_directory) / 'test' / 'GDPR_POST_post123.md').exists())
         self.assertTrue((Path(self.save_directory) / 'test' / 'GDPR_COMMENT_comment123.md').exists())
+
+    def _write_votes(self, votes):
+        with (self.gdpr_directory / 'comment_votes.csv').open('w', newline='', encoding='utf-8') as export_file:
+            writer = csv.DictWriter(export_file, fieldnames=['id', 'permalink', 'direction'])
+            writer.writeheader()
+            writer.writerows({'id': i, 'permalink': f'/r/test/comments/x/y/{i}/', 'direction': d} for i, d in votes)
+
+    def test_upvoted_comments_are_saved_like_the_api_upvoted_listing(self):
+        self._write_votes([('up1', 'up'), ('down1', 'down'), ('none1', 'none')])
+        reddit = Mock()
+        reddit.info.return_value = [self._reddit_item('up1', is_submission=False)]
+        file_log = {}
+
+        with patch('utils.gdpr_processor._UPVOTED_COMMENTS', replace(_UPVOTED_COMMENTS, save_function=lambda item, f: 0)), \
+                patch('utils.file_operations.dynamic_sleep'):
+            stats = process_gdpr_export(reddit, SaveContext(self.save_directory, set(), file_log, set()))
+
+        self.assertEqual((stats.processed, stats.failed), (1, 0))
+        self.assertEqual(reddit.info.call_args.kwargs['fullnames'], ['t1_up1'])
+        self.assertEqual(set(file_log), {'up1-test-Mock-UPVOTE_COMMENT'})
+        self.assertTrue((Path(self.save_directory) / 'test' / 'UPVOTE_COMMENT_up1.md').exists())
+
+    def test_csv_only_mode_saves_only_upvoted_comments(self):
+        self._write_votes([('up1', 'up'), ('down1', 'down')])
+        config = RecoveryConfig(timeout_seconds=7, use_arctic_shift=False, use_pullpush=False)
+        ctx = SaveContext(self.save_directory, set(), {}, set())
+        with patch('utils.gdpr_processor.load_recovery_config', return_value=config):
+            stats = process_gdpr_export(None, ctx)
+
+        self.assertEqual(stats.processed, 1)
+        self.assertEqual(set(ctx.file_log), {'UPVOTE_COMMENT_up1'})
 
     def _run_csv_only_with_recovery(self, recovery):
         self._write_export_rows('saved_posts.csv', ['post123'])
