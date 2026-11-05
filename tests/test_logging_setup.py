@@ -84,7 +84,7 @@ class TestErrorsReachTheLog(unittest.TestCase):
             content.subreddit.display_name = 'test'
             ctx = SaveContext(save_dir, set(), {}, set())
 
-            def fail_mid_write(item, f, unsave=False):
+            def fail_mid_write(item, f):
                 f.write('partial')
                 raise RuntimeError('save failed')
 
@@ -107,7 +107,7 @@ class TestItemUrlsStayOutOfInfoLogs(unittest.TestCase):
         self.assertFalse(any('v.redd.it/abc/' in str(call) for call in info.call_args_list))
 
     def test_item_ids_are_not_logged_at_info(self):
-        from utils.save_utils import _get_video_download_url, _unsave, _write_link_post_body
+        from utils.save_utils import _get_video_download_url, _write_link_post_body
 
         submission = Mock(id='abc', url='https://v.redd.it/abc', media=None, secure_media=None)
         with tempfile.NamedTemporaryFile('w') as handle, \
@@ -115,7 +115,6 @@ class TestItemUrlsStayOutOfInfoLogs(unittest.TestCase):
                 patch('utils.save_utils._save_submission_media', side_effect=RuntimeError('boom')), \
                 self.assertNoLogs('utils.save_utils', level='INFO'):
             _get_video_download_url(submission)
-            _unsave(submission, 'submission')
             submission.selftext = ''
             _write_link_post_body(submission, handle, context_mode=True)
 

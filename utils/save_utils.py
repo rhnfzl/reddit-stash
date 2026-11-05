@@ -262,15 +262,6 @@ def _save_submission_media(submission: Submission, f: TextIO, media_config: Medi
     return 0
 
 
-def _unsave(item: Submission | Comment, kind: str) -> None:
-    """Unsave a saved item. Its backup already exists, so a failure only warns."""
-    try:
-        item.unsave()
-        logger.debug(f"Unsaved {kind}: {item.id}")
-    except Exception as e:
-        logger.warning(f"Failed to unsave {kind} {item.id}: {e}")
-
-
 def _write_link_post_body(submission: Submission, f: TextIO, context_mode: bool) -> int:
     """Write a link post's optional text and its media; returns media bytes."""
     # Link posts can also have body text (selftext)
@@ -292,13 +283,12 @@ def _write_link_post_body(submission: Submission, f: TextIO, context_mode: bool)
         return 0
 
 
-def save_submission(submission: Submission, f: TextIO, unsave: bool = False, context_mode: bool = False) -> int:
-    """Save a submission and its metadata, optionally unsaving it after; returns media bytes downloaded.
+def save_submission(submission: Submission, f: TextIO, context_mode: bool = False) -> int:
+    """Save a submission and its metadata; returns media bytes downloaded.
 
     Args:
         submission: PRAW Submission object
         f: File object to write to
-        unsave: Whether to unsave the submission after saving
         context_mode: When True (comment context), a gallery stops at its first failed
             image and media errors fall back to URL links. Failed downloads are still
             queued for a later run, as in normal mode.
@@ -334,9 +324,6 @@ def save_submission(submission: Submission, f: TextIO, unsave: bool = False, con
         lazy_comments = lazy_load_comments(submission)
         media_size += write_comments_markdown(lazy_comments, f)
 
-        if unsave:
-            _unsave(submission, 'submission')
-
         return media_size
     except Exception as e:
         logger.error(f"Error saving submission {submission.id}: {e}")
@@ -370,13 +357,12 @@ def _write_comment_parent_context(parent: Submission | Comment, f: TextIO) -> in
     return 0
 
 
-def save_comment_and_context(comment: Comment, f: TextIO, unsave: bool = False) -> int:
+def save_comment_and_context(comment: Comment, f: TextIO) -> int:
     """Save a comment, its context, and any child comments; returns media bytes downloaded.
 
     Args:
         comment: PRAW Comment object
         f: File object to write to
-        unsave: Whether to unsave the comment after saving
     """
     try:
         author = f'/u/{comment.author.name if comment.author else "[deleted]"}'
@@ -401,9 +387,6 @@ def save_comment_and_context(comment: Comment, f: TextIO, unsave: bool = False) 
         if comment.replies:
             f.write('\n\n## Child Comments:\n\n')
             media_size += write_comments_markdown(comment.replies, f)
-
-        if unsave:
-            _unsave(comment, 'comment')
 
         return media_size
     except Exception as e:

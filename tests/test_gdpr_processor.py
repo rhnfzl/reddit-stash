@@ -125,8 +125,8 @@ class TestGdprExportProcessing(unittest.TestCase):
         ]
         file_log = {}
 
-        with patch('utils.gdpr_processor._POSTS', replace(_POSTS, save_function=lambda item, f, unsave: 0)), \
-                patch('utils.gdpr_processor._COMMENTS', replace(_COMMENTS, save_function=lambda item, f, unsave: 0)), \
+        with patch('utils.gdpr_processor._POSTS', replace(_POSTS, save_function=lambda item, f: 0)), \
+                patch('utils.gdpr_processor._COMMENTS', replace(_COMMENTS, save_function=lambda item, f: 0)), \
                 patch('utils.file_operations.dynamic_sleep'):
             stats = process_gdpr_export(reddit, SaveContext(self.save_directory, set(), file_log, set()))
 

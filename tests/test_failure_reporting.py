@@ -202,9 +202,7 @@ class TestSaveRunWiring(unittest.TestCase):
         listing = {"submissions": submissions, "comments": comments, "saved": saved, "upvoted": upvoted}
         unsaved = []
 
-        def save_fn_stub(item, f, unsave=False):
-            if unsave:
-                unsaved.append(item.id)
+        def save_fn_stub(item, f):
             return 0
 
         with tempfile.TemporaryDirectory() as save_dir, \
@@ -214,6 +212,7 @@ class TestSaveRunWiring(unittest.TestCase):
                       side_effect=lambda r, method, limit, label: (listing[method], False)), \
                 patch("utils.file_operations.save_submission", save_fn_stub), \
                 patch("utils.file_operations.save_comment_and_context", save_fn_stub), \
+                patch("utils.file_operations._unsave", side_effect=lambda item: unsaved.append(item.id)), \
                 patch("utils.file_operations.sleep_for_item"):
             settings.return_value.get.side_effect = lambda section, key, fallback: {
                 "save_type": "ALL", "check_type": "LOG"}[key]
@@ -250,10 +249,8 @@ class TestSaveRunWiring(unittest.TestCase):
             threads.append(threading.current_thread())
             return listing[method], False
 
-        def save_fn_stub(item, f, unsave=False):
+        def save_fn_stub(item, f):
             threads.append(threading.current_thread())
-            if unsave:
-                unsaved.append(item.id)
             return 0
 
         file_log = {}
@@ -263,6 +260,7 @@ class TestSaveRunWiring(unittest.TestCase):
                 patch("utils.file_operations._fetch_items", side_effect=fetch) as fetch_mock, \
                 patch("utils.file_operations.save_submission", save_fn_stub), \
                 patch("utils.file_operations.save_comment_and_context", save_fn_stub), \
+                patch("utils.file_operations._unsave", side_effect=lambda item: unsaved.append(item.id)), \
                 patch("utils.file_operations.sleep_for_item"):
             settings.return_value.get.side_effect = lambda section, key, fallback: {
                 "save_type": save_type, "check_type": "LOG"}[key]

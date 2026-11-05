@@ -27,7 +27,7 @@ RETRYABLE = {'status': 'failed', 'attempts': 1}
 GIVEN_UP = {'status': 'failed', 'attempts': MAX_ITEM_FAILURES}
 
 
-def _write_body(item, f, unsave=False):
+def _write_body(item, f):
     if item.id == 'bad':
         raise RuntimeError('save failed')
     f.write('x' * 10)

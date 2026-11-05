@@ -488,18 +488,6 @@ class TestFallbackBranches(unittest.TestCase):
 
     @patch('utils.save_utils.lazy_load_comments', return_value=[])
     @patch('utils.save_utils.get_media_config')
-    def test_failed_unsave_only_warns(self, _config, _comments):
-        sub = mock_submission(selftext='kept body')
-        sub.unsave.side_effect = RuntimeError('no network')
-
-        with self.assertLogs('utils.save_utils', level='WARNING') as logs:
-            content = self._save(sub, unsave=True)
-
-        self.assertIn('kept body', content)
-        self.assertIn('no network', logs.output[0])
-
-    @patch('utils.save_utils.lazy_load_comments', return_value=[])
-    @patch('utils.save_utils.get_media_config')
     @patch('utils.save_utils._save_submission_media', side_effect=RuntimeError('boom'))
     def test_media_error_falls_back_only_in_context_mode(self, _media, _config, _comments):
         sub = mock_submission(is_self=False, url='https://i.redd.it/abc.jpg')

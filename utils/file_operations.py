@@ -80,6 +80,15 @@ def get_existing_keys_from_dir(save_directory: str) -> set[str]:
                     break
     return existing_keys
 
+def _unsave(item: RedditItem) -> None:
+    """Unsave a saved item. Its file is already written, so a failure only warns."""
+    try:
+        item.unsave()
+        logger.debug(f"Unsaved {type(item).__name__}: {item.id}")
+    except Exception as e:
+        logger.warning(f"Failed to unsave {type(item).__name__} {item.id}: {e}")
+
+
 def save_to_file(content: RedditItem, file_path: str, save_function: Callable[..., int], ctx: SaveContext,
                  category: str = "POST", unsave: bool = False) -> tuple[SaveStatus, int]:
     """Save content to a file using save_function, which returns the media bytes it downloaded.
@@ -104,7 +113,7 @@ def save_to_file(content: RedditItem, file_path: str, save_function: Callable[..
     previous_entry = ctx.file_log.get(unique_key)
     try:
         with open(file_path, 'w', encoding="utf-8") as f:
-            media_size = save_function(content, f, unsave=unsave)
+            media_size = save_function(content, f)
 
         file_info = {
             'subreddit': subreddit_name,
@@ -113,6 +122,11 @@ def save_to_file(content: RedditItem, file_path: str, save_function: Callable[..
         }
 
         record_saved_file(ctx.file_log, unique_key, file_info, ctx.save_directory)
+
+        # Last step: Reddit cannot return an unsaved item, so a failure above must leave it saved.
+        # shortcut: the file is local until upload, so --cycle refuses this setting; move after upload to lift that.
+        if unsave:
+            _unsave(content)
 
         return SaveStatus.SAVED, media_size
     except Exception as e:
