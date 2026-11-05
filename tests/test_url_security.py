@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.url_security import URLSecurityValidator, ValidationResult, validate_url, is_safe_url
+from utils.media_services.url_security import URLSecurityValidator, ValidationResult, get_url_validator
 
 
 class TestURLSecurityValidator(unittest.TestCase):
@@ -25,7 +25,7 @@ class TestURLSecurityValidator(unittest.TestCase):
         """Set up test fixtures."""
         self.validator = URLSecurityValidator()
         self.dns_lookup = patch(
-            'utils.url_security.socket.getaddrinfo',
+            'utils.media_services.url_security.socket.getaddrinfo',
             return_value=[(2, 1, 6, '', ('93.184.216.34', 0))],
         )
         self.mock_dns_lookup = self.dns_lookup.start()
@@ -80,8 +80,6 @@ class TestURLSecurityValidator(unittest.TestCase):
         """Test blocking of malicious domains."""
         blocked_urls = [
             'https://localhost/file.txt',
-            'https://127.0.0.1/api/data',
-            'https://0.0.0.0/exploit',
             'http://malware.com/file.exe'
         ]
 
@@ -114,7 +112,7 @@ class TestURLSecurityValidator(unittest.TestCase):
     def test_domain_resolving_to_private_address_is_rejected(self):
         self.dns_lookup.stop()
         with patch(
-            'utils.url_security.socket.getaddrinfo',
+            'utils.media_services.url_security.socket.getaddrinfo',
             return_value=[(2, 1, 6, '', ('127.0.0.1', 0))],
         ):
             result = self.validator.validate_url('https://public-name.example/image.jpg')
@@ -135,7 +133,7 @@ class TestURLSecurityValidator(unittest.TestCase):
         executor = MagicMock()
         executor.submit.return_value = future
 
-        with patch('utils.url_security._dns_executor', executor):
+        with patch('utils.media_services.url_security._dns_executor', executor):
             result = self.validator.validate_url('https://public-name.example/image.jpg')
 
         self.assertFalse(result.is_valid)
@@ -259,45 +257,22 @@ class TestURLSecurityValidator(unittest.TestCase):
                 if case.get('expected_no_fragment'):
                     self.assertEqual(parsed.fragment, '')
 
-    def test_add_remove_blocked_domains(self):
-        """Test adding and removing blocked domains."""
-        test_domain = 'malicious.example.com'
-        test_url = f'https://{test_domain}/file.txt'
-
-        # Initially should be valid
-        result = self.validator.validate_url(test_url)
-        self.assertTrue(result.is_valid)
-
-        # Add to blocked domains
-        self.validator.add_blocked_domain(test_domain)
-        result = self.validator.validate_url(test_url)
-        self.assertFalse(result.is_valid)
-        self.assertIn('blocked', str(result.issues).lower())
-
-        # Remove from blocked domains
-        removed = self.validator.remove_blocked_domain(test_domain)
-        self.assertTrue(removed)
-        result = self.validator.validate_url(test_url)
-        self.assertTrue(result.is_valid)
-
-        # Try to remove non-existent domain
-        removed = self.validator.remove_blocked_domain('nonexistent.com')
-        self.assertFalse(removed)
-
     def test_case_insensitive_blocking(self):
         """Test that domain blocking is case insensitive."""
-        self.validator.add_blocked_domain('MALICIOUS.COM')
-
-        test_urls = [
-            'https://malicious.com/file.txt',
-            'https://MALICIOUS.COM/file.txt',
-            'https://Malicious.Com/file.txt'
-        ]
-
-        for url in test_urls:
+        for url in ('https://localhost/file.txt', 'https://LOCALHOST/file.txt', 'https://LocalHost/file.txt'):
             with self.subTest(url=url):
                 result = self.validator.validate_url(url)
                 self.assertFalse(result.is_valid)
+                self.assertIn('blocked', str(result.issues).lower())
+
+    def test_unroutable_ip_literals_are_rejected_without_a_lookup(self):
+        for url in ('https://127.0.0.1/api/data', 'https://0.0.0.0/exploit'):
+            with self.subTest(url=url):
+                result = self.validator.validate_url(url)
+                self.assertFalse(result.is_valid)
+                self.assertEqual(result.risk_level, 'high')
+                self.assertFalse(result.dns_failed)
+        self.mock_dns_lookup.assert_not_called()
 
     def test_is_safe_for_download(self):
         """Test the is_safe_for_download convenience method."""
@@ -320,46 +295,13 @@ class TestURLSecurityValidator(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertFalse(self.validator.is_safe_for_download(url))
 
-    def test_security_report_generation(self):
-        """Test detailed security report generation."""
-        test_url = 'https://example.com/file.txt'
-        report = self.validator.get_security_report(test_url)
-
-        self.assertIsInstance(report, dict)
-        self.assertEqual(report['url'], test_url)
-        self.assertIn('is_valid', report)
-        self.assertIn('risk_level', report)
-        self.assertIn('issues', report)
-        self.assertIn('timestamp', report)
-
-        if report['is_valid']:
-            self.assertIn('analysis', report)
-            analysis = report['analysis']
-            self.assertIn('scheme', analysis)
-            self.assertIn('domain', analysis)
-            self.assertIn('domain_blocked', analysis)
-
-    def test_global_validator_functions(self):
-        """Test global convenience functions."""
-        # Test validate_url function
-        result = validate_url('https://example.com')
-        self.assertIsInstance(result, ValidationResult)
-        self.assertTrue(result.is_valid)
-
-        # Test is_safe_url function
-        self.assertTrue(is_safe_url('https://example.com'))
-        self.assertFalse(is_safe_url('javascript:alert("xss")'))
-
-    def test_custom_blocked_domains_initialization(self):
-        """Test initialization with custom blocked domains."""
-        custom_domains = {'BAD.EXAMPLE.COM', 'evil.test.org'}
-        validator = URLSecurityValidator(additional_blocked_domains=custom_domains)
-
-        for domain in custom_domains:
-            url = f'https://{domain}/file.txt'
-            result = validator.validate_url(url)
-            self.assertFalse(result.is_valid)
-            self.assertIn('blocked', str(result.issues).lower())
+    def test_shared_validator(self):
+        """The accessor always gives the same working validator."""
+        validator = get_url_validator()
+        self.assertIs(validator, get_url_validator())
+        self.assertIsInstance(validator.validate_url('https://example.com'), ValidationResult)
+        self.assertTrue(validator.is_safe_for_download('https://example.com'))
+        self.assertFalse(validator.is_safe_for_download('javascript:alert("xss")'))
 
     def test_medium_risk_url_is_rejected(self):
         """Test that an invalid domain is rejected with medium risk."""
@@ -367,6 +309,7 @@ class TestURLSecurityValidator(unittest.TestCase):
         self.assertFalse(result.is_valid)
         self.assertEqual(result.risk_level, 'medium')
         self.assertTrue(any('domain' in issue.lower() for issue in result.issues))
+        self.assertIsNone(result.cleaned_url)
 
     def test_url_with_ports(self):
         """Test URLs with explicit ports."""

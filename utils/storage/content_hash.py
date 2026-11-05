@@ -1,28 +1,21 @@
 """
 Standardised content hashing for cross-provider file comparison.
 
-Uses BLAKE3 (fast, cryptographic) with SHA256 fallback.
+Uses BLAKE3 (fast, cryptographic). It is a hard requirement: a silent switch to
+another digest would make every file look changed against stored hashes.
 1 MB read chunks keep memory usage constant regardless of file size.
 """
 
-import hashlib
 import hmac
+
+import blake3
 
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 
-try:
-    import blake3 as _blake3
-    _HAS_BLAKE3 = True
-except ImportError:
-    _HAS_BLAKE3 = False
-
 
 def compute_file_hash(file_path: str) -> str:
-    """Compute a hex-digest hash of a local file (BLAKE3 or SHA256)."""
-    if _HAS_BLAKE3:
-        hasher = _blake3.blake3()
-    else:
-        hasher = hashlib.sha256()
+    """Compute a hex-digest hash of a local file (BLAKE3)."""
+    hasher = blake3.blake3()
 
     with open(file_path, "rb") as f:
         while True:
@@ -35,10 +28,8 @@ def compute_file_hash(file_path: str) -> str:
 
 
 def compute_bytes_hash(data: bytes) -> str:
-    """Compute a hex-digest hash of raw bytes (BLAKE3 or SHA256)."""
-    if _HAS_BLAKE3:
-        return _blake3.blake3(data).hexdigest()
-    return hashlib.sha256(data).hexdigest()
+    """Compute a hex-digest hash of raw bytes (BLAKE3)."""
+    return blake3.blake3(data).hexdigest()
 
 
 def hashes_match(hash_a: str, hash_b: str) -> bool:

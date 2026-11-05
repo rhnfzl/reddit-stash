@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.path_security import (
     SecurePathHandler, PathValidationResult,
-    create_safe_path, create_reddit_file_path
+    create_reddit_file_path
 )
 
 
@@ -38,6 +38,12 @@ class TestSecurePathHandler(unittest.TestCase):
             os.path.commonpath([os.path.realpath(path), self.base_dir]),
             self.base_dir,
         )
+
+    def test_replaced_characters_are_reported(self):
+        result = self.handler.sanitize_path_component('a:b?.txt')
+        self.assertEqual(result.sanitized_component, 'a_b_.txt')
+        self.assertTrue(result.is_safe)
+        self.assertIn('Dangerous characters replaced with underscores', result.issues)
 
     def test_safe_path_component_sanitization(self):
         """Test sanitization of individual path components."""
@@ -362,12 +368,6 @@ class TestGlobalPathSecurityFunctions(unittest.TestCase):
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
-
-    def test_create_safe_path_function(self):
-        """Test the global create_safe_path function."""
-        result = create_safe_path(self.base_dir, 'test_file.txt')
-        self.assertIsInstance(result, PathValidationResult)
-        self.assertTrue(result.is_safe)
 
     def test_create_reddit_file_path_function(self):
         """Test the global create_reddit_file_path function."""

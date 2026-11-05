@@ -1,105 +1,58 @@
 """
-Base HTTP downloader with streaming support and best practices.
-
-This module provides a robust foundation for HTTP-based media downloads,
-implementing all the best practices researched for 2024 including streaming,
-progress tracking, session management, and proper error handling.
+Streaming HTTP downloader shared by the media services.
 """
 
+import errno
 import os
 import time
 import re
-import hashlib
 import shutil
 import logging
-import socket
 import threading
-from contextlib import contextmanager, nullcontext
-from typing import Optional, Dict, Callable, Any
-from urllib.parse import urljoin, urlparse
-from dataclasses import dataclass
+from typing import Any
+from collections.abc import Callable
+from urllib.parse import urlparse
 
-# Modern fast hashing with graceful fallback
-try:
-    import blake3
-    BLAKE3_AVAILABLE = True
-except ImportError:
-    BLAKE3_AVAILABLE = False
-try:
-    from curl_cffi import requests
-    from curl_cffi import CurlOpt
-    from curl_cffi.requests import RequestsError, Timeout, ConnectionError
-    CURL_CFFI_AVAILABLE = True
-except ImportError:
-    # Fallback to standard requests if curl_cffi is not available
-    import requests
-    from requests.exceptions import Timeout, ConnectionError, RequestException as RequestsError
-    CurlOpt = None
-    CURL_CFFI_AVAILABLE = False
-from urllib3.util.retry import Retry
+import blake3
+from PIL import Image
+from tenacity import (
+    retry, stop_after_attempt, wait_exponential,
+    retry_if_exception, before_sleep_log
+)
 
-# Tenacity for intelligent retry strategies
-try:
-    from tenacity import (
-        retry, stop_after_attempt, wait_exponential,
-        retry_if_exception_type, before_sleep_log
-    )
-    import logging
-    TENACITY_AVAILABLE = True
-except ImportError:
-    TENACITY_AVAILABLE = False
-
-from ..service_abstractions import (
+from utils.media_services.media_types import (
     DownloadResult, DownloadStatus,
     MediaMetadata, MediaType, ServiceConfig
 )
-from ..rate_limiter import rate_limit_manager
-from ..url_transformer import url_transformer
-from ..url_security import get_url_validator
-from ..constants import (
-    DOWNLOAD_CHUNK_SIZE, DISK_SPACE_SAFETY_FACTOR, MIN_MEDIA_FILE_SIZE
+from utils.rate_limiter import RateLimitTimeout, parse_retry_after, rate_limit_manager
+from utils.media_services.url_transformer import url_transformer
+from utils.constants import (
+    DOWNLOAD_CHUNK_SIZE, DISK_SPACE_SAFETY_FACTOR, IMAGE_URL_EXTENSIONS, MAX_URL_LENGTH, MIN_MEDIA_FILE_SIZE,
+    MIN_URL_LENGTH, TRUSTED_FILE_EXTENSIONS,
+)
+from utils.media_services.safe_http import (
+    CURL_CFFI_AVAILABLE, ConnectionError, HTTPAdapter, RequestsError, Timeout,
+    RedirectFaultError, UnsafeRedirectError, get_with_safe_redirects, requests,
 )
 
-CROSS_ORIGIN_REDIRECT_HEADER_ALLOWLIST = frozenset({
-    "accept",
-    "accept-encoding",
-    "accept-language",
-    "cache-control",
-    "range",
-    "user-agent",
-})
+# Fans out to unrelated hosts, so one host's trouble says nothing about the next one.
+UNSHARED_SERVICE = 'generic'
 
-# Optional imports for format-specific validation
-try:
-    from PIL import Image
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
+_DOMAIN_PATTERN = re.compile(
+    r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
+)
+# Only these media hosts may have an empty path
+_EMPTY_PATH_MEDIA_HOSTS = frozenset({'i.imgur.com', 'imgur.com', 'i.redd.it', 'v.redd.it'})
 
 
-@dataclass
-class FileIntegrityResult:
-    """Result of file integrity validation."""
-    is_valid: bool
-    error_message: Optional[str] = None
-    file_size: Optional[int] = None
-    checksum: Optional[str] = None
-
-
-class UnsafeRedirectError(ValueError):
-    """Raised when a redirect target fails URL security validation."""
-
-
-_dns_pin_lock = threading.RLock()
-
-
-def should_retry_download_error(exception):
+def should_retry_download_error(exception: BaseException) -> bool:
     """
     Determine if we should retry based on the exception type.
 
     Retry strategy:
     - Connection errors: Yes (network issues)
     - Timeouts: Yes (temporary server issues)
+    - Other request errors with no HTTP response: Yes (transport failures)
     - Server errors (5xx): Yes (temporary server issues)
     - Rate limits (429): No (handled by rate limiter)
     - Client errors (4xx): No (permanent failures)
@@ -107,26 +60,18 @@ def should_retry_download_error(exception):
     if isinstance(exception, (ConnectionError, Timeout)):
         return True
 
-    if hasattr(exception, 'response') and exception.response is not None:
-        status_code = exception.response.status_code
-        # Retry on server errors (5xx) but not client errors (4xx)
-        return 500 <= status_code < 600
+    if not isinstance(exception, RequestsError):
+        return False
 
-    return False
+    response = getattr(exception, 'response', None)
+    return response is None or 500 <= response.status_code < 600
 
 
-def create_download_retry_decorator():
-    """Create retry decorator with intelligent strategies if tenacity is available."""
-    if not TENACITY_AVAILABLE:
-        # If tenacity not available, return identity decorator
-        def no_retry_decorator(func):
-            return func
-        return no_retry_decorator
-
+def create_download_retry_decorator() -> Callable[[Callable[..., DownloadResult]], Callable[..., DownloadResult]]:
+    """Create the retry decorator used for media downloads."""
     return retry(
         # Retry conditions
-        retry=retry_if_exception_type((ConnectionError, Timeout)) |
-              retry_if_exception_type(RequestsError),
+        retry=retry_if_exception(should_retry_download_error),
 
         # Stop after 3 attempts for most errors
         stop=stop_after_attempt(3),
@@ -134,14 +79,10 @@ def create_download_retry_decorator():
         # Exponential backoff: wait 1s, 2s, 4s between retries
         wait=wait_exponential(multiplier=1, min=1, max=10),
 
-        # Log retry attempts
         before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
 
-        # Return a proper DownloadResult when all retries are exhausted
-        retry_error_callback=lambda retry_state: DownloadResult(
-            status=DownloadStatus.FAILED,
-            error_message=f"Download failed after retries: {retry_state.outcome.exception()}"
-        )
+        # Let the final error reach download_file's handlers, which classify and report it
+        reraise=True
     )
 
 
@@ -149,34 +90,21 @@ class BaseHTTPDownloader:
     """
     Base class for HTTP-based media downloaders with streaming support.
 
-    Implements web-researched best practices for 2024:
-    - Streaming downloads for large files
-    - Session management with connection pooling
-    - Configurable timeouts (connect/read)
-    - Retry logic with exponential backoff
-    - Progress tracking support
-    - Proper error handling and recovery
+    Owns the pooled HTTP session, connect and read timeouts, and retries with
+    exponential backoff.
     """
 
     def __init__(self, config: ServiceConfig):
         self.config = config
         self._session = None
-        self._last_request_time = 0.0
         self._setup_session()
 
-        # Register with rate limit manager
-        rate_limit_manager.register_service_from_config(config.name.lower(), config)
-
-        # Create retry decorator for this instance
         self._retry_decorator = create_download_retry_decorator()
 
-        # Log which hash algorithm is available
-        hash_info = "BLAKE3 (fast)" if BLAKE3_AVAILABLE else "SHA256 (fallback)"
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        self._logger.debug(f"File integrity validation using: {hash_info}")
 
     def _setup_session(self):
-        """Setup HTTP session with browser impersonation and retry strategy."""
+        """Setup HTTP session with browser impersonation."""
         if CURL_CFFI_AVAILABLE:
             # Use curl_cffi with Chrome browser impersonation for better TLS fingerprinting
             self._session = requests.Session(
@@ -193,19 +121,8 @@ class BaseHTTPDownloader:
             self._session.max_redirects = self.config.max_redirects
             self._session.verify = self.config.verify_ssl
 
-            # Configure retry strategy for standard requests
-            retry_strategy = Retry(
-                total=3,
-                read=3,
-                connect=3,
-                backoff_factor=0.3,
-                status_forcelist=(429, 500, 502, 503, 504),
-                redirect=self.config.max_redirects
-            )
-
-            from requests.adapters import HTTPAdapter
+            # No adapter retries: download_file's retry policy is the only one
             adapter = HTTPAdapter(
-                max_retries=retry_strategy,
                 pool_connections=10,
                 pool_maxsize=20
             )
@@ -217,7 +134,6 @@ class BaseHTTPDownloader:
         # request elsewhere. Downloads must connect to the validated destination.
         self._session.trust_env = False
 
-        # Set enhanced headers for better compatibility
         # Accept header prioritizes images to prevent Reddit serving HTML wrapper pages
         self._session.headers.update({
             'User-Agent': self.config.user_agent,
@@ -234,12 +150,11 @@ class BaseHTTPDownloader:
         """Enforce rate limiting using the centralized rate limit manager."""
         service_name = self.config.name.lower()
 
-        # Use the sophisticated rate limit manager instead of simple time-based limiting
-        # Increased timeout to 90 seconds to handle Imgur's backoff periods
+        # A longer wait, such as Imgur's backoff, ends this item as RATE_LIMITED rather than hold the worker.
         if not rate_limit_manager.acquire(service_name, timeout=90):
-            raise RuntimeError(f"Rate limit timeout for service '{service_name}'")
+            raise RateLimitTimeout(f"Rate limit timeout for service '{service_name}'")
 
-    def _get_file_extension_from_headers(self, headers: Dict[str, str]) -> Optional[str]:
+    def _get_file_extension_from_headers(self, headers: dict[str, str]) -> str | None:
         """Determine file extension from Content-Type header."""
         content_type = headers.get('content-type', '').lower()
 
@@ -264,11 +179,11 @@ class BaseHTTPDownloader:
 
         return None
 
-    def _fix_filename_extension(self, filename: str, headers: Dict[str, str]) -> str:
+    def _fix_filename_extension(self, filename: str, headers: dict[str, str]) -> str:
         """Fix filename extension based on Content-Type if needed."""
         # If filename already has a valid extension, keep it
         name, ext = os.path.splitext(filename)
-        if ext.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.webm', '.mov', '.mp3', '.m4a', '.wav']:
+        if ext.lower() in TRUSTED_FILE_EXTENSIONS:
             return filename
 
         # Try to get extension from headers
@@ -314,10 +229,10 @@ class BaseHTTPDownloader:
 
         return False
 
-    def _create_enhanced_error_message(self, base_message: str, url: str = None,
-                                     context: Dict[str, Any] = None) -> str:
+    def _error_message_with_context(self, base_message: str, url: str | None = None,
+                                    context: dict[str, Any] | None = None) -> str:
         """
-        Create enhanced error message with debugging context.
+        Append service, URL and debugging context to an error message.
 
         Args:
             base_message: Base error message
@@ -325,11 +240,10 @@ class BaseHTTPDownloader:
             context: Additional context for debugging
 
         Returns:
-            Enhanced error message with context
+            The message with its context appended
         """
         parts = [base_message]
 
-        # Add service context
         parts.append(f"[Service: {self.config.name}]")
 
         # Add URL context (truncated for readability)
@@ -337,7 +251,6 @@ class BaseHTTPDownloader:
             display_url = url if len(url) <= 100 else url[:97] + "..."
             parts.append(f"[URL: {display_url}]")
 
-        # Add additional context
         if context:
             context_parts = []
             for key, value in context.items():
@@ -363,7 +276,6 @@ class BaseHTTPDownloader:
             return True  # Can't check if size unknown, allow download
 
         try:
-            # Get disk usage for the directory
             directory = os.path.dirname(save_path) or '.'
             usage = shutil.disk_usage(directory)
 
@@ -410,197 +322,52 @@ class BaseHTTPDownloader:
         if not url or not isinstance(url, str):
             return False
 
-        # Remove leading/trailing whitespace
         url = url.strip()
-
-        # Basic length check (URLs shouldn't be too short or extremely long)
-        if len(url) < 10 or len(url) > 2048:
+        if not MIN_URL_LENGTH <= len(url) <= MAX_URL_LENGTH:
             return False
 
         try:
             parsed = urlparse(url)
-
-            # Must have valid scheme
-            if parsed.scheme.lower() not in ['http', 'https']:
-                return False
-
-            # Must have a valid netloc (domain)
-            if not parsed.netloc:
-                return False
-
-            # Check for valid domain structure
-            domain = parsed.netloc.lower()
-
-            # Domain must contain at least one dot (except localhost)
-            if '.' not in domain and domain != 'localhost':
-                return False
-
-            # Check for common invalid patterns
-            invalid_patterns = [
-                r'^[a-zA-Z]:\\',  # Windows paths (C:\)
-                r'^/',            # Unix absolute paths starting with /
-                r'^\.',           # Relative paths starting with .
-                r'^\w+\.\w+$',    # Just filename.ext without domain
-                r'file://',       # File protocol URLs
-                r'javascript:',   # JavaScript URLs
-                r'data:',         # Data URLs
-                r'mailto:',       # Email URLs
-            ]
-
-            for pattern in invalid_patterns:
-                if re.match(pattern, url, re.IGNORECASE):
-                    return False
-
-            # Check domain patterns - must look like a real domain
-            domain_pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
-            if not re.match(domain_pattern, domain):
-                return False
-
-            # Additional checks for media URLs
-            # Must have a path that could contain media
-            if not parsed.path or parsed.path == '/':
-                # Some domains like imgur.com/abc are valid even without file extensions
-                if domain not in ['i.imgur.com', 'imgur.com', 'i.redd.it', 'v.redd.it']:
-                    return False
-
-            return True
-
-        except Exception:
-            # If URL parsing fails, consider it invalid
+            domain = self._domain_without_port(parsed.netloc, parsed.port)
+        except ValueError:  # malformed URL or port
             return False
+
+        if parsed.scheme.lower() not in ['http', 'https'] or not self._looks_like_domain(domain):
+            return False
+
+        # Must have a path that could contain media
+        return bool(parsed.path and parsed.path != '/') or domain in _EMPTY_PATH_MEDIA_HOSTS
+
+    @staticmethod
+    def _domain_without_port(netloc: str, port: int | None) -> str:
+        """Lowercase a netloc and drop its port. Credentials stay, and fail the domain pattern."""
+        domain = netloc.lower()
+        return domain if port is None else domain.rsplit(':', 1)[0]
+
+    @staticmethod
+    def _looks_like_domain(domain: str) -> bool:
+        """A domain must contain at least one dot (except localhost) and match the domain pattern."""
+        return ('.' in domain or domain == 'localhost') and bool(_DOMAIN_PATTERN.match(domain))
 
     def _get_with_safe_redirects(
         self,
         url: str,
-        request_kwargs: Dict[str, Any],
+        request_kwargs: dict[str, Any],
+        method: str = "get",
     ) -> tuple[Any, str]:
-        """Fetch a URL while validating every redirect target before requesting it."""
-        current_url = url
-        validator = get_url_validator()
+        """Fetch a URL through this downloader's session, validating every redirect target."""
+        return get_with_safe_redirects(self._session, url, request_kwargs, self.config.max_redirects, method)
 
-        for redirect_count in range(self.config.max_redirects + 1):
-            if not validator.is_safe_for_download(current_url):
-                raise UnsafeRedirectError(f"URL failed security validation: {current_url}")
-
-            resolved_addresses = validator.resolve_public_addresses(current_url)
-            if not resolved_addresses:
-                raise UnsafeRedirectError(
-                    f"URL could not be pinned to a public address: {current_url}"
-                )
-
-            request_kwargs, dns_pin = self._pin_resolved_addresses(
-                current_url,
-                request_kwargs,
-                resolved_addresses,
-            )
-
-            with dns_pin:
-                response = self._session.get(
-                    current_url,
-                    **{**request_kwargs, "allow_redirects": False},
-                )
-            status_code = getattr(response, "status_code", None)
-            location = response.headers.get("location")
-            if status_code not in {301, 302, 303, 307, 308}:
-                return response, current_url
-
-            if not location:
-                response.close()
-                raise UnsafeRedirectError("Redirect response is missing a location header")
-            if redirect_count == self.config.max_redirects:
-                response.close()
-                raise UnsafeRedirectError("Redirect limit exceeded")
-
-            response.close()
-            next_url = urljoin(current_url, location)
-            if self._get_origin(current_url) != self._get_origin(next_url):
-                headers = request_kwargs.get("headers")
-                if headers:
-                    request_kwargs = {
-                        **request_kwargs,
-                        "headers": {
-                            name: value
-                            for name, value in headers.items()
-                            if name.lower() in CROSS_ORIGIN_REDIRECT_HEADER_ALLOWLIST
-                        },
-                    }
-            current_url = next_url
-
-        raise UnsafeRedirectError("Redirect limit exceeded")
-
-    @staticmethod
-    def _get_origin(url: str) -> tuple[str, str, Optional[int]]:
-        """Return the canonical origin tuple for redirect credential checks."""
-        parsed = urlparse(url)
-        scheme = parsed.scheme.lower()
-        hostname = (parsed.hostname or "").lower()
-        default_port = {"http": 80, "https": 443}.get(scheme)
-        return scheme, hostname, parsed.port or default_port
-
-    def _pin_resolved_addresses(
-        self,
-        url: str,
-        request_kwargs: Dict[str, Any],
-        addresses: tuple[str, ...],
-    ) -> tuple[Dict[str, Any], Any]:
-        """Pin a request to the addresses that passed URL security validation."""
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            raise UnsafeRedirectError(f"URL has no hostname: {url}")
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-
-        if CURL_CFFI_AVAILABLE and CurlOpt is not None:
-            curl_options = dict(request_kwargs.get("curl_options", {}))
-            curl_options[CurlOpt.RESOLVE] = [
-                f"{hostname}:{port}:{self._format_resolve_address(address)}"
-                for address in addresses
-            ]
-            return {**request_kwargs, "curl_options": curl_options}, nullcontext()
-
-        return request_kwargs, self._pin_standard_requests(hostname, addresses)
-
-    @staticmethod
-    def _format_resolve_address(address: str) -> str:
-        """Format IPv6 addresses for libcurl's host:port:address resolve syntax."""
-        return f"[{address}]" if ":" in address else address
-
-    @contextmanager
-    def _pin_standard_requests(self, hostname: str, addresses: tuple[str, ...]):
-        """Temporarily pin standard-requests DNS while retaining the URL hostname for TLS."""
-        original_getaddrinfo = socket.getaddrinfo
-        normalized_hostname = hostname.rstrip(".").lower()
-
-        def pinned_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-            if str(host).rstrip(".").lower() != normalized_hostname:
-                return original_getaddrinfo(host, port, family, type, proto, flags)
-
-            return [
-                (
-                    socket.AF_INET6 if ":" in address else socket.AF_INET,
-                    type or socket.SOCK_STREAM,
-                    proto or socket.IPPROTO_TCP,
-                    "",
-                    (address, port, 0, 0) if ":" in address else (address, port),
-                )
-                for address in addresses
-            ]
-
-        with _dns_pin_lock:
-            socket.getaddrinfo = pinned_getaddrinfo
-            try:
-                yield
-            finally:
-                socket.getaddrinfo = original_getaddrinfo
+    def _discard(self, path: str) -> None:
+        """Remove an unusable download. Its result already reports the failure."""
+        try:
+            os.remove(path)
+        except OSError as e:
+            self._logger.warning(f"Could not remove unusable download {path}: {e}")
 
     def _download_with_retry(self, url: str, save_path: str,
-                           progress_callback: Optional[Callable[[int, int], None]] = None,
-                           extra_headers: Optional[Dict[str, str]] = None) -> DownloadResult:
-        """
-        Internal method that handles the actual HTTP download with retry logic.
-
-        This method is decorated with retry strategies for intelligent error handling.
-        """
+                             extra_headers: dict[str, str] | None = None) -> DownloadResult:
+        """One download attempt. download_file wraps this in the retry policy on each call."""
         start_time = time.time()
 
         # Respect rate limiting
@@ -619,166 +386,37 @@ class BaseHTTPDownloader:
         with response:
             response.raise_for_status()
 
-            # Validate content type for security
-            content_type = response.headers.get('content-type', '').lower()
-            if not self._validate_content_type(content_type):
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=self._create_enhanced_error_message(
-                        f"Content type '{content_type}' not allowed",
-                        url=url,
-                        context={
-                            'allowed_types': str(self.config.allowed_content_types),
-                            'response_headers': 'content-type'
-                        }
-                    )
-                )
+            rejection = self._reject_content_type(url, save_path, response.headers)
+            if rejection:
+                return rejection
 
-            # Get file information
             total_size = int(response.headers.get('content-length', 0))
-            filename = os.path.basename(save_path)
-
-            # Fix filename extension if needed
-            filename = self._fix_filename_extension(filename, response.headers)
+            filename = self._fix_filename_extension(os.path.basename(save_path), response.headers)
             fixed_save_path = os.path.join(os.path.dirname(save_path), filename)
 
-            # Check file size limits
-            if total_size > self.config.max_file_size:
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=self._create_enhanced_error_message(
-                        f"File too large: {total_size:,} bytes",
-                        url=url,
-                        context={
-                            'limit_bytes': f"{self.config.max_file_size:,}",
-                            'content_length': str(total_size)
-                        }
-                    )
-                )
+            rejection = self._reject_before_writing(url, total_size, fixed_save_path)
+            if rejection:
+                return rejection
 
-            # Check disk space availability
-            if not self._check_disk_space(total_size, fixed_save_path):
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=self._create_enhanced_error_message(
-                        "Insufficient disk space for download",
-                        url=url,
-                        context={
-                            'file_size_mb': f"{total_size / (1024**2):.1f}",
-                            'safety_factor': str(DISK_SPACE_SAFETY_FACTOR),
-                            'save_path': os.path.dirname(fixed_save_path)
-                        }
-                    )
-                )
-
-            # Create directory if needed
             os.makedirs(os.path.dirname(fixed_save_path), exist_ok=True)
 
-            # Download with streaming and integrity validation
-            downloaded = 0
+            # A failed download must not cost a file already saved at this path.
+            # The leading dot keeps a crash's leftover out of uploads, as they skip dotfiles.
+            temp_path = os.path.join(os.path.dirname(fixed_save_path), f".{filename}.{threading.get_ident()}.part")
+            try:
+                downloaded, checksum = self._stream_to_file(response, temp_path)
 
-            # Use BLAKE3 if available (10x faster), fallback to SHA256
-            if BLAKE3_AVAILABLE:
-                hasher = blake3.blake3()
-                hash_name = "BLAKE3"
-            else:
-                hasher = hashlib.sha256()
-                hash_name = "SHA256"
-
-            size_limit_exceeded = False
-            with open(fixed_save_path, 'wb') as file:
-                for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
-                    if chunk:
-                        size = file.write(chunk)
-                        downloaded += size
-
-                        # Streaming size enforcement when Content-Length was missing
-                        if self.config.max_file_size and downloaded > self.config.max_file_size:
-                            size_limit_exceeded = True
-                            break
-
-                        # Update hash for integrity validation
-                        hasher.update(chunk)
-
-                        # Call progress callback if provided
-                        if progress_callback:
-                            progress_callback(downloaded, total_size)
-
-            # Abort if streaming size limit was exceeded
-            if size_limit_exceeded:
-                try:
-                    os.remove(fixed_save_path)
-                except OSError:
-                    pass
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=self._create_enhanced_error_message(
-                        f"Download aborted: exceeded max size {self.config.max_file_size:,} bytes during streaming",
-                        url=url,
-                        context={
-                            'downloaded_bytes': str(downloaded),
-                            'max_file_size': str(self.config.max_file_size)
-                        }
-                    )
+                failure = self._written_file_failure(
+                    url, temp_path, downloaded, total_size, checksum, response.headers
                 )
+                if failure:
+                    return failure
 
-            # Validate file integrity after download
-            integrity_result = self._validate_file_integrity(
-                fixed_save_path, downloaded, total_size,
-                hasher.hexdigest(), response.headers, hash_name
-            )
+                os.replace(temp_path, fixed_save_path)
+            finally:
+                if os.path.exists(temp_path):
+                    self._discard(temp_path)
 
-            if not integrity_result.is_valid:
-                # Remove corrupted file
-                try:
-                    os.remove(fixed_save_path)
-                except OSError:
-                    pass
-
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=self._create_enhanced_error_message(
-                        f"File integrity validation failed: {integrity_result.error_message}",
-                        url=url,
-                        context={
-                            'downloaded_bytes': str(downloaded),
-                            'expected_bytes': str(total_size),
-                            'hash_algorithm': hash_name,
-                            'checksum': integrity_result.checksum[:16] + "..." if integrity_result.checksum else None
-                        }
-                    )
-                )
-
-            # Validate content type to detect HTML responses (Reddit wrapper pages)
-            content_type = response.headers.get('content-type', '').lower()
-            if 'text/html' in content_type:
-                # Remove HTML file since it's not the expected image
-                try:
-                    os.remove(fixed_save_path)
-                except OSError:
-                    pass
-
-                # Get platform-specific error message
-                platform = url_transformer.get_domain_info(url)
-                if platform:
-                    platform_msg = f"{platform} served an HTML viewer page instead of raw file"
-                else:
-                    platform_msg = f"Received HTML instead of expected content from {urlparse(url).netloc}"
-
-                self._logger.warning(f"Received HTML instead of image from {url}. "
-                                   f"Content-Type: {content_type}. {platform_msg}")
-
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=f"{platform_msg}. Content-Type: {content_type}"
-                )
-
-            # Additional validation: Check for image-like filenames getting HTML content
-            expected_image_ext = os.path.splitext(save_path)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff']
-            if expected_image_ext and 'image/' not in content_type and content_type != 'application/octet-stream':
-                self._logger.warning(f"Expected image but got Content-Type: {content_type} for {url}")
-
-            # Create metadata
             metadata = MediaMetadata(
                 url=final_url,
                 media_type=self._detect_media_type(response.headers),
@@ -786,31 +424,148 @@ class BaseHTTPDownloader:
                 format=self._get_file_extension_from_headers(response.headers)
             )
 
-            download_time = time.time() - start_time
-
             # Report successful download to rate limiter
-            service_name = self.config.name.lower()
-            rate_limit_manager.report_response(service_name, 200)
+            rate_limit_manager.report_response(self.config.name.lower(), 200)
 
             return DownloadResult(
                 status=DownloadStatus.SUCCESS,
                 local_path=fixed_save_path,
-                content_hash=integrity_result.checksum,
+                content_hash=checksum,
                 metadata=metadata,
                 bytes_downloaded=downloaded,
-                download_time=download_time
+                download_time=time.time() - start_time
             )
 
+    def _reject_content_type(self, url: str, save_path: str, headers: dict[str, str]) -> DownloadResult | None:
+        """Return a rejection if the declared content type should not be saved."""
+        content_type = headers.get('content-type', '').lower()
+
+        if not self._validate_content_type(content_type):
+            return DownloadResult(
+                status=DownloadStatus.REJECTED,
+                error_message=self._error_message_with_context(
+                    f"Content type '{content_type}' not allowed",
+                    url=url,
+                    context={
+                        'allowed_types': str(self.config.allowed_content_types),
+                        'response_headers': 'content-type'
+                    }
+                )
+            )
+
+        # HTML wrapper pages (Reddit, Imgur viewers) instead of the file itself
+        if 'text/html' in content_type:
+            platform = url_transformer.get_domain_info(url)
+            if platform:
+                platform_msg = f"{platform} served an HTML viewer page instead of raw file"
+            else:
+                platform_msg = f"Received HTML instead of expected content from {urlparse(url).netloc}"
+
+            self._logger.warning(f"Received HTML instead of image from {url}. "
+                                 f"Content-Type: {content_type}. {platform_msg}")
+
+            return DownloadResult(
+                status=DownloadStatus.REJECTED,
+                error_message=f"{platform_msg}. Content-Type: {content_type}"
+            )
+
+        if (os.path.splitext(save_path)[1].lower() in IMAGE_URL_EXTENSIONS
+                and 'image/' not in content_type and content_type != 'application/octet-stream'):
+            self._logger.warning(f"Expected image but got Content-Type: {content_type} for {url}")
+
+        return None
+
+    def _reject_before_writing(self, url: str, total_size: int, path: str) -> DownloadResult | None:
+        """Return a result if the declared size rules out saving this file."""
+        if total_size > self.config.max_file_size:
+            return DownloadResult(
+                status=DownloadStatus.REJECTED,
+                error_message=self._error_message_with_context(
+                    f"File too large: {total_size:,} bytes",
+                    url=url,
+                    context={
+                        'limit_bytes': f"{self.config.max_file_size:,}",
+                        'content_length': str(total_size)
+                    }
+                )
+            )
+
+        if not self._check_disk_space(total_size, path):
+            return DownloadResult(
+                status=DownloadStatus.FAILED,
+                error_message=self._error_message_with_context(
+                    "Insufficient disk space for download",
+                    url=url,
+                    context={
+                        'file_size_mb': f"{total_size / (1024**2):.1f}",
+                        'safety_factor': str(DISK_SPACE_SAFETY_FACTOR),
+                        'save_path': os.path.dirname(path)
+                    }
+                )
+            )
+
+        return None
+
+    def _stream_to_file(self, response: Any, path: str) -> tuple[int, str]:
+        """Write the body to path, stopping once it passes max_file_size. Returns (bytes written, hash)."""
+        downloaded = 0
+        hasher = blake3.blake3()
+
+        with open(path, 'wb') as file:
+            for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                if chunk:
+                    downloaded += file.write(chunk)
+
+                    # Streaming size enforcement when Content-Length was missing
+                    if self.config.max_file_size and downloaded > self.config.max_file_size:
+                        break
+
+                    hasher.update(chunk)
+
+        return downloaded, hasher.hexdigest()
+
+    def _written_file_failure(self, url: str, path: str, downloaded: int, total_size: int,
+                            checksum: str, headers: dict[str, str]) -> DownloadResult | None:
+        """Return a failure if the file just written must not be kept."""
+        if self.config.max_file_size and downloaded > self.config.max_file_size:
+            return DownloadResult(
+                status=DownloadStatus.REJECTED,
+                error_message=self._error_message_with_context(
+                    f"Download aborted: exceeded max size {self.config.max_file_size:,} bytes during streaming",
+                    url=url,
+                    context={
+                        'downloaded_bytes': str(downloaded),
+                        'max_file_size': str(self.config.max_file_size)
+                    }
+                )
+            )
+
+        problem = self._find_integrity_problem(path, downloaded, total_size, headers)
+        if problem:
+            return DownloadResult(
+                status=DownloadStatus.FAILED,
+                error_message=self._error_message_with_context(
+                    f"File integrity validation failed: {problem}",
+                    url=url,
+                    context={
+                        'downloaded_bytes': str(downloaded),
+                        'expected_bytes': str(total_size),
+                        'hash_algorithm': 'BLAKE3',
+                        'checksum': checksum[:16] + "..."
+                    }
+                )
+            )
+
+        return None
+
     def download_file(self, url: str, save_path: str,
-                     progress_callback: Optional[Callable[[int, int], None]] = None,
-                     extra_headers: Optional[Dict[str, str]] = None) -> DownloadResult:
+                      extra_headers: dict[str, str] | None = None) -> DownloadResult:
         """
-        Download a file using streaming with progress tracking and retry logic.
+        Download a file using streaming and retry logic.
 
         Args:
             url: URL to download from
             save_path: Local path to save the file
-            progress_callback: Optional callback for progress updates (downloaded, total)
             extra_headers: Optional per-request headers (merged with session headers, not mutating session)
 
         Returns:
@@ -825,201 +580,137 @@ class BaseHTTPDownloader:
 
         try:
             # Apply retry logic to the download operation
-            if TENACITY_AVAILABLE:
-                retry_download = self._retry_decorator(self._download_with_retry)
-                return retry_download(url, save_path, progress_callback, extra_headers)
-            else:
-                # Fallback without retry if tenacity not available
-                return self._download_with_retry(url, save_path, progress_callback, extra_headers)
+            retry_download = self._retry_decorator(self._download_with_retry)
+            return retry_download(url, save_path, extra_headers)
 
         except UnsafeRedirectError as e:
             return DownloadResult(
                 status=DownloadStatus.INVALID_URL,
                 error_message=str(e),
             )
-        except Timeout as e:
-            # Report timeout as server error
-            service_name = self.config.name.lower()
-            rate_limit_manager.report_response(service_name, 408)  # Request Timeout
-
+        except RedirectFaultError as e:
             return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message=self._create_enhanced_error_message(
-                    "Download timed out",
-                    url=url,
-                    context={
-                        'connect_timeout': f"{self.config.connect_timeout}s",
-                        'read_timeout': f"{self.config.read_timeout}s",
-                        'timeout_type': str(type(e).__name__)
-                    }
-                )
+                status=DownloadStatus.REJECTED,
+                error_message=str(e),
+            )
+        except RateLimitTimeout as e:
+            return DownloadResult(
+                status=DownloadStatus.RATE_LIMITED,
+                error_message=self._error_message_with_context(str(e), url=url),
+            )
+        except Timeout as e:
+            return self._failed(
+                url, "Download timed out", 408,
+                connect_timeout=f"{self.config.connect_timeout}s",
+                read_timeout=f"{self.config.read_timeout}s",
+                timeout_type=type(e).__name__,
             )
         except ConnectionError as e:
-            # Report connection error
-            service_name = self.config.name.lower()
-            rate_limit_manager.report_response(service_name, 503)  # Service Unavailable
-
-            return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message=self._create_enhanced_error_message(
-                    "Connection failed",
-                    url=url,
-                    context={
-                        'error_type': str(type(e).__name__),
-                        'details': str(e)[:100],  # Truncate long error messages
-                        'ssl_verify': str(self.config.verify_ssl)
-                    }
-                )
+            return self._failed(
+                url, "Connection failed", 503,
+                error_type=type(e).__name__,
+                details=str(e)[:100],  # Truncate long error messages
+                ssl_verify=self.config.verify_ssl,
             )
         except RequestsError as e:
-            service_name = self.config.name.lower()
-
-            # Handle HTTP errors from both curl_cffi and standard requests
-            if hasattr(e, 'response') and e.response is not None:
-                status_code = e.response.status_code
-
-                if status_code == 429:
-                    # Extract retry-after header if available
-                    retry_after = e.response.headers.get('retry-after')
-                    retry_seconds = int(retry_after) if retry_after else 60
-
-                    # Report rate limit to manager
-                    rate_limit_manager.report_response(service_name, 429, retry_seconds)
-
-                    return DownloadResult(
-                        status=DownloadStatus.RATE_LIMITED,
-                        error_message=self._create_enhanced_error_message(
-                            "Rate limit exceeded",
-                            url=url,
-                            context={
-                                'retry_after_seconds': str(retry_seconds),
-                                'status_code': str(status_code),
-                                'has_retry_after_header': str(bool(retry_after))
-                            }
-                        ),
-                        retry_after=retry_seconds
-                    )
-                else:
-                    # Report HTTP error to rate limiter
-                    rate_limit_manager.report_response(service_name, status_code)
-
-                    return DownloadResult(
-                        status=DownloadStatus.FAILED,
-                        error_message=self._create_enhanced_error_message(
-                            f"HTTP error {status_code}",
-                            url=url,
-                            context={
-                                'status_code': str(status_code),
-                                'response_headers': 'available' if hasattr(e, 'response') else 'none',
-                                'details': str(e)[:100]
-                            }
-                        )
-                    )
-            else:
-                # Handle requests without response (connection errors, etc.)
-                rate_limit_manager.report_response(service_name, 500)
-
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=self._create_enhanced_error_message(
-                        "Request error",
-                        url=url,
-                        context={
-                            'error_type': str(type(e).__name__),
-                            'details': str(e)[:100],
-                            'has_response': 'false'
-                        }
-                    )
-                )
+            return self._result_for_request_error(url, e)
         except OSError as e:
-            # Handle disk space and permission errors specifically
-            service_name = self.config.name.lower()
-
-            if e.errno == 28:  # ENOSPC - No space left on device
-                rate_limit_manager.report_response(service_name, 507)  # Insufficient Storage
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=self._create_enhanced_error_message(
-                        "No space left on device",
-                        url=url,
-                        context={
-                            'errno': str(e.errno),
-                            'save_path': save_path,
-                            'error_details': str(e)
-                        }
-                    )
-                )
-            elif e.errno == 13:  # EACCES - Permission denied
-                rate_limit_manager.report_response(service_name, 403)  # Forbidden
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=self._create_enhanced_error_message(
-                        "Permission denied writing to file",
-                        url=url,
-                        context={
-                            'errno': str(e.errno),
-                            'save_path': save_path,
-                            'directory': os.path.dirname(save_path)
-                        }
-                    )
-                )
-            else:
-                rate_limit_manager.report_response(service_name, 500)
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message=self._create_enhanced_error_message(
-                        "File system error",
-                        url=url,
-                        context={
-                            'errno': str(getattr(e, 'errno', 'unknown')),
-                            'error_type': str(type(e).__name__),
-                            'save_path': save_path,
-                            'details': str(e)[:100]
-                        }
-                    )
-                )
+            return self._result_for_os_error(url, save_path, e)
         except Exception as e:
-            # Report general error
-            service_name = self.config.name.lower()
-            rate_limit_manager.report_response(service_name, 500)  # Internal Server Error
+            return self._failed(
+                url, "Unexpected error during download", 500,
+                error_type=type(e).__name__,
+                details=str(e)[:100],
+                save_path=save_path,
+            )
+
+    def _failed(self, url: str, message: str, reported_status: int, **context: Any) -> DownloadResult:
+        """Report a failure to the rate limiter and build its result."""
+        rate_limit_manager.report_response(self.config.name.lower(), reported_status)
+        return DownloadResult(
+            status=DownloadStatus.FAILED,
+            error_message=self._error_message_with_context(message, url=url, context=context),
+        )
+
+    def _result_for_request_error(self, url: str, error: RequestsError) -> DownloadResult:
+        """Classify an HTTP error from curl_cffi or standard requests."""
+        response = getattr(error, 'response', None)
+        if response is None:
+            # Requests without a response (connection errors, etc.)
+            return self._failed(
+                url, "Request error", 500,
+                error_type=type(error).__name__,
+                details=str(error)[:100],
+                has_response='false',
+            )
+
+        service_name = self.config.name.lower()
+        status_code = response.status_code
+
+        if status_code == 429:
+            retry_after = parse_retry_after(response)
+
+            # One host's limit must not stall other hosts
+            if service_name != UNSHARED_SERVICE:
+                # Without a header the service's own backoff policy applies
+                rate_limit_manager.report_response(service_name, 429, retry_after)
 
             return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message=self._create_enhanced_error_message(
-                    "Unexpected error during download",
+                status=DownloadStatus.RATE_LIMITED,
+                error_message=self._error_message_with_context(
+                    "Rate limit exceeded",
                     url=url,
                     context={
-                        'error_type': str(type(e).__name__),
-                        'details': str(e)[:100],
-                        'save_path': save_path
+                        'retry_after_seconds': str(retry_after),
+                        'status_code': str(status_code),
+                        'has_retry_after_header': str(retry_after is not None)
                     }
-                )
+                ),
+                retry_after=retry_after
             )
+
+        rate_limit_manager.report_response(service_name, status_code)
+
+        return DownloadResult(
+            status={
+                403: DownloadStatus.FORBIDDEN,
+                404: DownloadStatus.NOT_FOUND,
+            }.get(status_code, DownloadStatus.FAILED),
+            error_message=self._error_message_with_context(
+                f"HTTP error {status_code}",
+                url=url,
+                context={
+                    'status_code': str(status_code),
+                    'details': str(error)[:100]
+                }
+            )
+        )
+
+    def _result_for_os_error(self, url: str, save_path: str, error: OSError) -> DownloadResult:
+        """Classify a disk or permission error."""
+        if error.errno == errno.ENOSPC:
+            return self._failed(
+                url, "No space left on device", 507,
+                errno=error.errno, save_path=save_path, error_details=error,
+            )
+        if error.errno == errno.EACCES:
+            return self._failed(
+                url, "Permission denied writing to file", 403,
+                errno=error.errno, save_path=save_path, directory=os.path.dirname(save_path),
+            )
+        return self._failed(
+            url, "File system error", 500,
+            errno=error.errno,
+            error_type=type(error).__name__,
+            save_path=save_path,
+            details=str(error)[:100],
+        )
 
     def download(self, url: str, save_path: str) -> DownloadResult:
-        """
-        Download media from URL - interface method for MediaDownloadManager.
-
-        This method provides the standard interface expected by MediaDownloadManager
-        and delegates to the existing download_file() implementation.
-
-        Args:
-            url: URL to download from
-            save_path: Local path to save the file
-
-        Returns:
-            DownloadResult with status and metadata
-        """
-        # Validate URL before attempting download
-        if not self._validate_url(url):
-            return DownloadResult(
-                status=DownloadStatus.INVALID_URL,
-                error_message=f"Invalid URL format or pattern: {url}"
-            )
-
+        """Entry point for MediaDownloadManager; subclasses override it to route by media type."""
         return self.download_file(url, save_path)
 
-    def _detect_media_type(self, headers: Dict[str, str]) -> MediaType:
+    def _detect_media_type(self, headers: dict[str, str]) -> MediaType:
         """Detect media type from HTTP headers."""
         content_type = headers.get('content-type', '').lower()
 
@@ -1032,102 +723,56 @@ class BaseHTTPDownloader:
         else:
             return MediaType.UNKNOWN
 
-    def _validate_file_integrity(self, file_path: str, actual_size: int,
-                               expected_size: int, computed_checksum: str,
-                               headers: Dict[str, str], hash_algorithm: str = "SHA256") -> FileIntegrityResult:
+    def _find_integrity_problem(self, file_path: str, actual_size: int,
+                                expected_size: int, headers: dict[str, str]) -> str | None:
         """
-        Validate file integrity using multiple validation layers.
+        Return why a finished download is unusable, or None if it looks intact.
 
-        Implements FIVER-inspired validation:
-        1. Size validation (Content-Length vs actual)
-        2. Checksum validation (computed during download)
-        3. Format-specific validation (if libraries available)
+        Checks the size against Content-Length and the file on disk, images by
+        decoding them, and everything against a minimum size.
 
         Args:
             file_path: Path to the downloaded file
             actual_size: Actual bytes downloaded
             expected_size: Expected size from Content-Length header
-            computed_checksum: BLAKE3 or SHA256 checksum computed during download
             headers: HTTP response headers
-            hash_algorithm: Hash algorithm used ("BLAKE3" or "SHA256")
-
-        Returns:
-            FileIntegrityResult indicating validation status
         """
         try:
-            # Layer 1: Size validation
             if expected_size > 0 and actual_size != expected_size:
-                return FileIntegrityResult(
-                    is_valid=False,
-                    error_message=f"Size mismatch: expected {expected_size}, got {actual_size}",
-                    file_size=actual_size,
-                    checksum=computed_checksum
-                )
+                return f"Size mismatch: expected {expected_size}, got {actual_size}"
 
-            # Layer 2: File existence and basic size check
             if not os.path.exists(file_path):
-                return FileIntegrityResult(
-                    is_valid=False,
-                    error_message="Downloaded file does not exist"
-                )
+                return "Downloaded file does not exist"
 
             file_stat_size = os.path.getsize(file_path)
             if file_stat_size != actual_size:
-                return FileIntegrityResult(
-                    is_valid=False,
-                    error_message=f"File size inconsistency: downloaded {actual_size}, on disk {file_stat_size}",
-                    file_size=file_stat_size,
-                    checksum=computed_checksum
-                )
+                return f"File size inconsistency: downloaded {actual_size}, on disk {file_stat_size}"
 
-            # Layer 3: Format-specific validation for images
-            content_type = headers.get('content-type', '').lower()
-            if 'image' in content_type and PIL_AVAILABLE:
-                try:
-                    with Image.open(file_path) as img:
-                        # Try to load the image to verify it's not corrupted
-                        img.verify()
+            if 'image' in headers.get('content-type', '').lower():
+                problem = self._find_image_problem(file_path)
+                if problem:
+                    return problem
 
-                        # Basic sanity checks
-                        if img.size[0] <= 0 or img.size[1] <= 0:
-                            return FileIntegrityResult(
-                                is_valid=False,
-                                error_message="Invalid image dimensions",
-                                file_size=actual_size,
-                                checksum=computed_checksum
-                            )
+            # Avoid empty/truncated files
+            if actual_size < MIN_MEDIA_FILE_SIZE:
+                return f"File too small ({actual_size} bytes), likely corrupted"
 
-                except Exception as e:
-                    return FileIntegrityResult(
-                        is_valid=False,
-                        error_message=f"Image validation failed: {str(e)}",
-                        file_size=actual_size,
-                        checksum=computed_checksum
-                    )
-
-            # Layer 4: Minimum size check (avoid empty/truncated files)
-            if actual_size < MIN_MEDIA_FILE_SIZE:  # Configurable minimum for media files
-                return FileIntegrityResult(
-                    is_valid=False,
-                    error_message=f"File too small ({actual_size} bytes), likely corrupted",
-                    file_size=actual_size,
-                    checksum=computed_checksum
-                )
-
-            # All validations passed
-            return FileIntegrityResult(
-                is_valid=True,
-                file_size=actual_size,
-                checksum=computed_checksum
-            )
+            return None
 
         except Exception as e:
-            return FileIntegrityResult(
-                is_valid=False,
-                error_message=f"Integrity validation error: {str(e)}",
-                file_size=actual_size,
-                checksum=computed_checksum
-            )
+            return f"Integrity validation error: {str(e)}"
+
+    @staticmethod
+    def _find_image_problem(file_path: str) -> str | None:
+        """Return why an image file cannot be decoded, or None if it can."""
+        try:
+            with Image.open(file_path) as img:
+                img.verify()
+                if img.size[0] <= 0 or img.size[1] <= 0:
+                    return "Invalid image dimensions"
+        except Exception as e:
+            return f"Image validation failed: {str(e)}"
+        return None
 
     def close(self):
         """Close the HTTP session."""

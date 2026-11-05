@@ -15,6 +15,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   python-compatibility:
     runs-on: ubuntu-latest
@@ -36,7 +39,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-minimal.txt
+            requirements-dropbox.txt
+            requirements-s3.txt
+            constraints.txt
 
       - name: Install dependencies
         env:
@@ -45,7 +53,12 @@ jobs:
           PIP_ROOT_USER_ACTION: ignore
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # The weekly run takes the latest releases as an early warning; the rest test the pins.
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            pip install -r requirements.txt -r requirements-dropbox.txt -r requirements-s3.txt
+          else
+            pip install -r requirements.txt -r requirements-dropbox.txt -r requirements-s3.txt -c constraints.txt
+          fi
 
       - name: Validate Python environment
         run: |
@@ -60,12 +73,14 @@ jobs:
           python -c "import dropbox; print('Dropbox SDK imported successfully')"
           python -c "import tqdm; print(f'tqdm version: {tqdm.__version__}')"
           python -c "import requests; print(f'Requests version: {requests.__version__}')"
+          # Building a client makes no request, so this checks the imports the S3 provider relies on
+          python -c "import boto3; from boto3.s3.transfer import TransferConfig; boto3.client('s3', endpoint_url='http://127.0.0.1:9', region_name='us-east-1', aws_access_key_id='x', aws_secret_access_key='x'); print(f'boto3 version: {boto3.__version__}')"
 
       - name: Test application modules
         run: |
           # Test that our utility modules can be imported
-          python -c "from utils.file_path_validate import validate_and_set_directory; print('file_path_validate imported')"
-          python -c "from utils.env_config import load_config_and_env; print('env_config imported')"
+          python -c "from utils.path_security import ensure_writable_directory; print('path_security imported')"
+          python -c "from utils.env_config import load_reddit_credentials; print('env_config imported')"
           python -c "from utils.log_utils import load_file_log; print('log_utils imported')"
           python -c "from utils.gdpr_processor import process_gdpr_export; print('gdpr_processor imported')"
 
@@ -95,3 +110,75 @@ jobs:
         run: |
           python -m pip install ruff
           ruff check .
+
+  # The requests fallback path behaves differently, so it gets its own test run.
+  minimal-manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        timeout-minutes: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements-minimal.txt
+            requirements-dropbox.txt
+            constraints.txt
+
+      - name: Install dependencies
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: 1
+          PIP_NO_WARN_SCRIPT_LOCATION: 1
+          PIP_ROOT_USER_ACTION: ignore
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-minimal.txt -r requirements-dropbox.txt -c constraints.txt
+
+      - name: Run test suite
+        run: python -m unittest discover tests
+
+  # Runs on pushes to main and PRs into it, so it does not depend on which path a backup takes.
+  secret-scan:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        timeout-minutes: 2
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog OSS
+        uses: trufflesecurity/trufflehog@ea68ca03c865c5f324e86e849ced20ed3cf9dbbb # v3.99.8
+        with:
+          extra_args: --only-verified
+
+  # Fails when a pin in constraints.txt has a known vulnerability. The pins are exact and
+  # complete, so nothing needs resolving or installing.
+  dependency-audit:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        timeout-minutes: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Audit pinned versions
+        run: |
+          python -m pip install pip-audit
+          pip-audit --disable-pip --no-deps -r constraints.txt

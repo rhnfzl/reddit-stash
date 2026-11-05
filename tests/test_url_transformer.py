@@ -12,7 +12,7 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.url_transformer import URLTransformer, TransformResult
+from utils.media_services.url_transformer import URLTransformer, TransformResult
 
 
 class TestURLTransformer(unittest.TestCase):

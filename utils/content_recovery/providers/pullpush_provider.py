@@ -16,15 +16,27 @@ API Documentation: https://pullpush.io/
 import time
 import requests
 import logging
-from typing import Optional, Dict, Any, Iterable
+from typing import Any
+from collections.abc import Iterable
 from urllib.parse import urlparse
 import re
 
-from ..recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
-from ...rate_limiter import rate_limited, rate_limit_manager
+from utils.content_recovery.providers.archive_session import archive_session
+from utils.content_recovery.recovery_metadata import ArchiveLookupError, RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
+from utils.domain_matching import domain_matches
+from utils.rate_limiter import parse_retry_after, rate_limit_manager
 
 
+PULLPUSH_BASE_URL = 'https://api.pullpush.io'
 PULLPUSH_BATCH_SIZE = 100
+
+
+def _archive_records(payload: Any) -> list:
+    """Return the record list; a 200 without one answered nothing, so it must not read as a miss."""
+    records = payload.get('data') if isinstance(payload, dict) else None
+    if not isinstance(records, list):
+        raise ValueError('unexpected PullPush response shape')
+    return records
 
 
 class PullPushProvider:
@@ -32,21 +44,11 @@ class PullPushProvider:
 
     def __init__(self, timeout: int = 10):
         self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Reddit Stash Content Recovery/1.0 (Personal Archive Tool)',
-            'Accept': 'application/json'
-        })
+        self.session = archive_session()
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.submission_endpoint = f"{PULLPUSH_BASE_URL}/reddit/search/submission"
+        self.comment_endpoint = f"{PULLPUSH_BASE_URL}/reddit/search/comment"
 
-        # PullPush.io API endpoints
-        self.base_url = "https://api.pullpush.io"
-        self.submission_endpoint = f"{self.base_url}/reddit/search/submission"
-        self.comment_endpoint = f"{self.base_url}/reddit/search/comment"
-
-        # Rate limiting handled by @rate_limited decorator
-
-    @rate_limited('pullpush_io', timeout=45)
     def attempt_recovery(self, url: str) -> RecoveryResult:
         """
         Attempt to recover Reddit content from PullPush.io.
@@ -55,8 +57,15 @@ class PullPushProvider:
             url: Original Reddit URL to recover
 
         Returns:
-            RecoveryResult with archived metadata when a matching record exists
+            RecoveryResult with archived metadata when a matching record exists; every
+            failure, including a rate limit wait that ran out, is a result rather than a raise
         """
+        if not rate_limit_manager.acquire('pullpush_io', timeout=45):
+            return RecoveryResult.failure_result(
+                'pullpush_io recovery deferred by rate limiter',
+                RecoverySource.PULLPUSH_IO,
+            )
+
         start_time = time.time()
 
         try:
@@ -88,34 +97,22 @@ class PullPushProvider:
             else:
                 return RecoveryResult.failure_result(
                     f"Content not found in PullPush.io archive (search duration: {duration:.2f}s)",
-                    RecoverySource.PULLPUSH_IO
+                    RecoverySource.PULLPUSH_IO,
+                    confirmed_miss=True,
                 )
 
-        except requests.exceptions.Timeout:
-            duration = time.time() - start_time
-            return RecoveryResult.failure_result(
-                f"PullPush.io request timed out after {duration:.2f}s",
-                RecoverySource.PULLPUSH_IO
-            )
-        except requests.exceptions.RequestException as e:
-            duration = time.time() - start_time
-            return RecoveryResult.failure_result(
-                f"PullPush.io request failed: {str(e)} (duration: {duration:.2f}s)",
-                RecoverySource.PULLPUSH_IO
-            )
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self._logger.debug(f"PullPush.io lookup failed: {e}")
+            return RecoveryResult.failure_from_exception(e, RecoverySource.PULLPUSH_IO, start_time)
         except Exception as e:
-            duration = time.time() - start_time
             self._logger.error(f"Unexpected error in PullPush.io recovery: {e}")
-            return RecoveryResult.failure_result(
-                f"Unexpected error: {str(e)} (duration: {duration:.2f}s)",
-                RecoverySource.PULLPUSH_IO
-            )
+            return RecoveryResult.failure_from_exception(e, RecoverySource.PULLPUSH_IO, start_time)
 
-    def _parse_reddit_url(self, url: str) -> Optional[Dict[str, str]]:
+    def _parse_reddit_url(self, url: str) -> dict[str, str] | None:
         """Parse Reddit URL to extract content ID and type."""
         try:
             parsed = urlparse(url)
-            if not any(domain in parsed.netloc.lower() for domain in ['reddit.com', 'redd.it']):
+            if not any(domain_matches(parsed.hostname, domain) for domain in ('reddit.com', 'redd.it')):
                 return None
 
             path = parsed.path.lower()
@@ -126,7 +123,6 @@ class PullPushProvider:
                 return {
                     'type': 'comment',
                     'id': comment_match.group(1),
-                    'subreddit': self._extract_subreddit(path)
                 }
 
             # Match submission URL patterns
@@ -142,7 +138,6 @@ class PullPushProvider:
                     return {
                         'type': 'submission',
                         'id': match.group(1),
-                        'subreddit': self._extract_subreddit(path)
                     }
 
         except Exception as e:
@@ -150,57 +145,41 @@ class PullPushProvider:
 
         return None
 
-    def _extract_subreddit(self, path: str) -> Optional[str]:
-        """Extract subreddit name from Reddit path."""
-        subreddit_match = re.search(r'/r/([^/]+)', path)
-        return subreddit_match.group(1) if subreddit_match else None
+    def _search_submission(self, submission_id: str) -> dict[str, Any] | None:
+        """Return the archived submission, or None when the archive has no record of it."""
+        response = self.session.get(
+            self.submission_endpoint,
+            params={'ids': submission_id, 'size': 1},
+            timeout=self.timeout
+        )
+        rate_limit_manager.report_response('pullpush_io', response.status_code, parse_retry_after(response))
+        response.raise_for_status()
 
-    def _search_submission(self, submission_id: str) -> Optional[Dict[str, Any]]:
-        """Search for a Reddit submission by ID."""
-        try:
-            params = {
-                'ids': submission_id,
-                'size': 1
-            }
+        records = _archive_records(response.json())
+        if not records:
+            return None
 
-            response = self.session.get(
-                self.submission_endpoint,
-                params=params,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
+        self._logger.debug(f"Found submission {submission_id} in PullPush.io")
+        return {'type': 'submission', 'data': records[0], 'id': submission_id}
 
-            data = response.json()
-            if data.get('data') and len(data['data']) > 0:
-                submission = data['data'][0]
-                self._logger.debug(f"Found submission {submission_id} in PullPush.io")
-                return {
-                    'type': 'submission',
-                    'data': submission,
-                    'id': submission_id
-                }
+    def fetch_posts(self, ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Return archived posts by ID, or raise ArchiveLookupError carrying what was found."""
+        return self._fetch_by_ids(self.submission_endpoint, ids)
 
-        except (requests.exceptions.RequestException, ValueError) as e:
-            self._logger.debug(f"Submission search failed: {e}")
+    def fetch_comments(self, ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Return archived comments by ID, or raise ArchiveLookupError carrying what was found."""
+        return self._fetch_by_ids(self.comment_endpoint, ids)
 
-        return None
-
-    def fetch_metadata_by_ids(self, content_type: str, ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
-        """Fetch a bounded batch of archived post or comment records by ID."""
-        endpoint = {
-            'posts': self.submission_endpoint,
-            'comments': self.comment_endpoint,
-        }.get(content_type)
-        if not endpoint:
-            raise ValueError(f'Unsupported PullPush content type: {content_type}')
-
+    def _fetch_by_ids(self, endpoint: str, ids: Iterable[str]) -> dict[str, dict[str, Any]]:
         unique_ids = list(dict.fromkeys(str(item_id) for item_id in ids if item_id))
         records = {}
+        failure = None
 
         for start in range(0, len(unique_ids), PULLPUSH_BATCH_SIZE):
             batch = unique_ids[start:start + PULLPUSH_BATCH_SIZE]
             if not rate_limit_manager.acquire('pullpush_io', timeout=self.timeout):
                 self._logger.warning('PullPush metadata lookup deferred by the rate limiter')
+                failure = 'deferred by the rate limiter'
                 break
 
             try:
@@ -209,55 +188,42 @@ class PullPushProvider:
                     params={'ids': ','.join(batch), 'size': len(batch)},
                     timeout=self.timeout,
                 )
-                rate_limit_manager.report_response('pullpush_io', response.status_code)
+                rate_limit_manager.report_response('pullpush_io', response.status_code, parse_retry_after(response))
                 response.raise_for_status()
-                payload = response.json()
+                data = _archive_records(response.json())
             except (requests.exceptions.RequestException, ValueError) as error:
                 self._logger.warning(f'PullPush metadata lookup failed: {error}')
-                continue
-
-            data = payload.get('data', []) if isinstance(payload, dict) else []
-            if not isinstance(data, list):
-                self._logger.warning('PullPush returned an unexpected response shape')
+                failure = str(error)
                 continue
 
             for record in data:
                 if isinstance(record, dict) and record.get('id'):
                     records[str(record['id'])] = record
+                else:
+                    failure = 'unusable record in response'
 
+        if failure:
+            raise ArchiveLookupError(f'PullPush lookup: {failure}', records)
         return records
 
-    def _search_comment(self, comment_id: str) -> Optional[Dict[str, Any]]:
-        """Search for a Reddit comment by ID."""
-        try:
-            params = {
-                'ids': comment_id,
-                'size': 1
-            }
+    def _search_comment(self, comment_id: str) -> dict[str, Any] | None:
+        """Return the archived comment, or None when the archive has no record of it."""
+        response = self.session.get(
+            self.comment_endpoint,
+            params={'ids': comment_id, 'size': 1},
+            timeout=self.timeout
+        )
+        rate_limit_manager.report_response('pullpush_io', response.status_code, parse_retry_after(response))
+        response.raise_for_status()
 
-            response = self.session.get(
-                self.comment_endpoint,
-                params=params,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
+        records = _archive_records(response.json())
+        if not records:
+            return None
 
-            data = response.json()
-            if data.get('data') and len(data['data']) > 0:
-                comment = data['data'][0]
-                self._logger.debug(f"Found comment {comment_id} in PullPush.io")
-                return {
-                    'type': 'comment',
-                    'data': comment,
-                    'id': comment_id
-                }
+        self._logger.debug(f"Found comment {comment_id} in PullPush.io")
+        return {'type': 'comment', 'data': records[0], 'id': comment_id}
 
-        except (requests.exceptions.RequestException, ValueError) as e:
-            self._logger.debug(f"Comment search failed: {e}")
-
-        return None
-
-    def _create_success_result(self, original_url: str, pullpush_data: Dict[str, Any],
+    def _create_success_result(self, original_url: str, pullpush_data: dict[str, Any],
                              duration: float) -> RecoveryResult:
         """Create a metadata-only recovery result from archived Reddit text."""
 
@@ -286,15 +252,3 @@ class PullPushProvider:
         )
 
         return RecoveryResult.success_result(None, metadata)
-
-    def get_provider_info(self) -> Dict[str, Any]:
-        """Get information about this recovery provider."""
-        return {
-            'name': 'PullPush.io',
-            'source': RecoverySource.PULLPUSH_IO,
-            'description': 'PullPush.io API - successor to Pushshift for Reddit data',
-            'rate_limits': '15 req/min soft, 30 req/min hard, 1000 req/hour',
-            'ethics': 'Controversial - facing legal challenges from Reddit',
-            'reliability': 'Best effort archive metadata; availability varies',
-            'coverage': 'Reddit content only, comprehensive historical data'
-        }

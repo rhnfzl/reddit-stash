@@ -11,16 +11,18 @@ import os
 import time
 import threading
 from unittest.mock import Mock, patch
-from typing import Optional
 
 # Import system components
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from utils.media_download_manager import MediaDownloadManager
+from utils.media_services.download_manager import MediaDownloadManager
+from utils.media_services.retry_queue import SQLiteRetryQueue
 from utils.content_recovery import ContentRecoveryService
+from utils.content_recovery.recovery_config import RecoveryConfig
 from utils.content_recovery.recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
-from utils.service_abstractions import DownloadResult, DownloadStatus
+from utils.media_services.media_types import DownloadResult, DownloadStatus
+from tests.recovery_helpers import recovery_service
 
 
 class MockDownloader:
@@ -67,7 +69,7 @@ class MockRecoveryService:
     def is_enabled(self) -> bool:
         return self.is_enabled_flag
 
-    def attempt_recovery(self, url: str, original_failure_reason: Optional[str] = None) -> RecoveryResult:
+    def attempt_recovery(self, url: str, original_failure_reason: str | None = None) -> RecoveryResult:
         """Mock recovery that returns predefined URLs."""
         self.attempt_count += 1
 
@@ -95,8 +97,17 @@ class TestRecoveryIntegration(unittest.TestCase):
         # Create temporary directory for downloads
         self.temp_dir = tempfile.mkdtemp()
 
-        # Create mock media download manager (we'll patch its internals)
-        self.download_manager = MediaDownloadManager()
+        # Real URL validator, but no real DNS: the hosts in these tests are never contacted
+        dns_lookup = patch('utils.media_services.url_security.socket.getaddrinfo',
+                           return_value=[(2, 1, 6, '', ('93.184.216.34', 0))])
+        dns_lookup.start()
+        self.addCleanup(dns_lookup.stop)
+
+        # Real manager, kept away from the default databases in a real checkout
+        retry_queue = SQLiteRetryQueue(os.path.join(self.temp_dir, 'retry_queue.db'))
+        with patch('utils.media_services.download_manager.get_retry_queue', return_value=retry_queue), \
+                patch('utils.content_recovery.recovery_service.RecoveryCacheManager'):
+            self.download_manager = MediaDownloadManager()
 
     def tearDown(self):
         # Clean up temporary directory
@@ -143,7 +154,7 @@ class TestRecoveryIntegration(unittest.TestCase):
                 print(f"  Expected recovery URL: {recovered_url}")
 
                 # Attempt download
-                result_path = self.download_manager.download_media(original_url, self.temp_dir)
+                result_path = self.download_manager.download_media(original_url, self.temp_dir).local_path
 
                 if result_path:
                     print(f"    ✅ SUCCESS: Downloaded to {result_path}")
@@ -164,13 +175,13 @@ class TestRecoveryIntegration(unittest.TestCase):
 
         with patch.object(self.download_manager, '_recovery_service', recovery_service):
             with patch.object(self.download_manager, '_get_service_for_url') as mock_get_service:
-                with patch('utils.media_download_manager.get_url_validator') as mock_get_validator:
+                with patch('utils.media_services.download_manager.get_url_validator') as mock_get_validator:
                     mock_validator = Mock()
                     mock_validator.validate_url.return_value = Mock(is_valid=True, cleaned_url=None)
                     mock_get_validator.return_value = mock_validator
                     mock_get_service.side_effect = lambda url: ('generic', downloader_for(url))
 
-                    result_path = self.download_manager.download_media(original_url, self.temp_dir)
+                    result_path = self.download_manager.download_media(original_url, self.temp_dir).local_path
 
         self.assertEqual(result_path, os.path.join(self.temp_dir, "downloaded_file.jpg"))
         self.assertEqual(recovery_service.attempt_count, 1)
@@ -185,7 +196,7 @@ class TestRecoveryIntegration(unittest.TestCase):
 
         with patch.object(self.download_manager, '_recovery_service', recovery_service):
             with patch.object(self.download_manager, '_get_service_for_url', return_value=('generic', original_downloader)) as mock_get_service:
-                with patch('utils.media_download_manager.get_url_validator') as mock_get_validator:
+                with patch('utils.media_services.download_manager.get_url_validator') as mock_get_validator:
                     mock_validator = Mock()
                     mock_validator.validate_url.return_value = Mock(
                         is_valid=False,
@@ -193,7 +204,7 @@ class TestRecoveryIntegration(unittest.TestCase):
                     )
                     mock_get_validator.return_value = mock_validator
 
-                    result_path = self.download_manager.download_media(original_url, self.temp_dir)
+                    result_path = self.download_manager.download_media(original_url, self.temp_dir).local_path
 
         self.assertIsNone(result_path)
         mock_validator.validate_url.assert_called_once_with(recovered_url)
@@ -218,7 +229,7 @@ class TestRecoveryIntegration(unittest.TestCase):
                 print(f"  Testing download of: {original_url}")
 
                 # Attempt download
-                result_path = self.download_manager.download_media(original_url, self.temp_dir)
+                result_path = self.download_manager.download_media(original_url, self.temp_dir).local_path
 
                 print(f"    Result: {result_path}")
                 self.assertIsNone(result_path)
@@ -253,7 +264,7 @@ class TestRecoveryIntegration(unittest.TestCase):
                 print(f"  Testing download of: {original_url}")
 
                 # Attempt download
-                result_path = self.download_manager.download_media(original_url, self.temp_dir)
+                result_path = self.download_manager.download_media(original_url, self.temp_dir).local_path
 
                 print(f"    Result: {result_path}")
                 self.assertIsNone(result_path)
@@ -283,7 +294,7 @@ class TestRecoveryIntegration(unittest.TestCase):
                 print(f"  Testing download of: {original_url}")
 
                 # Attempt download (should not crash despite recovery exception)
-                result_path = self.download_manager.download_media(original_url, self.temp_dir)
+                result_path = self.download_manager.download_media(original_url, self.temp_dir).local_path
 
                 print(f"    Result: {result_path}")
                 self.assertIsNone(result_path)
@@ -314,11 +325,11 @@ class TestRecoveryIntegration(unittest.TestCase):
                 print(f"  Testing multiple downloads of: {original_url}")
 
                 # First attempt
-                result1 = self.download_manager.download_media(original_url, self.temp_dir)
+                result1 = self.download_manager.download_media(original_url, self.temp_dir).local_path
                 print(f"    First attempt result: {result1}")
 
                 # Second attempt (should be blacklisted)
-                result2 = self.download_manager.download_media(original_url, self.temp_dir)
+                result2 = self.download_manager.download_media(original_url, self.temp_dir).local_path
                 print(f"    Second attempt result: {result2}")
 
                 # Both should fail
@@ -343,18 +354,8 @@ class TestRecoveryIntegration(unittest.TestCase):
         temp_cache.close()
 
         try:
-            mock_config = Mock()
-            mock_config.get_recovery_config.return_value = {
-                'use_wayback_machine': True,
-                'use_pushshift_api': False,
-                'use_reddit_previews': False,
-                'use_reveddit_api': False,
-                'timeout_seconds': 5,
-                'cache_duration_hours': 24
-            }
-
             recovery_service = ContentRecoveryService(
-                config=mock_config,
+                config=RecoveryConfig(use_wayback_machine=True, use_pullpush=False, timeout_seconds=5),
                 cache_path=temp_cache.name
             )
 
@@ -403,7 +404,7 @@ class TestRecoveryCacheManagerRegistry(unittest.TestCase):
     def test_cache_manager_is_shared_for_concurrent_same_path_requests(self):
         from utils import sqlite_manager
 
-        sqlite_manager._cache_managers.clear()
+        sqlite_manager._managers.clear()
         start = threading.Barrier(4)
         creation_lock = threading.Lock()
         creation_count = 0
@@ -421,7 +422,7 @@ class TestRecoveryCacheManagerRegistry(unittest.TestCase):
 
         def get_manager():
             start.wait()
-            results.append(sqlite_manager.get_cache_manager('concurrent-cache.db'))
+            results.append(sqlite_manager.get_sqlite_manager('concurrent-cache.db'))
 
         try:
             with patch('utils.sqlite_manager.ThreadLocalSQLiteManager', side_effect=create_manager):
@@ -434,21 +435,23 @@ class TestRecoveryCacheManagerRegistry(unittest.TestCase):
             self.assertEqual(creation_count, 1)
             self.assertEqual(len({id(manager) for manager in results}), 1)
         finally:
-            sqlite_manager._cache_managers.clear()
+            sqlite_manager._managers.clear()
 
     def test_cache_managers_keep_different_paths_isolated(self):
         from utils import sqlite_manager
 
-        sqlite_manager._cache_managers.clear()
+        sqlite_manager._managers.clear()
         with tempfile.TemporaryDirectory() as temp_dir:
             first_path = os.path.join(temp_dir, 'first.db')
             second_path = os.path.join(temp_dir, 'second.db')
-            first = sqlite_manager.get_cache_manager(first_path)
-            second = sqlite_manager.get_cache_manager(second_path)
+            first = sqlite_manager.get_sqlite_manager(first_path)
+            second = sqlite_manager.get_sqlite_manager(second_path)
 
             try:
-                first.execute_query('CREATE TABLE entries (value TEXT)')
-                first.execute_query("INSERT INTO entries VALUES ('first')")
+                with first.get_connection() as connection:
+                    connection.execute('CREATE TABLE entries (value TEXT)')
+                    connection.execute("INSERT INTO entries VALUES ('first')")
+                    connection.commit()
                 with second.get_connection() as connection:
                     table = connection.execute(
                         "SELECT name FROM sqlite_master WHERE name = 'entries'"
@@ -459,59 +462,29 @@ class TestRecoveryCacheManagerRegistry(unittest.TestCase):
             finally:
                 first.close_connection()
                 second.close_connection()
-                sqlite_manager._cache_managers.clear()
+                sqlite_manager._managers.clear()
 
 
 class TestRecoveryProviderIsolation(unittest.TestCase):
     """Recovery tests that never contact external archives."""
 
-    def test_sequential_recovery_uses_injected_provider(self):
-        """Sequential recovery records an injected provider result."""
-        print("\nTesting injected recovery provider...")
-
-        # Create recovery service with short timeout
-        mock_config = Mock()
-        mock_config.get_recovery_config.return_value = {
-            'use_wayback_machine': True,
-            'use_arctic_shift': False,
-            'use_pushshift_api': False,
-            'use_reddit_previews': False,
-            'use_reveddit_api': False,
-            'timeout_seconds': 2,  # Very short timeout
-            'cache_duration_hours': 24
-        }
-
-        recovery_service = ContentRecoveryService(config=mock_config)
+    def test_recovery_uses_injected_provider(self):
+        """A single enabled provider's result is recorded."""
         provider = Mock()
         provider.attempt_recovery.return_value = RecoveryResult.failure_result(
             "Archive unavailable", RecoverySource.WAYBACK_MACHINE
         )
-        recovery_service.providers = {RecoverySource.WAYBACK_MACHINE: provider}
-
+        service = recovery_service({RecoverySource.WAYBACK_MACHINE: provider})
         test_url = "https://example.com/missing-image.jpg"
 
-        result = recovery_service._attempt_sequential_recovery(test_url, None)
+        result = service.attempt_recovery(test_url)
 
         self.assertFalse(result.success)
         self.assertEqual(result.attempted_sources, frozenset({RecoverySource.WAYBACK_MACHINE}))
         provider.attempt_recovery.assert_called_once_with(test_url)
 
-    def test_parallel_and_sequential_recovery_use_injected_providers(self):
-        """Both orchestration modes report deterministic provider failures."""
-        print("\nTesting injected providers in both recovery modes...")
-
-        mock_config = Mock()
-        mock_config.get_recovery_config.return_value = {
-            'use_wayback_machine': True,
-            'use_arctic_shift': False,
-            'use_pushshift_api': False,
-            'use_reddit_previews': False,
-            'use_reveddit_api': False,
-            'timeout_seconds': 10,
-            'cache_duration_hours': 24
-        }
-
-        recovery_service = ContentRecoveryService(config=mock_config)
+    def test_recovery_asks_every_injected_provider(self):
+        """Every provider is asked and its failure reported."""
         providers = {}
         for source in (RecoverySource.WAYBACK_MACHINE, RecoverySource.ARCTIC_SHIFT):
             provider = Mock()
@@ -519,19 +492,15 @@ class TestRecoveryProviderIsolation(unittest.TestCase):
                 "Archive unavailable", source
             )
             providers[source] = provider
-        recovery_service.providers = providers
+        service = recovery_service(providers)
         test_url = "https://example.com/missing-image.jpg"
 
-        result_sequential = recovery_service._attempt_sequential_recovery(test_url, None)
-        result_parallel = recovery_service._attempt_parallel_recovery(test_url, None)
+        result = service.attempt_recovery(test_url)
 
-        expected_sources = frozenset(providers)
-        self.assertFalse(result_sequential.success)
-        self.assertFalse(result_parallel.success)
-        self.assertEqual(result_sequential.attempted_sources, expected_sources)
-        self.assertEqual(result_parallel.attempted_sources, expected_sources)
+        self.assertFalse(result.success)
+        self.assertEqual(result.attempted_sources, frozenset(providers))
         for provider in providers.values():
-            self.assertEqual(provider.attempt_recovery.call_count, 2)
+            provider.attempt_recovery.assert_called_once_with(test_url)
 
 
 if __name__ == '__main__':

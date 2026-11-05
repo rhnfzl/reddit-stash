@@ -27,6 +27,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 # Repository variables (Settings > Secrets and variables > Actions > Variables):
 # - RUN_MODE: github (default) runs on this schedule; homelab or failover means another
 #   machine is the main runner, so the schedule does nothing here (failover still allows
@@ -38,7 +41,18 @@ jobs:
     uses: ./.github/workflows/_cycle.yml
     with:
       runner: github-schedule
-    secrets: inherit
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+      S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
+      REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+      REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+      REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+      REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+      IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
+      HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
 
   run-script:
     if: vars.RUN_MODE != 'homelab' && vars.RUN_MODE != 'failover' && vars.STORAGE_COORDINATION != 'true'
@@ -49,12 +63,6 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v7
       timeout-minutes: 1
-
-    - name: TruffleHog OSS
-      if: github.event_name != 'schedule'
-      uses: trufflesecurity/trufflehog@main
-      with:
-        extra_args: --only-verified
 
     # Verify all entry-point scripts exist before spending time on setup
     - name: Verify critical scripts exist
@@ -88,7 +96,12 @@ jobs:
       with:
         python-version: '3.12'
         cache: 'pip'
-        cache-dependency-path: requirements.txt
+        cache-dependency-path: |
+          requirements.txt
+          requirements-minimal.txt
+          requirements-dropbox.txt
+          requirements-s3.txt
+          constraints.txt
 
     # Install dependencies with pip
     - name: Install dependencies
@@ -100,7 +113,7 @@ jobs:
         SEMI_ANNUAL_REFRESH: ${{ steps.cache-key.outputs.date }}
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install -r requirements.txt -c constraints.txt
 
     # --- Determine storage provider ---
     - name: Detect storage provider
@@ -116,6 +129,10 @@ jobs:
         echo "Using storage provider: $(cat $GITHUB_OUTPUT | grep provider | cut -d= -f2)"
 
     # --- Storage: Download (Dropbox) ---
+    - name: Install Dropbox dependencies
+      if: steps.storage.outputs.provider != 's3'
+      run: pip install -r requirements-dropbox.txt -c constraints.txt
+
     - name: Download from Dropbox
       if: steps.storage.outputs.provider != 's3'
       timeout-minutes: 2
@@ -129,7 +146,7 @@ jobs:
     # --- Storage: Download (S3) ---
     - name: Install S3 dependencies
       if: steps.storage.outputs.provider == 's3'
-      run: pip install -r requirements-s3.txt
+      run: pip install -r requirements-s3.txt -c constraints.txt
 
     - name: Download from S3
       if: steps.storage.outputs.provider == 's3'

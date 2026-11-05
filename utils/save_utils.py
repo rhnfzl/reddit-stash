@@ -1,131 +1,111 @@
 import os
 import json
 import logging
-import requests
-import threading
-import urllib3
+import re
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from urllib.parse import urlparse
+from datetime import datetime, timezone
+from typing import Any, TextIO
+from collections.abc import Iterable
+from urllib.parse import parse_qs, urlparse
 from praw.models import Submission, Comment
-from utils.time_utilities import lazy_load_comments
-from utils.env_config import get_ignore_tls_errors
-from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
-from utils.feature_flags import get_media_config
+from utils.praw_helpers import lazy_load_comments
+from utils.feature_flags import MediaFeatureConfig, get_media_config
+from utils.media_services.download_manager import download_media_into
+from utils.media_services.media_types import DownloadResult, GalleryImage
 from utils.media_services.reddit_media import RedditMediaDownloader
+from utils.constants import COMMENT_IMAGE_EXTENSIONS, IMAGE_URL_EXTENSIONS
 from utils.domain_matching import domain_matches
 
 logger = logging.getLogger(__name__)
 
-# Thread-local storage for media size tracking (replaces function attribute hack)
-_media_size_local = threading.local()
+# How media lines written by this module start, so a later retry can repoint them.
+_MEDIA_LINE_PREFIXES = ("![", "**Video:** [")
 
-def format_date(timestamp):
-    """Format a UTC timestamp into a human-readable date."""
-    return datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-
-
-def _write_yaml_frontmatter(file, fields):
-    """Write a YAML header with JSON-encoded scalar values."""
-    file.write('---\n')
-    for key, value in fields.items():
-        file.write(f'{key}: {json.dumps(value, ensure_ascii=False)}\n')
-    file.write('---\n\n')
+_YOUTUBE_ID = re.compile(r'[A-Za-z0-9_-]+')
+_YOUTUBE_ID_PATHS = ('shorts', 'embed', 'live', 'v')  # youtube.com/<these>/<id>
 
 
-def _recovered_value(data, key, fallback):
-    """Return archived values while replacing explicit nulls with export defaults."""
-    value = data.get(key)
-    return fallback if value is None else value
+def relink_media_line(url: str, local_path: str) -> bool:
+    """Point the owning post's media line at the now-downloaded file.
 
-def extract_video_id(url):
-    """Extract the video ID from a YouTube URL."""
-    if "youtube.com" in url:
-        return url.split("v=")[-1]
-    elif "youtu.be" in url:
-        return url.split("/")[-1]
-    return None
+    Returns whether a line now points at the file, so the retry pass can report
+    recovered media whose markdown keeps the remote link.
 
-def download_image(image_url, save_directory, submission_id, ignore_tls_errors=None):
-    """Download an image from the given URL and save it locally using the sophisticated media download system.
-
-    Returns:
-        tuple: (file_path, file_size) if successful, (None, 0) if failed
+    Only the markdown named after the media's item id is touched (media file
+    "<id>.jpg" or "<id>_<gallery_item>.jpg" belongs to "<CATEGORY>_<id>.md"), and
+    only lines this module writes for media, so quoted text keeps its links.
+    shortcut: transformed URLs (e.g. v.redd.it DASH), images in a parent comment
+    and posts cleared by an earlier --cycle do not match and keep the remote link;
+    the media file is still saved next to the post. Upgrade by storing the owning
+    markdown in the queue metadata and fetching it when it is not local.
     """
+    directory = os.path.dirname(local_path)
+    item_id = os.path.splitext(os.path.basename(local_path))[0].split("_")[0]
+    remote_link = f"]({url})"
     try:
-        # Import the new media download manager
-        from .media_download_manager import download_media_file
-
-        # Use the new media download system which includes:
-        # - Proper Imgur API integration with rate limiting
-        # - Reddit media handling (i.redd.it, v.redd.it)
-        # - Circuit breaker protection and retry logic
-        # - Service-specific error isolation
-        result_path = download_media_file(image_url, save_directory, submission_id)
-
-        if result_path:
-            # Get file size for storage tracking
-            try:
-                file_size = os.path.getsize(result_path)
-                return result_path, file_size
-            except OSError:
-                return result_path, 0
-        else:
-            # No fallback - respect rate limiting and service protection
-            return None, 0
-
-    except Exception as e:
-        logger.error(f"Failed to download image from {image_url}: {e}")
-        # No fallback - respect rate limiting and service protection
-        return None, 0
-
-
-def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
-    """Fallback to the original download method for backward compatibility.
-
-    Returns:
-        tuple: (file_path, file_size) if successful, (None, 0) if failed
-    """
-    try:
-        # Load ignore_tls_errors setting if not provided
-        if ignore_tls_errors is None:
-            ignore_tls_errors = get_ignore_tls_errors()
-
-        # Configure request parameters
-        request_kwargs = {}
-        if ignore_tls_errors:
-            # Disable SSL warnings if ignoring TLS errors
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            request_kwargs['verify'] = False
-
-        response = requests.get(image_url, **request_kwargs)
-        response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
-
-        # Determine the image extension from the URL
-        extension = os.path.splitext(image_url)[1]
-        if extension.lower() not in ['.jpg', '.jpeg', '.png', '.gif']:
-            extension = '.jpg'  # Default to .jpg if the extension is unusual
-
-        # Save the image with a unique name
-        image_filename = f"{submission_id}{extension}"
-        image_path = os.path.join(save_directory, image_filename)
-
-        with open(image_path, 'wb') as f:
-            f.write(response.content)
-
-        # Get file size for storage tracking
+        names = [n for n in os.listdir(directory) if n.endswith(f"_{item_id}.md")]
+    except OSError:
+        return False
+    linked = False
+    for name in names:
+        md_path = os.path.join(directory, name)
         try:
-            file_size = os.path.getsize(image_path)
-            return image_path, file_size
-        except OSError:
-            return image_path, 0
+            with open(md_path, encoding="utf-8") as f:
+                lines = f.readlines()
+            changed = False
+            for i, line in enumerate(lines):
+                if remote_link in line and line.lstrip("> ").startswith(_MEDIA_LINE_PREFIXES):
+                    lines[i] = line.replace(remote_link, f"]({local_path})")
+                    changed = True
+            if changed:
+                # Write a sibling temp file and swap it in, so a failed write never empties the post.
+                fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".md.tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+                    shutil.copymode(md_path, tmp_path)  # mkstemp creates 0600
+                    os.replace(tmp_path, md_path)
+                    linked = True
+                except BaseException:
+                    os.unlink(tmp_path)
+                    raise
+        except OSError as e:
+            logger.warning(f"Could not relink {md_path}: {e}")
+    return linked
 
-    except Exception as e:
-        logger.error(f"Fallback download failed for {image_url}: {e}")
-        return None, 0
+
+def format_date(timestamp: float) -> str:
+    """Format a UTC timestamp into a human-readable date."""
+    return datetime.fromtimestamp(timestamp, timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
 
-def _is_image_url(url):
+def yaml_frontmatter(fields: dict[str, Any]) -> str:
+    """Render a YAML header with JSON-encoded scalar values."""
+    lines = ''.join(f'{key}: {json.dumps(value, ensure_ascii=False)}\n' for key, value in fields.items())
+    return f'---\n{lines}---\n\n'
+
+
+def extract_video_id(url: str | None) -> str | None:
+    """Return the video ID of a YouTube URL, or None when it names no video."""
+    try:
+        parsed = urlparse(url or '')
+    except ValueError:
+        return None
+    segments = [segment for segment in parsed.path.split('/') if segment]
+    video_id = None
+    if domain_matches(parsed.hostname, 'youtu.be'):
+        video_id = segments[0] if segments else None
+    elif domain_matches(parsed.hostname, 'youtube.com'):
+        if len(segments) > 1 and segments[0] in _YOUTUBE_ID_PATHS:
+            video_id = segments[1]
+        else:
+            video_id = parse_qs(parsed.query).get('v', [None])[0]
+    return video_id if video_id and _YOUTUBE_ID.fullmatch(video_id) else None
+
+
+def _is_image_url(url: str | None) -> bool:
     """Check if a URL points to a downloadable image."""
     if not url:
         return False
@@ -134,38 +114,27 @@ def _is_image_url(url):
         domain = parsed.netloc.lower()
         path = parsed.path.lower()
 
-        # Direct image extensions (including .webp)
-        image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff')
-        if path.endswith(image_extensions):
-            return True
-        # Check extension before query params
-        path_no_query = url.split('?')[0].lower()
-        if any(path_no_query.endswith(ext) for ext in image_extensions):
+        if path.endswith(IMAGE_URL_EXTENSIONS):
             return True
 
         # Known image hosting domains (even without extension)
         image_domains = ['i.redd.it', 'i.imgur.com', 'preview.redd.it', 'external-preview.redd.it']
-        if any(domain_matches(domain, image_domain) for image_domain in image_domains):
-            return True
-
-        return False
-    except Exception:
+        return any(domain_matches(domain, image_domain) for image_domain in image_domains)
+    except ValueError:
         return False
 
 
-def _is_video_url(url):
+def _is_video_url(url: str | None) -> bool:
     """Check if a URL points to a Reddit video."""
     if not url:
         return False
     try:
-        parsed = urlparse(url)
-        domain = parsed.netloc.lower()
-        return 'v.redd.it' in domain
-    except Exception:
+        return domain_matches(urlparse(url).hostname, 'v.redd.it')
+    except ValueError:
         return False
 
 
-def _get_video_download_url(submission):
+def _get_video_download_url(submission: Submission) -> str:
     """Extract the actual video stream URL from a PRAW submission.
 
     Reddit stores the short redirect URL in submission.url (e.g., https://v.redd.it/abc123)
@@ -182,404 +151,302 @@ def _get_video_download_url(submission):
                 if fallback_url:
                     logger.debug(f"Found fallback_url via submission.{media_attr} for {submission.id}")
                     return fallback_url
-        logger.info(f"No media/secure_media metadata for video post {submission.id}, constructing DASH URL")
+        logger.debug(f"No media/secure_media metadata for video post {submission.id}, constructing DASH URL")
     except Exception as e:
         logger.warning(f"Error extracting fallback_url for {submission.id}: {e}")
 
     # Construct DASH URL from short v.redd.it URL as last resort
-    try:
-        parsed = urlparse(submission.url)
-        if 'v.redd.it' in parsed.netloc:
-            video_id = parsed.path.strip('/')
-            if video_id:
-                dash_url = f"https://v.redd.it/{video_id}/DASH_720.mp4"
-                logger.info(f"Using constructed DASH URL: {dash_url}")
-                return dash_url
-    except Exception:
-        pass
+    parsed = urlparse(submission.url)
+    if domain_matches(parsed.hostname, 'v.redd.it'):
+        video_id = parsed.path.strip('/')
+        if video_id:
+            dash_url = f"https://v.redd.it/{video_id}/DASH_720.mp4"
+            logger.debug(f"Using constructed DASH URL: {dash_url}")
+            return dash_url
 
     return submission.url
 
 
-def _track_media_size(size):
-    """Track accumulated media download sizes per-thread."""
-    if not hasattr(_media_size_local, 'size'):
-        _media_size_local.size = 0
-    _media_size_local.size += size
+def _download_gallery(gallery_images: list[GalleryImage], submission: Submission, save_dir: str,
+                      max_workers: int, context_mode: bool) -> dict[int, DownloadResult]:
+    """Download gallery images and return each result by 1-based image number."""
+    def _download_gallery_item(image: GalleryImage) -> DownloadResult:
+        return download_media_into(image.url, save_dir, f"{submission.id}_{image.gallery_id}")
+
+    results = {}
+    if context_mode:
+        # In context mode, download sequentially and stop on first failure
+        for idx, image in enumerate(gallery_images, 1):
+            results[idx] = _download_gallery_item(image)
+            if not results[idx].local_path:
+                logger.info(f"Context mode: gallery image {idx} failed, skipping rest")
+                break
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_download_gallery_item, image): idx
+                for idx, image in enumerate(gallery_images, 1)
+            }
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+    return results
 
 
-def _reset_media_tracker():
-    """Reset the per-thread media size tracker to zero."""
-    _media_size_local.size = 0
+def _save_gallery(submission: Submission, f: TextIO, media_config: MediaFeatureConfig, save_dir: str,
+                  context_mode: bool) -> int:
+    """Write a gallery post, with downloaded images where possible and URL links otherwise; returns media bytes."""
+    gallery_images = RedditMediaDownloader.extract_media_urls_from_submission(submission)
 
+    if not gallery_images:
+        f.write(f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n")
+        return 0
 
-def _get_media_size():
-    """Get the accumulated media size for the current thread."""
-    return getattr(_media_size_local, 'size', 0)
+    f.write(f"**Gallery ({len(gallery_images)} images)**\n\n")
+    max_workers = media_config.max_concurrent_downloads()
+    results = _download_gallery(gallery_images, submission, save_dir, max_workers, context_mode)
 
-
-def _save_submission_media(submission, f, is_recovered, media_config, save_dir, ignore_tls_errors, context_mode):
-    """Handle media detection and download for a submission's link post.
-
-    Extracted to allow context_mode wrapping with try-except in save_submission().
-    """
-    # --- 1. Gallery posts ---
-    if (not is_recovered
-            and hasattr(submission, 'is_gallery')
-            and submission.is_gallery
-            and media_config.is_albums_enabled()):
-
-        media_urls = RedditMediaDownloader.extract_media_urls_from_submission(submission)
-        gallery_images = [m for m in media_urls if m.get('source') == 'reddit_gallery']
-
-        if gallery_images:
-            f.write(f"**Gallery ({len(gallery_images)} images)**\n\n")
-            max_workers = media_config.get_media_config().get('max_concurrent_downloads', 3)
-
-            def _download_gallery_item(args):
-                idx, info = args
-                gid = info.get('gallery_id', f'gallery_{idx}')
-                fid = f"{submission.id}_{gid}"
-                return idx, download_image(info['url'], save_dir, fid, ignore_tls_errors)
-
-            results = {}
-            if context_mode:
-                # In context mode, download sequentially and stop on first failure
-                for i, m in enumerate(gallery_images, 1):
-                    idx, (path, size) = _download_gallery_item((i, m))
-                    results[idx] = (path, size)
-                    if not path:
-                        logger.info(f"Context mode: gallery image {idx} failed, skipping rest")
-                        break
-            else:
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    futures = {
-                        pool.submit(_download_gallery_item, (i, m)): i
-                        for i, m in enumerate(gallery_images, 1)
-                    }
-                    for future in as_completed(futures):
-                        idx, (path, size) = future.result()
-                        results[idx] = (path, size)
-
-            for idx in sorted(results):
-                path, size = results[idx]
-                gallery_url = gallery_images[idx - 1]['url']
-                if path:
-                    f.write(f"![Gallery Image {idx}]({path})\n")
-                    _track_media_size(size)
-                else:
-                    f.write(f"![Gallery Image {idx}]({gallery_url})\n")
-                f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")
-
-            # Write remaining undownloaded images as URL links
-            for idx in range(len(results) + 1, len(gallery_images) + 1):
-                gallery_url = gallery_images[idx - 1]['url']
-                f.write(f"![Gallery Image {idx}]({gallery_url})\n")
-                f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")
-
-            f.write(f"**Original Gallery URL:** [Link](https://reddit.com{submission.permalink})\n")
+    media_size = 0
+    # Images context mode never reached have no result, so they get a URL link
+    for idx, image in enumerate(gallery_images, 1):
+        result = results.get(idx)
+        if result and result.local_path:
+            f.write(f"![Gallery Image {idx}]({result.local_path})\n")
+            media_size += result.bytes_downloaded
         else:
-            f.write(f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n")
+            f.write(f"![Gallery Image {idx}]({image.url})\n")
+        f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")
 
-    # --- 2. Reddit video (v.redd.it) ---
-    elif _is_video_url(submission.url):
-        if media_config.is_videos_enabled():
-            video_url = _get_video_download_url(submission)
-            video_path, video_size = download_image(
-                video_url, save_dir, submission.id, ignore_tls_errors
-            )
-            if video_path:
-                f.write(f"**Video:** [{os.path.basename(video_path)}]({video_path})\n")
-                f.write(f"**Original Video URL:** [Link]({submission.url})\n")
-                _track_media_size(video_size)
-            else:
-                f.write(f"**Video:** [Link]({submission.url})\n")
-        else:
-            f.write(f"**Video (download disabled):** [Link]({submission.url})\n")
+    f.write(f"**Original Gallery URL:** [Link](https://reddit.com{submission.permalink})\n")
+    return media_size
 
-    # --- 3. Images (broad detection: i.redd.it, i.imgur.com, preview.redd.it, .webp, etc.) ---
-    elif _is_image_url(submission.url):
-        if media_config.is_images_enabled():
-            image_path, image_size = download_image(
-                submission.url, save_dir, submission.id, ignore_tls_errors
-            )
-            if image_path:
-                f.write(f"![Image]({image_path})\n")
-                f.write(f"**Original Image URL:** [Link]({submission.url})\n")
-                _track_media_size(image_size)
-            else:
-                f.write(f"![Image]({submission.url})\n")
-        else:
-            f.write(f"![Image]({submission.url})\n")
 
-    # --- 4. YouTube ---
-    elif "youtube.com" in submission.url or "youtu.be" in submission.url:
-        video_id = extract_video_id(submission.url)
+def _save_video(submission: Submission, f: TextIO, media_config: MediaFeatureConfig, save_dir: str) -> int:
+    """Write a v.redd.it post, downloading the video when enabled; returns media bytes."""
+    if not media_config.is_videos_enabled():
+        f.write(f"**Video (download disabled):** [Link]({submission.url})\n")
+        return 0
+    result = download_media_into(_get_video_download_url(submission), save_dir, submission.id)
+    if result.local_path:
+        f.write(f"**Video:** [{os.path.basename(result.local_path)}]({result.local_path})\n")
+        f.write(f"**Original Video URL:** [Link]({submission.url})\n")
+        return result.bytes_downloaded
+    f.write(f"**Video:** [Link]({submission.url})\n")
+    return 0
+
+
+def _save_image(submission: Submission, f: TextIO, media_config: MediaFeatureConfig, save_dir: str) -> int:
+    """Write an image post, downloading the image when enabled; returns media bytes."""
+    result = download_media_into(submission.url, save_dir, submission.id) if media_config.is_images_enabled() else None
+    if result and result.local_path:
+        f.write(f"![Image]({result.local_path})\n")
+        f.write(f"**Original Image URL:** [Link]({submission.url})\n")
+        return result.bytes_downloaded
+    f.write(f"![Image]({submission.url})\n")
+    return 0
+
+
+def _save_submission_media(submission: Submission, f: TextIO, media_config: MediaFeatureConfig, save_dir: str,
+                           context_mode: bool) -> int:
+    """Handle media detection and download for a submission's link post; returns media bytes."""
+    if getattr(submission, 'is_gallery', False) and media_config.is_albums_enabled():
+        return _save_gallery(submission, f, media_config, save_dir, context_mode)
+    if _is_video_url(submission.url):
+        return _save_video(submission, f, media_config, save_dir)
+    # Broad detection: i.redd.it, i.imgur.com, preview.redd.it, .webp, etc.
+    if _is_image_url(submission.url):
+        return _save_image(submission, f, media_config, save_dir)
+    if video_id := extract_video_id(submission.url):
         f.write(f"[![Video](https://img.youtube.com/vi/{video_id}/0.jpg)]({submission.url})")
-
-    # --- 5. Everything else (plain URL) ---
     else:
         f.write(submission.url if submission.url else '[Deleted Post]')
+    return 0
 
 
-def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None, context_mode=False):
-    """Save a submission and its metadata, optionally unsaving it after.
+def _write_link_post_body(submission: Submission, f: TextIO, context_mode: bool) -> int:
+    """Write a link post's optional text and its media; returns media bytes."""
+    # Link posts can also have body text (selftext)
+    if hasattr(submission, 'selftext') and submission.selftext:
+        f.write(submission.selftext)
+        f.write('\n\n---\n\n')
+
+    media_config = get_media_config()
+    save_dir = os.path.dirname(f.name)
+
+    # In context_mode (comment parent), a media error such as bad gallery metadata falls back to a URL link
+    try:
+        return _save_submission_media(submission, f, media_config, save_dir, context_mode)
+    except Exception as media_err:
+        if not context_mode:
+            raise
+        logger.debug(f"Context mode media fallback for {submission.id}: {media_err}")
+        f.write(f"**Media:** [Link]({submission.url})\n")
+        return 0
+
+
+def save_submission(submission: Submission, f: TextIO, context_mode: bool = False) -> int:
+    """Save a submission and its metadata; returns media bytes downloaded.
 
     Args:
-        submission: PRAW Submission object or RecoveredItem
+        submission: PRAW Submission object
         f: File object to write to
-        unsave: Whether to unsave the submission after saving
-        ignore_tls_errors: Whether to ignore TLS errors during downloads
-        recovery_metadata: RecoveryResult object if this is recovered content
-        context_mode: When True (comment context), media downloads fail fast
-            and fall back to URL links instead of retrying
+        context_mode: When True (comment context), a gallery stops at its first failed
+            image and media errors fall back to URL links. Failed downloads are still
+            queued for a later run, as in normal mode.
     """
     try:
-        # Check if this is a recovered item
-        is_recovered = isinstance(submission, RecoveredItem)
+        title = submission.title
+        frontmatter = {
+            'id': submission.id,
+            'title': title,
+            'subreddit': f'/r/{submission.subreddit.display_name}',
+            'timestamp': format_date(submission.created_utc),
+            'author': f'/u/{submission.author.name if submission.author else "[deleted]"}',
+        }
 
-        recovery_banner = ''
-        # If recovery_metadata is provided or item is recovered, add recovery banner
-        if recovery_metadata or is_recovered:
-            if is_recovered and hasattr(submission, 'recovery_result'):
-                recovery_metadata = submission.recovery_result
-
-            if recovery_metadata:
-                recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
-
-        frontmatter = {'id': submission.id}
-
-        # Handle recovered items differently
-        if is_recovered:
-            # Extract data from recovery result
-            recovered_data = submission.recovered_data if hasattr(submission, 'recovered_data') else {}
-            title = recovered_data.get('title') or getattr(submission, 'title', f'Recovered post {submission.id}')
-            frontmatter.update({
-                'title': title,
-                'subreddit': _recovered_value(recovered_data, 'subreddit', '[unknown]'),
-                'timestamp': _recovered_value(recovered_data, 'created_utc', 'unknown'),
-                'author': _recovered_value(recovered_data, 'author', '[deleted]'),
-                'recovered': True,
-                'permalink': getattr(submission, 'original_url', ''),
-            })
-        else:
-            # Normal PRAW object
-            title = submission.title
-            frontmatter.update({
-                'title': title,
-                'subreddit': f'/r/{submission.subreddit.display_name}',
-                'timestamp': format_date(submission.created_utc),
-                'author': f'/u/{submission.author.name if submission.author else "[deleted]"}',
-            })
-
-        if not is_recovered and submission.link_flair_text:  # Check if flair exists and is not None
+        if submission.link_flair_text:  # Check if flair exists and is not None
             frontmatter['flair'] = submission.link_flair_text
 
-        if not is_recovered:
-            frontmatter['comments'] = submission.num_comments
-            frontmatter['permalink'] = f'https://reddit.com{submission.permalink}'
+        frontmatter['comments'] = submission.num_comments
+        frontmatter['permalink'] = f'https://reddit.com{submission.permalink}'
 
-        _write_yaml_frontmatter(f, frontmatter)
-        if recovery_banner:
-            f.write(recovery_banner)
+        f.write(yaml_frontmatter(frontmatter))
         f.write(f'# {title}\n\n')
-
-        if is_recovered:
-            body = recovered_data.get('selftext') or recovered_data.get('body')
-            f.write(body or '[Archived content was not available.]')
-            if submission.original_url:
-                f.write(f'\n\n**Original URL:** [Link]({submission.original_url})')
-            f.write('\n')
-            return
 
         f.write(f'**Upvotes:** {submission.score} | **Permalink:** [Link](https://reddit.com{submission.permalink})\n\n')
 
+        media_size = 0
         if submission.is_self:
             f.write(submission.selftext if submission.selftext else '[Deleted Post]')
         else:
-            # Link posts can also have body text (selftext)
-            if hasattr(submission, 'selftext') and submission.selftext:
-                f.write(submission.selftext)
-                f.write('\n\n---\n\n')
-
-            media_config = get_media_config()
-            save_dir = os.path.dirname(f.name)
-
-            # In context_mode (comment parent), wrap media in try-except
-            # to fail fast and fall back to URL links
-            try:
-                _save_submission_media(submission, f, is_recovered, media_config,
-                                      save_dir, ignore_tls_errors, context_mode)
-            except Exception as media_err:
-                if context_mode:
-                    logger.info(f"Context mode media fallback for {submission.id}: {media_err}")
-                    f.write(f"**Media:** [Link]({submission.url})\n")
-                else:
-                    raise
+            media_size = _write_link_post_body(submission, f, context_mode)
 
         f.write('\n\n## Comments:\n\n')
         lazy_comments = lazy_load_comments(submission)
-        process_comments(lazy_comments, f)
+        media_size += write_comments_markdown(lazy_comments, f)
 
-        # Unsave the submission if requested
-        if unsave:
-            try:
-                submission.unsave()
-                logger.info(f"Unsaved submission: {submission.id}")
-            except Exception as e:
-                logger.warning(f"Failed to unsave submission {submission.id}: {e}")
-
+        return media_size
     except Exception as e:
         logger.error(f"Error saving submission {submission.id}: {e}")
         raise
 
-def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
-    """Save a comment, its context, and any child comments.
+def _write_comment_parent_context(parent: Submission | Comment, f: TextIO) -> int:
+    """Write what a saved comment replied to: its post or its parent comment; returns media bytes."""
+    if isinstance(parent, Submission):
+        f.write(f'## Context: Post by /u/{parent.author.name if parent.author else "[deleted]"}\n')
+        f.write(f'- **Title:** {parent.title}\n')
+        f.write(f'- **Upvotes:** {parent.score} | **Permalink:** [Link](https://reddit.com{parent.permalink})\n')
+        if parent.is_self:
+            f.write(f'{parent.selftext}\n\n')
+        else:
+            if hasattr(parent, 'selftext') and parent.selftext:
+                f.write(f'{parent.selftext}\n\n')
+            f.write(f'[Link to post content]({parent.url})\n\n')
+
+        # Save the full submission context, including all comments
+        f.write('\n\n## Full Post Context:\n\n')
+        return save_submission(parent, f, context_mode=True)
+
+    if isinstance(parent, Comment):
+        f.write(f'## Context: Parent Comment by /u/{parent.author.name if parent.author else "[deleted]"}\n')
+        f.write(f'- **Upvotes:** {parent.score} | **Permalink:** [Link](https://reddit.com{parent.permalink})\n')
+        f.write(f'{parent.body}\n\n')
+
+        # Recursively save the parent comment's context
+        return save_comment_and_context(parent, f)
+
+    return 0
+
+
+def save_comment_and_context(comment: Comment, f: TextIO) -> int:
+    """Save a comment, its context, and any child comments; returns media bytes downloaded.
 
     Args:
-        comment: PRAW Comment object or RecoveredItem
+        comment: PRAW Comment object
         f: File object to write to
-        unsave: Whether to unsave the comment after saving
-        ignore_tls_errors: Whether to ignore TLS errors during downloads
-        recovery_metadata: RecoveryResult object if this is recovered content
     """
     try:
-        # Check if this is a recovered item
-        is_recovered = isinstance(comment, RecoveredItem)
+        author = f'/u/{comment.author.name if comment.author else "[deleted]"}'
+        body = comment.body
+        title = f'Comment by {author}'
+        frontmatter = {
+            'id': comment.id,
+            'title': title,
+            'author': author,
+            'body': body,
+            'score': comment.score,
+            'permalink': f'https://reddit.com{comment.permalink}',
+        }
 
-        recovery_banner = ''
-        # If recovery_metadata is provided or item is recovered, add recovery banner
-        if recovery_metadata or is_recovered:
-            if is_recovered and hasattr(comment, 'recovery_result'):
-                recovery_metadata = comment.recovery_result
-
-            if recovery_metadata:
-                recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
-
-        if is_recovered:
-            recovered_data = comment.recovered_data if hasattr(comment, 'recovered_data') else {}
-            author = _recovered_value(recovered_data, 'author', '[deleted]')
-            body = _recovered_value(recovered_data, 'body', '[Content not available]')
-            title = recovered_data.get('title') or f'Comment by {author}'
-            frontmatter = {
-                'id': comment.id,
-                'title': title,
-                'author': author,
-                'body': body,
-                'recovered': True,
-            }
-        else:
-            author = f'/u/{comment.author.name if comment.author else "[deleted]"}'
-            body = comment.body
-            title = f'Comment by {author}'
-            frontmatter = {
-                'id': comment.id,
-                'title': title,
-                'author': author,
-                'body': body,
-                'score': comment.score,
-                'permalink': f'https://reddit.com{comment.permalink}',
-            }
-
-        _write_yaml_frontmatter(f, frontmatter)
-        if recovery_banner:
-            f.write(recovery_banner)
+        f.write(yaml_frontmatter(frontmatter))
         f.write(f'# {title}\n\n')
         f.write(f'{body}\n\n')
-        if is_recovered:
-            f.write('**Recovered:** Yes\n\n')
-        else:
-            f.write(f'**Upvotes:** {comment.score} | **Permalink:** [Link](https://reddit.com{comment.permalink})\n\n')
+        f.write(f'**Upvotes:** {comment.score} | **Permalink:** [Link](https://reddit.com{comment.permalink})\n\n')
 
-        # Save the parent context (skip for recovered items as we don't have parent info)
-        if not is_recovered:
-            parent = comment.parent()
-            if isinstance(parent, Submission):
-                f.write(f'## Context: Post by /u/{parent.author.name if parent.author else "[deleted]"}\n')
-                f.write(f'- **Title:** {parent.title}\n')
-                f.write(f'- **Upvotes:** {parent.score} | **Permalink:** [Link](https://reddit.com{parent.permalink})\n')
-                if parent.is_self:
-                    f.write(f'{parent.selftext}\n\n')
-                else:
-                    if hasattr(parent, 'selftext') and parent.selftext:
-                        f.write(f'{parent.selftext}\n\n')
-                    f.write(f'[Link to post content]({parent.url})\n\n')
+        media_size = _write_comment_parent_context(comment.parent(), f)
 
-                # Save the full submission context, including all comments
-                f.write('\n\n## Full Post Context:\n\n')
-                save_submission(parent, f, ignore_tls_errors=ignore_tls_errors, context_mode=True)
+        if comment.replies:
+            f.write('\n\n## Child Comments:\n\n')
+            media_size += write_comments_markdown(comment.replies, f)
 
-            elif isinstance(parent, Comment):
-                f.write(f'## Context: Parent Comment by /u/{parent.author.name if parent.author else "[deleted]"}\n')
-                f.write(f'- **Upvotes:** {parent.score} | **Permalink:** [Link](https://reddit.com{parent.permalink})\n')
-                f.write(f'{parent.body}\n\n')
-
-                # Recursively save the parent comment's context
-                save_comment_and_context(parent, f, ignore_tls_errors=ignore_tls_errors)
-
-            # Save child comments if any exist
-            if comment.replies:
-                f.write('\n\n## Child Comments:\n\n')
-                process_comments(comment.replies, f, ignore_tls_errors=ignore_tls_errors)
-
-        # Unsave the comment if requested
-        if unsave:
-            try:
-                comment.unsave()
-                logger.info(f"Unsaved comment: {comment.id}")
-            except Exception as e:
-                logger.warning(f"Failed to unsave comment {comment.id}: {e}")
-
+        return media_size
     except Exception as e:
         logger.error(f"Error saving comment {comment.id}: {e}")
         raise
 
-def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None):
-    """Process all comments using pure blockquote nesting for hierarchy."""
-    for i, comment in enumerate(comments):
-        if isinstance(comment, Comment):
-            bq = "> " * depth if depth > 0 else ""
+def _trailing_image_url(comment_body: str) -> str | None:
+    """Return the image URL a comment body ends with, if any."""
+    if comment_body.endswith(COMMENT_IMAGE_EXTENSIONS):
+        potential_url = comment_body.split()[-1]
+        if potential_url.startswith(('http://', 'https://')):
+            return potential_url
+    return None
 
-            # Write comment header
+
+def _write_comment_body(comment: Comment, comment_body: str, f: TextIO, bq: str) -> int:
+    """Write a comment body in blockquote prefix bq, downloading a trailing image; returns media bytes."""
+    image_url = _trailing_image_url(comment_body)
+    if not image_url:
+        for line in comment_body.split('\n'):
+            f.write(f'{bq}{line}\n')
+        f.write('\n')
+        return 0
+
+    # Write any text before the image URL
+    body_before_url = comment_body[:comment_body.rfind(image_url)].strip()
+    if body_before_url:
+        for line in body_before_url.split('\n'):
+            f.write(f'{bq}{line}\n')
+        f.write(f'{bq}\n')
+
+    result = None
+    if get_media_config().is_images_enabled():
+        result = download_media_into(image_url, os.path.dirname(f.name), comment.id)
+    if result and result.local_path:
+        f.write(f'{bq}![Image]({result.local_path})\n')
+        f.write(f'{bq}*Original Image URL: [Link]({image_url})*\n\n')
+        return result.bytes_downloaded
+    f.write(f'{bq}![Image]({image_url})\n\n')
+    return 0
+
+
+def write_comments_markdown(comments: Iterable[Any], f: TextIO, depth: int = 0) -> int:
+    """Write comments to f as nested blockquotes, downloading images in their bodies; returns media bytes."""
+    media_size = 0
+    for comment in comments:
+        if isinstance(comment, Comment):
+            bq = "> " * depth
+
             author = comment.author.name if comment.author else "[deleted]"
             f.write(f'\n{bq}**Comment by /u/{author}**\n')
             f.write(f'{bq}*Upvotes: {comment.score} | [Permalink](https://reddit.com{comment.permalink})*\n\n')
 
-            # Process comment body
-            comment_body = comment.body if comment.body else '[deleted]'
-
-            # Check for image URLs in the comment body
-            image_url = None
-            if any(comment_body.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
-                potential_url = comment_body.split()[-1]
-                if potential_url.startswith(('http://', 'https://')) and '.' in potential_url:
-                    image_url = potential_url
-
-            if image_url:
-                # Write any text before the image URL
-                body_before_url = comment_body[:comment_body.rfind(image_url)].strip()
-                if body_before_url:
-                    for line in body_before_url.split('\n'):
-                        f.write(f'{bq}{line}\n')
-                    f.write(f'{bq}\n')
-
-                image_path, image_size = download_image(image_url, os.path.dirname(f.name), comment.id, ignore_tls_errors)
-                if image_path:
-                    f.write(f'{bq}![Image]({image_path})\n')
-                    f.write(f'{bq}*Original Image URL: [Link]({image_url})*\n\n')
-                    _track_media_size(image_size)
-                else:
-                    f.write(f'{bq}![Image]({image_url})\n\n')
-            else:
-                lines = comment_body.split('\n')
-                for line in lines:
-                    f.write(f'{bq}{line}\n')
-                f.write('\n')
+            media_size += _write_comment_body(comment, comment.body if comment.body else '[deleted]', f, bq)
 
             # Recursively process child comments
-            if not simple_format and comment.replies:
-                process_comments(comment.replies, f, depth + 1, simple_format, ignore_tls_errors)
+            if comment.replies:
+                media_size += write_comments_markdown(comment.replies, f, depth + 1)
 
             # Add separator only for top-level comments to reduce clutter
             if depth == 0:
                 f.write('---\n')
+    return media_size

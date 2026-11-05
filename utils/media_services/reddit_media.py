@@ -1,28 +1,30 @@
 """
 Reddit media downloader service.
 
-This module provides comprehensive support for downloading Reddit-hosted media
-including i.redd.it images, v.redd.it videos (with audio merging), and gallery posts.
-Implements the MediaDownloaderProtocol with web-researched best practices.
+Downloads Reddit-hosted media: i.redd.it images, v.redd.it videos (with audio
+merging), and gallery posts.
 """
 
+import logging
 import os
 import re
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 
-from ..service_abstractions import (
-    DownloadResult, DownloadStatus,
-    MediaMetadata, MediaType, ServiceConfig
+from praw.models import Submission
+
+from utils.media_services.media_types import (
+    DownloadResult, DownloadStatus, GalleryImage, ServiceConfig
 )
-from ..temp_file_utils import temp_files_cleanup
-from ..constants import FFMPEG_TIMEOUT_SECONDS
-from ..domain_matching import domain_matches
-from .base_downloader import BaseHTTPDownloader
+from utils.media_services.temp_file_utils import temp_files_cleanup
+from utils.constants import FFMPEG_PROBE_TIMEOUT_SECONDS, FFMPEG_TIMEOUT_SECONDS
+from utils.domain_matching import domain_matches
+from utils.media_services.base_downloader import BaseHTTPDownloader
+
+logger = logging.getLogger(__name__)
 
 
 class RedditMediaDownloader(BaseHTTPDownloader):
@@ -36,11 +38,10 @@ class RedditMediaDownloader(BaseHTTPDownloader):
     - Reddit preview images as fallback
     """
 
-    def __init__(self, config: Optional[ServiceConfig] = None):
+    def __init__(self, config: ServiceConfig | None = None):
         if config is None:
             config = ServiceConfig(
                 name="Reddit",
-                rate_limit_per_minute=100,  # Reddit API allows ~100 requests/min
                 timeout_seconds=30,
                 max_file_size=209715200,  # 200MB default
                 user_agent="Reddit Stash Media Downloader/1.0",
@@ -69,44 +70,8 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
             return any(domain_matches(domain, reddit_domain) for reddit_domain in reddit_domains)
 
-        except Exception:
+        except ValueError:
             return False
-
-    def get_metadata(self, url: str) -> Optional[MediaMetadata]:
-        """Get metadata for Reddit media without downloading."""
-        if not self.can_handle(url):
-            return None
-
-        try:
-            # Respect rate limiting
-            self._respect_rate_limit()
-
-            # Make HEAD request to get metadata
-            response = self._session.head(
-                url,
-                timeout=(5.0, 10.0),
-                allow_redirects=True
-            )
-            response.raise_for_status()
-
-            # Determine media type from URL and headers
-            media_type = self._determine_reddit_media_type(url, response.headers)
-            file_size = int(response.headers.get('content-length', 0))
-
-            return MediaMetadata(
-                url=url,
-                media_type=media_type,
-                file_size=file_size,
-                format=self._get_file_extension_from_headers(response.headers)
-            )
-
-        except Exception:
-            # Return basic metadata even if HEAD request fails
-            return MediaMetadata(
-                url=url,
-                media_type=self._determine_reddit_media_type(url, {}),
-                file_size=None
-            )
 
     def download(self, url: str, save_path: str) -> DownloadResult:
         """Download Reddit media with appropriate handling for different types."""
@@ -117,18 +82,14 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             )
 
         try:
-            parsed = urlparse(url)
-            domain = parsed.netloc.lower()
+            domain = urlparse(url).hostname
 
-            if 'v.redd.it' in domain:
+            if domain_matches(domain, 'v.redd.it'):
                 return self._download_reddit_video(url, save_path)
-            elif 'i.redd.it' in domain:
-                return self._download_reddit_image(url, save_path)
-            elif 'preview.redd.it' in domain or 'external-preview.redd.it' in domain:
-                return self._download_reddit_preview(url, save_path)
-            else:
-                # Fallback to generic download
-                return self.download_file(url, save_path)
+            elif domain_matches(domain, 'i.redd.it'):
+                return self._download_with_reddit_headers(url, save_path)
+            # can_handle admits only preview hosts beyond these
+            return self._download_reddit_preview(url, save_path)
 
         except Exception as e:
             return DownloadResult(
@@ -136,34 +97,10 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 error_message=f"Reddit media download failed: {str(e)}"
             )
 
-    def _determine_reddit_media_type(self, url: str, headers: Dict[str, str]) -> MediaType:
-        """Determine media type from Reddit URL patterns."""
-        parsed = urlparse(url)
-        domain = parsed.netloc.lower()
-
-        if 'v.redd.it' in domain:
-            return MediaType.VIDEO
-        elif 'i.redd.it' in domain:
-            return MediaType.IMAGE
-        else:
-            # Use headers if available
-            return self._detect_media_type(headers)
-
-    def _download_reddit_image(self, url: str, save_path: str) -> DownloadResult:
-        """Download Reddit hosted image (i.redd.it) with optimized headers."""
-        return self._download_with_reddit_headers(url, save_path)
-
     def _download_reddit_preview(self, url: str, save_path: str) -> DownloadResult:
-        """Download Reddit preview image with URL decoding and optimized headers."""
-        try:
-            # Reddit preview URLs often have encoding issues, clean them up
-            cleaned_url = url.replace('amp;', '')
-            return self._download_with_reddit_headers(cleaned_url, save_path)
-        except Exception as e:
-            return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message=f"Preview download failed: {str(e)}"
-            )
+        """Download Reddit preview image with URL decoding and Reddit headers."""
+        # Reddit preview URLs often have encoding issues, clean them up
+        return self._download_with_reddit_headers(url.replace('amp;', ''), save_path)
 
     def _download_reddit_video(self, url: str, save_path: str) -> DownloadResult:
         """
@@ -175,116 +112,102 @@ class RedditMediaDownloader(BaseHTTPDownloader):
         Short redirect URLs (no DASH_ in path) are detected and attempted once;
         on 403 they fail immediately without retries.
         """
-        import logging
-        _logger = logging.getLogger(__name__)
+        # Detect short v.redd.it redirect URLs (e.g., https://v.redd.it/abc123)
+        # These lack a DASH_ segment and usually 403 on direct access
+        if 'DASH_' not in urlparse(url).path:
+            self._logger.debug(f"Short v.redd.it URL detected (no DASH_ segment): {url}")
+            # Attempt a single download — if 403, fail immediately
+            video_result = self.download_file(url, save_path)
+            if video_result.status == DownloadStatus.FORBIDDEN:
+                self._logger.warning(f"Short v.redd.it URL returned 403, failing fast: {url}")
+            return video_result
 
-        try:
-            # Detect short v.redd.it redirect URLs (e.g., https://v.redd.it/abc123)
-            # These lack a DASH_ segment and usually 403 on direct access
-            parsed = urlparse(url)
-            is_short_url = 'DASH_' not in parsed.path
+        has_ffmpeg = self._is_ffmpeg_available()
+        audio_url = self._get_audio_url_from_video_url(url) if has_ffmpeg else None
 
-            if is_short_url:
-                _logger.info(f"Short v.redd.it URL detected (no DASH_ segment): {url}")
-                # Attempt a single download — if 403, fail immediately
-                video_result = self.download_file(url, save_path)
-                if not video_result.is_success:
-                    error = video_result.error_message or ""
-                    if '403' in error or 'Forbidden' in error:
-                        _logger.warning(f"Short v.redd.it URL returned 403, failing fast: {url}")
-                    return video_result
+        if audio_url:
+            return self._download_video_with_audio(url, audio_url, save_path)
+
+        # No audio URL or no ffmpeg, just download video
+        video_result = self.download_file(url, save_path)
+        if video_result.status == DownloadStatus.NOT_FOUND:
+            self._logger.info("Initial DASH quality failed with 404, trying alternatives")
+            video_result = self._try_dash_qualities(url, save_path)
+        if video_result.is_success and not has_ffmpeg:
+            self._logger.warning(f"ffmpeg not found, saved video without its audio track: {url}")
+            return replace(video_result, error_message="Audio track not merged (ffmpeg not available)")
+        return video_result
+
+    def _download_video_with_audio(self, url: str, audio_url: str, save_path: str) -> DownloadResult:
+        """Download video and audio concurrently, then merge them if the audio arrived."""
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_audio:
+            temp_audio_path = temp_audio.name
+
+        with temp_files_cleanup(temp_audio_path):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                video_future = pool.submit(self.download_file, url, save_path)
+                audio_future = pool.submit(self.download_file, audio_url, temp_audio_path)
+                video_result = video_future.result()
+                audio_result = audio_future.result()
+
+            if video_result.status == DownloadStatus.NOT_FOUND:
+                self._logger.info("Video DASH quality failed with 404, trying alternatives")
+                video_result = self._try_dash_qualities(url, save_path)
+            if not video_result.is_success:
                 return video_result
 
-            # Check prerequisites before downloading
-            has_ffmpeg = self._is_ffmpeg_available()
-            audio_url = self._get_audio_url_from_video_url(url) if has_ffmpeg else None
+            if audio_result.is_success and video_result.local_path:
+                return self._merge_audio_into(video_result, audio_result)
 
-            if audio_url:
-                # Download video and audio concurrently
-                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_audio:
-                    temp_audio_path = temp_audio.name
+            # Audio failed, return video-only
+            return video_result
 
-                with temp_files_cleanup(temp_audio_path):
-                    with ThreadPoolExecutor(max_workers=2) as pool:
-                        video_future = pool.submit(self.download_file, url, save_path)
-                        audio_future = pool.submit(self.download_file, audio_url, temp_audio_path)
-                        video_result = video_future.result()
-                        audio_result = audio_future.result()
-
-                    if not video_result.is_success:
-                        # If 404, try alternative DASH quality tiers
-                        if 'DASH_' in url:
-                            error = video_result.error_message or ""
-                            if '404' in error or 'Not Found' in error:
-                                _logger.info("Video DASH quality failed with 404, trying alternatives")
-                                video_result = self._try_dash_qualities(url, save_path)
-                        if not video_result.is_success:
-                            return video_result
-
-                    if audio_result.is_success and video_result.local_path:
-                        audio_size = (
-                            os.path.getsize(audio_result.local_path)
-                            if audio_result.local_path and os.path.exists(audio_result.local_path)
-                            else audio_result.bytes_downloaded
-                        )
-                        merged_size_estimate = os.path.getsize(video_result.local_path) + audio_size
-                        if not self._check_disk_space(merged_size_estimate, video_result.local_path):
-                            return replace(
-                                video_result,
-                                error_message="Audio track not merged (insufficient disk space)",
-                            )
-
-                        with tempfile.NamedTemporaryFile(
-                            dir=os.path.dirname(video_result.local_path) or '.',
-                            suffix='.mp4',
-                            delete=False,
-                        ) as temp_merged:
-                            temp_merged_path = temp_merged.name
-
-                        with temp_files_cleanup(temp_merged_path):
-                            merged_result = self._merge_video_audio(
-                                video_result.local_path,
-                                audio_result.local_path,
-                                temp_merged_path,
-                            )
-                            if merged_result.is_success:
-                                try:
-                                    os.replace(temp_merged_path, video_result.local_path)
-                                except OSError as error:
-                                    _logger.warning(
-                                        "Could not promote merged Reddit video, keeping video-only file: %s",
-                                        error,
-                                    )
-                                    return video_result
-                                return replace(
-                                    video_result,
-                                    # The merged file differs from the downloaded video stream.
-                                    content_hash=None,
-                                    bytes_downloaded=merged_result.bytes_downloaded,
-                                )
-
-                    # Audio failed or merge failed, return video-only
-                    return video_result
-            else:
-                # No audio URL or no ffmpeg, just download video
-                video_result = self.download_file(url, save_path)
-                # If 404, try alternative DASH quality tiers
-                if not video_result.is_success and 'DASH_' in url:
-                    error = video_result.error_message or ""
-                    if '404' in error or 'Not Found' in error:
-                        _logger.info("Initial DASH quality failed with 404, trying alternatives")
-                        video_result = self._try_dash_qualities(url, save_path)
-                if video_result.is_success and not has_ffmpeg:
-                    return replace(video_result, error_message="Audio track not merged (ffmpeg not available)")
-                return video_result
-
-        except Exception as e:
-            return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message=f"Reddit video download failed: {str(e)}"
+    def _merge_audio_into(self, video_result: DownloadResult, audio_result: DownloadResult) -> DownloadResult:
+        """Replace the video file with its merge with the audio, keeping the video if that fails."""
+        audio_size = (
+            os.path.getsize(audio_result.local_path)
+            if audio_result.local_path and os.path.exists(audio_result.local_path)
+            else audio_result.bytes_downloaded
+        )
+        merged_size_estimate = os.path.getsize(video_result.local_path) + audio_size
+        if not self._check_disk_space(merged_size_estimate, video_result.local_path):
+            return replace(
+                video_result,
+                error_message="Audio track not merged (insufficient disk space)",
             )
 
-    def _get_audio_url_from_video_url(self, video_url: str) -> Optional[str]:
+        with tempfile.NamedTemporaryFile(
+            dir=os.path.dirname(video_result.local_path) or '.',
+            suffix='.mp4',
+            delete=False,
+        ) as temp_merged:
+            temp_merged_path = temp_merged.name
+
+        with temp_files_cleanup(temp_merged_path):
+            merged_result = self._merge_video_audio(
+                video_result.local_path,
+                audio_result.local_path,
+                temp_merged_path,
+            )
+            if not merged_result.is_success:
+                return video_result
+
+            try:
+                os.replace(temp_merged_path, video_result.local_path)
+            except OSError as error:
+                self._logger.warning(
+                    "Could not promote merged Reddit video, keeping video-only file: %s",
+                    error,
+                )
+                return video_result
+            return replace(
+                video_result,
+                # The merged file differs from the downloaded video stream.
+                content_hash=None,
+                bytes_downloaded=merged_result.bytes_downloaded,
+            )
+
+    def _get_audio_url_from_video_url(self, video_url: str) -> str | None:
         """
         Generate audio URL from video URL.
 
@@ -295,61 +218,51 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
         Returns the first audio URL that responds successfully, or None.
         """
-        import logging
-        _logger = logging.getLogger(__name__)
+        parsed = urlparse(video_url)
+        path_parts = parsed.path.split('/')
 
-        try:
-            parsed = urlparse(video_url)
-            path_parts = parsed.path.split('/')
+        # Find the video filename index (e.g., DASH_1080.mp4)
+        dash_index = None
+        for i, part in enumerate(path_parts):
+            if 'DASH_' in part and '.mp4' in part:
+                dash_index = i
+                break
 
-            # Find the video filename index (e.g., DASH_1080.mp4)
-            dash_index = None
-            for i, part in enumerate(path_parts):
-                if 'DASH_' in part and '.mp4' in part:
-                    dash_index = i
-                    break
-
-            if dash_index is None:
-                return None
-
-            # Try multiple audio filename patterns (most common first to minimize HEAD requests)
-            audio_filenames = ['DASH_audio.mp4', 'DASH_AUDIO_128.mp4', 'DASH_AUDIO_64.mp4']
-
-            for audio_filename in audio_filenames:
-                candidate_parts = path_parts.copy()
-                candidate_parts[dash_index] = audio_filename
-                audio_path = '/'.join(candidate_parts)
-                audio_url = f"{parsed.scheme}://{parsed.netloc}{audio_path}"
-                if parsed.query:
-                    audio_url += f"?{parsed.query}"
-
-                # HEAD request to check if audio file exists
-                try:
-                    resp = self._session.head(
-                        audio_url,
-                        timeout=(3.0, 5.0),
-                        allow_redirects=True
-                    )
-                    if resp.status_code == 200:
-                        _logger.debug(f"Found audio track: {audio_filename}")
-                        return audio_url
-                except Exception:
-                    continue
-
-            _logger.debug(f"No audio track found for video: {video_url}")
+        if dash_index is None:
             return None
 
-        except Exception:
-            return None
+        # Try multiple audio filename patterns (most common first to minimize HEAD requests)
+        audio_filenames = ['DASH_audio.mp4', 'DASH_AUDIO_128.mp4', 'DASH_AUDIO_64.mp4']
+
+        for audio_filename in audio_filenames:
+            candidate_parts = path_parts.copy()
+            candidate_parts[dash_index] = audio_filename
+            audio_path = '/'.join(candidate_parts)
+            audio_url = f"{parsed.scheme}://{parsed.netloc}{audio_path}"
+            if parsed.query:
+                audio_url += f"?{parsed.query}"
+
+            # HEAD request to check if audio file exists
+            try:
+                resp, _ = self._get_with_safe_redirects(
+                    audio_url,
+                    {"timeout": (3.0, 5.0)},
+                    method="head",
+                )
+                if resp.status_code == 200:
+                    self._logger.debug(f"Found audio track: {audio_filename}")
+                    return audio_url
+            except Exception as e:
+                self._logger.debug(f"Audio probe failed for {audio_filename}: {e}")
+
+        self._logger.debug(f"No audio track found for video: {video_url}")
+        return None
 
     def _try_dash_qualities(self, url: str, save_path: str) -> DownloadResult:
         """Try multiple DASH quality tiers when the initial quality returns 404.
 
         Replaces DASH_NNN in the URL with progressively lower quality tiers.
         """
-        import logging
-        _logger = logging.getLogger(__name__)
-
         qualities = [720, 480, 360, 240]
         last_result = None
 
@@ -357,14 +270,13 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             candidate = re.sub(r'DASH_\d+', f'DASH_{quality}', url)
             if candidate == url:
                 continue  # Already tried this quality
-            _logger.debug(f"Trying DASH quality fallback: DASH_{quality}")
+            self._logger.debug(f"Trying DASH quality fallback: DASH_{quality}")
             result = self.download_file(candidate, save_path)
             last_result = result
             if result.is_success:
-                _logger.info(f"DASH quality fallback succeeded at {quality}p")
+                self._logger.info(f"DASH quality fallback succeeded at {quality}p")
                 return result
-            error = result.error_message or ""
-            if '404' not in error and 'Not Found' not in error:
+            if result.status != DownloadStatus.NOT_FOUND:
                 break  # Non-404 error, stop trying
 
         return last_result or DownloadResult(
@@ -396,9 +308,10 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             subprocess.run(['ffmpeg', '-version'],
                          stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,
-                         check=True)
+                         check=True,
+                         timeout=FFMPEG_PROBE_TIMEOUT_SECONDS)
             return True
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
     def _merge_video_audio(self, video_path: str, audio_path: str, output_path: str) -> DownloadResult:
@@ -414,10 +327,8 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             DownloadResult indicating success/failure
         """
         try:
-            # Ensure output directory exists
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            # Use ffmpeg to merge video and audio
             cmd = [
                 'ffmpeg',
                 '-i', video_path,
@@ -429,7 +340,6 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 output_path
             ]
 
-            # Run ffmpeg with timeout
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -439,7 +349,6 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             )
 
             if result.returncode == 0:
-                # Get file size of merged file
                 file_size = os.path.getsize(output_path)
 
                 return DownloadResult(
@@ -464,82 +373,29 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 error_message=f"Video merge failed: {str(e)}"
             )
 
-    def get_service_name(self) -> str:
-        """Get the name of this service."""
-        return "Reddit"
-
-    def is_rate_limited(self) -> bool:
-        """Check if the service is currently rate limited."""
-        # Reddit rate limiting is handled by PRAW at the API level
-        # For direct media downloads, we use our own rate limiting
-        return False
-
-    def get_rate_limit_reset_time(self) -> Optional[float]:
-        """Get the time when rate limit resets."""
-        return None
-
     @classmethod
-    def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
+    def extract_media_urls_from_submission(cls, submission: Submission) -> list[GalleryImage]:
         """
-        Extract all media URLs from a PRAW submission.
+        Extract the gallery image URLs from a PRAW submission.
 
         Args:
             submission: PRAW submission object
 
         Returns:
-            List of dictionaries containing URL and metadata
+            The gallery's images, empty when it is not a gallery or has none to download
         """
         media_urls = []
 
         try:
-            # Check if it's Reddit-hosted media
-            if hasattr(submission, 'is_reddit_media_domain') and submission.is_reddit_media_domain:
-                if hasattr(submission, 'domain'):
-                    if submission.domain == 'i.redd.it':
-                        # Reddit image
-                        media_urls.append({
-                            'url': submission.url,
-                            'type': 'image',
-                            'source': 'reddit_direct'
-                        })
-                    elif submission.domain == 'v.redd.it':
-                        # Reddit video
-                        media_urls.append({
-                            'url': submission.url,
-                            'type': 'video',
-                            'source': 'reddit_direct'
-                        })
-
-            # Check for gallery posts
-            if hasattr(submission, 'is_gallery') and submission.is_gallery:
-                if hasattr(submission, 'media_metadata') and submission.media_metadata:
-                    for item_id, metadata in submission.media_metadata.items():
-                        if 's' in metadata and 'u' in metadata['s']:
-                            # Decode URL (Reddit URLs are often HTML encoded)
-                            gallery_url = metadata['s']['u'].replace('&amp;', '&')
-                            media_urls.append({
-                                'url': gallery_url,
-                                'type': 'image',
-                                'source': 'reddit_gallery',
-                                'gallery_id': item_id
-                            })
-
-            # Check for preview images (fallback for external links)
-            if hasattr(submission, 'preview') and submission.preview and 'images' in submission.preview:
-                for image in submission.preview['images']:
-                    if 'source' in image:
-                        preview_url = image['source']['url'].replace('&amp;', '&')
-                        media_urls.append({
-                            'url': preview_url,
-                            'type': 'image',
-                            'source': 'reddit_preview',
-                            'width': image['source'].get('width'),
-                            'height': image['source'].get('height')
-                        })
+            if getattr(submission, 'is_gallery', False):
+                for item_id, metadata in (getattr(submission, 'media_metadata', None) or {}).items():
+                    if 's' in metadata and 'u' in metadata['s']:
+                        # Decode URL (Reddit URLs are often HTML encoded)
+                        gallery_url = metadata['s']['u'].replace('&amp;', '&')
+                        media_urls.append(GalleryImage(url=gallery_url, gallery_id=item_id))
 
         except Exception as e:
             # Log error but don't fail completely
-            import logging
-            logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
+            logger.warning(f"Error extracting media URLs from submission: {e}")
 
         return media_urls

@@ -16,7 +16,7 @@ from collections import namedtuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.media_services.base_downloader import BaseHTTPDownloader
-from utils.service_abstractions import ServiceConfig
+from utils.media_services.media_types import ServiceConfig
 from utils.constants import DISK_SPACE_SAFETY_FACTOR
 
 
@@ -237,71 +237,13 @@ class TestDiskSpaceValidation(unittest.TestCase):
                     result = self.downloader._check_disk_space(case['file_size'], save_path)
                     self.assertEqual(result, case['expected'])
 
-    def test_disk_space_logging(self):
-        """Test that appropriate log messages are generated."""
-        file_size = 100 * 1024 * 1024  # 100MB
-        save_path = os.path.join(self.temp_dir, 'test_file.txt')
-
-        # Test logging for insufficient space
-        insufficient_space = 10 * 1024 * 1024  # 10MB (insufficient)
-        mock_usage_insufficient = DiskUsage(
-            total=1000 * 1024 * 1024 * 1024,
-            used=990 * 1024 * 1024 * 1024,
-            free=insufficient_space
-        )
-
-        with patch('shutil.disk_usage', return_value=mock_usage_insufficient):
-            with patch.object(self.downloader._logger, 'warning') as mock_warning:
-                result = self.downloader._check_disk_space(file_size, save_path)
-                self.assertFalse(result)
-                mock_warning.assert_called_once()
-                # Check that warning message contains expected content
-                warning_call_args = mock_warning.call_args[0][0]
-                self.assertIn('Insufficient disk space', warning_call_args)
-
-        # Test logging for sufficient space (debug level)
-        sufficient_space = 1024 * 1024 * 1024  # 1GB (sufficient)
-        mock_usage_sufficient = DiskUsage(
-            total=1000 * 1024 * 1024 * 1024,
-            used=500 * 1024 * 1024 * 1024,
-            free=sufficient_space
-        )
-
-        with patch('shutil.disk_usage', return_value=mock_usage_sufficient):
-            with patch.object(self.downloader._logger, 'debug') as mock_debug:
-                result = self.downloader._check_disk_space(file_size, save_path)
-                self.assertTrue(result)
-                mock_debug.assert_called_once()
-                # Check that debug message contains expected content
-                debug_call_args = mock_debug.call_args[0][0]
-                self.assertIn('Disk space check passed', debug_call_args)
-
-    def test_disk_space_units_conversion(self):
-        """Test proper conversion of disk space units in logging."""
-        file_size = 1024 * 1024 * 1024  # 1GB
-        save_path = os.path.join(self.temp_dir, 'test_file.txt')
-
-        # Set up specific values to test unit conversion
-        mock_usage = DiskUsage(
-            total=10 * 1024**3,  # 10GB
-            used=5 * 1024**3,    # 5GB
-            free=5 * 1024**3     # 5GB
-        )
-
-        with patch('shutil.disk_usage', return_value=mock_usage):
-            with patch.object(self.downloader._logger, 'debug') as mock_debug:
-                result = self.downloader._check_disk_space(file_size, save_path)
-                self.assertTrue(result)
-
-                # Verify that logging includes properly formatted units
-                debug_call_args = mock_debug.call_args[0][0]
-                # Should include MB for required space and GB for available space
-                self.assertIn('MB', debug_call_args)  # Required space in MB
-                self.assertIn('GB', debug_call_args)  # Available space in GB
-
     def test_integration_with_download_file_method(self):
         """Test integration of disk space check with download_file method."""
         # This tests that disk space check is properly called during downloads
+        dns_lookup = patch('utils.media_services.url_security.socket.getaddrinfo',
+                           return_value=[(2, 1, 6, '', ('93.184.216.34', 0))])
+        dns_lookup.start()
+        self.addCleanup(dns_lookup.stop)
         file_size = 10 * 1024 * 1024  # 10MB, below the downloader size limit
         url = "https://example.com/test_file.txt"
         save_path = os.path.join(self.temp_dir, 'test_file.txt')

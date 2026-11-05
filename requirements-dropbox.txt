@@ -1,0 +1,3 @@
+# Optional Dropbox storage backend dependency
+# Install alongside main requirements when using provider=dropbox
+dropbox>=12.2.4

@@ -20,9 +20,11 @@ Correctness relies on runners being killed before the lease expires
 """
 
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 CONTROL_DIR = ".reddit-stash"
 LEASE_KEY = f"{CONTROL_DIR}/control/lock.json"
@@ -53,14 +55,14 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _parse(value) -> Optional[datetime]:
+def _parse(value) -> datetime | None:
     try:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return None
 
 
-def _status(exc) -> Optional[int]:
+def http_status(exc) -> int | None:
     return getattr(exc, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
 
 
@@ -73,24 +75,24 @@ class S3Lease:
         self._key = lease_key(prefix)
         self.runner = runner
         self.lease_id = str(uuid.uuid4())
-        self._etag: Optional[str] = None  # ETag of the last write this lease made
-        self._body: Optional[dict] = None
+        self._etag: str | None = None  # ETag of the last write this lease made
+        self._body: dict | None = None
 
     @property
-    def body(self) -> Optional[dict]:
+    def body(self) -> dict | None:
         """The lease object as last written by this runner."""
         return self._body
 
     # -- reading -------------------------------------------------------
 
-    def read(self) -> Tuple[Optional[dict], Optional[str]]:
+    def read(self) -> tuple[dict | None, str | None]:
         """Return (body, etag); (None, None) when the object does not exist.
 
         An unparseable object comes back as {} so it is treated as expired."""
         try:
             resp = self._s3.get_object(Bucket=self._bucket, Key=self._key)
         except Exception as exc:
-            if _status(exc) == 404:
+            if http_status(exc) == 404:
                 return None, None
             raise
         try:
@@ -102,7 +104,7 @@ class S3Lease:
         return body, resp["ETag"]
 
     @staticmethod
-    def holder_is_active(body: Optional[dict], now: Optional[datetime] = None) -> bool:
+    def holder_is_active(body: dict | None, now: datetime | None = None) -> bool:
         """True when body is a valid, unexpired running lease."""
         if not body or body.get("schema") != SCHEMA or body.get("state") != "running":
             return False
@@ -113,7 +115,7 @@ class S3Lease:
         return expires + SKEW_MARGIN > now
 
     @staticmethod
-    def last_success(body: Optional[dict]) -> Optional[datetime]:
+    def last_success(body: dict | None) -> datetime | None:
         """Last successful run, or None when never succeeded or the value is invalid."""
         when = _parse((body or {}).get("last_success"))
         if when is None or when > _now() + SKEW_MARGIN:
@@ -122,7 +124,7 @@ class S3Lease:
 
     # -- writing -------------------------------------------------------
 
-    def _put(self, body: dict, etag: Optional[str]) -> str:
+    def _put(self, body: dict, etag: str | None) -> str:
         condition = {"IfMatch": etag} if etag else {"IfNoneMatch": "*"}
         resp = self._s3.put_object(
             Bucket=self._bucket, Key=self._key,
@@ -145,11 +147,10 @@ class S3Lease:
         current, etag = self.read()
         now = _now()
         if self.holder_is_active(current, now):
-            holder = current or {}
-            print(f"Lease held by {holder.get('runner')} until {holder.get('expires_at')}; skipping.")
+            logger.info(f"Lease held by {current.get('runner')} until {current.get('expires_at')}; skipping.")
             return False
         if current and current.get("state") == "running":
-            print(f"Taking over expired or invalid lease from {current.get('runner')}.")
+            logger.warning(f"Taking over expired or invalid lease from {current.get('runner')}.")
 
         body = {
             "schema": SCHEMA,
@@ -169,9 +170,9 @@ class S3Lease:
             # A conflict, a timeout or a 5xx can all hide our own write having landed.
             if self._resolve_conflict():
                 return True
-            if _status(exc) not in _CONFLICT_STATUSES:
+            if http_status(exc) not in _CONFLICT_STATUSES:
                 raise
-        print("Another runner acquired the lease first; skipping.")
+        logger.info("Another runner acquired the lease first; skipping.")
         return False
 
     def still_held(self) -> bool:
@@ -201,7 +202,7 @@ class S3Lease:
             if current and current.get("lease_id") == self.lease_id and current.get("state") == "idle":
                 self._body, self._etag = current, etag  # our release landed; the response was lost
                 return True
-            if _status(exc) not in _CONFLICT_STATUSES:
+            if http_status(exc) not in _CONFLICT_STATUSES:
                 raise
-        print("WARNING: lease was taken over before release; leaving the new holder's lease untouched.")
+        logger.warning("Lease was taken over before release; leaving the new holder's lease untouched.")
         return False

@@ -1,11 +1,12 @@
 """Small, rate-aware client for Arctic Shift ID lookups."""
 
 import logging
-from typing import Dict, Iterable, List
+from collections.abc import Iterable
 
 import requests
 
-from ..rate_limiter import rate_limit_manager
+from utils.content_recovery.recovery_metadata import ArchiveLookupError
+from utils.rate_limiter import parse_retry_after, rate_limit_manager
 
 
 ARCTIC_SHIFT_BASE_URL = 'https://arctic-shift.photon-reddit.com/api'
@@ -27,21 +28,23 @@ class ArcticShiftClient:
         self.session.headers.setdefault('User-Agent', 'Reddit Stash Content Recovery/1.0')
         self.session.headers.setdefault('Accept', 'application/json')
 
-    def fetch_posts(self, ids: Iterable[str]) -> Dict[str, Dict]:
-        """Return archived posts keyed by their base36 Reddit ID."""
+    def fetch_posts(self, ids: Iterable[str]) -> dict[str, dict]:
+        """Return archived posts by base36 Reddit ID, or raise ArchiveLookupError."""
         return self._fetch_by_ids('posts', ids, POST_FIELDS)
 
-    def fetch_comments(self, ids: Iterable[str]) -> Dict[str, Dict]:
-        """Return archived comments keyed by their base36 Reddit ID."""
+    def fetch_comments(self, ids: Iterable[str]) -> dict[str, dict]:
+        """Return archived comments by base36 Reddit ID, or raise ArchiveLookupError."""
         return self._fetch_by_ids('comments', ids, COMMENT_FIELDS)
 
-    def _fetch_by_ids(self, content_type: str, ids: Iterable[str], fields: tuple[str, ...]) -> Dict[str, Dict]:
+    def _fetch_by_ids(self, content_type: str, ids: Iterable[str], fields: tuple[str, ...]) -> dict[str, dict]:
         normalized_ids = self._normalize_ids(ids)
         records = {}
+        failure = None
 
         for batch in self._batches(normalized_ids):
             if not rate_limit_manager.acquire(ARCTIC_SHIFT_SERVICE, timeout=self.timeout):
                 self._logger.warning('Arctic Shift request deferred by the rate limiter')
+                failure = 'deferred by the rate limiter'
                 break
 
             try:
@@ -53,27 +56,34 @@ class ArcticShiftClient:
                 rate_limit_manager.report_response(
                     ARCTIC_SHIFT_SERVICE,
                     response.status_code,
-                    self._get_retry_after(response),
+                    parse_retry_after(response),
                 )
                 response.raise_for_status()
                 payload = response.json()
             except (requests.RequestException, ValueError) as error:
                 self._logger.warning(f'Arctic Shift {content_type} lookup failed: {error}')
+                failure = str(error)
                 continue
 
-            data = payload.get('data', []) if isinstance(payload, dict) else []
+            # A 200 without a record list answered nothing, so it must not read as a miss.
+            data = payload.get('data') if isinstance(payload, dict) else None
             if not isinstance(data, list):
                 self._logger.warning('Arctic Shift returned an unexpected response shape')
+                failure = 'unexpected response shape'
                 continue
 
             for record in data:
                 if isinstance(record, dict) and record.get('id'):
                     records[self._normalize_id(str(record['id']))] = record
+                else:
+                    failure = 'unusable record in response'
 
+        if failure:
+            raise ArchiveLookupError(f'Arctic Shift {content_type} lookup: {failure}', records)
         return records
 
     @staticmethod
-    def _normalize_ids(ids: Iterable[str]) -> List[str]:
+    def _normalize_ids(ids: Iterable[str]) -> list[str]:
         seen = set()
         normalized_ids = []
         for item_id in ids:
@@ -90,14 +100,7 @@ class ArcticShiftClient:
             normalized_id = normalized_id[3:]
         return normalized_id
 
-    def _batches(self, ids: List[str]):
+    def _batches(self, ids: list[str]):
         for start in range(0, len(ids), self.batch_size):
             yield ids[start:start + self.batch_size]
 
-    @staticmethod
-    def _get_retry_after(response) -> int | None:
-        value = response.headers.get('retry-after')
-        try:
-            return int(value) if value else None
-        except ValueError:
-            return None

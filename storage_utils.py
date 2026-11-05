@@ -11,75 +11,44 @@ Usage:
     python storage_utils.py --migrate --source dropbox --target s3 --execute  # actual
     python storage_utils.py --cycle [--runner NAME] [--require-stale HOURS]
 
---cycle (needs STORAGE_COORDINATION=true, AWS S3) takes an S3 lease, downloads
-file_log.json, runs reddit_stash, uploads, and releases the lease, so several
-runners (e.g. a homelab plus GitHub Actions) never sync at the same time.
+--cycle (needs STORAGE_COORDINATION=true, AWS S3) runs reddit_stash under an S3
+lease; see utils/storage/cycle.py.
 Exit codes: 0 success, 2 failure, 3 skipped (lease held, lost race, or fresh).
 """
 
 import argparse
-import configparser
-import os
-import shutil
-import signal
-import socket
 import sys
-from datetime import datetime, timedelta, timezone
+from typing import NoReturn
 
-from utils.file_path_validate import validate_and_set_directory
-from utils.storage.base import StorageProvider
-from utils.storage.factory import load_storage_config, get_storage_provider
+from utils.log_utils import configure_logging
+from utils.storage import cycle
+from utils.storage.base import StorageProvider, StorageProviderProtocol, SyncResult
+from utils.storage.factory import (
+    StorageConfig,
+    configured_local_dir,
+    create_provider,
+    get_remote_directory,
+    get_storage_provider,
+    load_local_dir,
+    load_storage_config,
+    load_sync_check_type,
+)
+from utils.storage.migration import StorageMigration
 
-
-def _load_local_dir() -> str:
-    """Load and validate the local save directory from settings.ini."""
-    parser = configparser.ConfigParser()
-    parser.read("settings.ini")
-    local_dir = parser.get("Settings", "save_directory", fallback="reddit/")
-    return validate_and_set_directory(local_dir)
-
-
-def _load_check_type() -> str:
-    """Load the check_type setting from settings.ini."""
-    parser = configparser.ConfigParser()
-    parser.read("settings.ini")
-    return parser.get("Settings", "check_type", fallback="DIR").upper()
+PROVIDER_NAMES = [p.value for p in StorageProvider if p != StorageProvider.NONE]
 
 
-def _get_provider_for_name(name: str):
-    """Create a provider instance for the given provider name string."""
-    config = load_storage_config()
-
-    if name == "dropbox":
-        from utils.storage.dropbox_provider import DropboxStorageProvider
-        return DropboxStorageProvider(dropbox_directory=config.dropbox_directory)
-    elif name == "s3":
-        if not config.s3_bucket:
-            print("Error: S3 bucket not configured. Set AWS_S3_BUCKET or s3_bucket in settings.ini.")
-            sys.exit(1)
-        from utils.storage.s3_provider import S3StorageProvider
-        return S3StorageProvider(
-            bucket=config.s3_bucket,
-            region=config.s3_region,
-            storage_class=config.s3_storage_class,
-            endpoint_url=config.s3_endpoint_url,
-        )
-    else:
-        print(f"Error: Unknown provider '{name}'. Must be 'dropbox' or 's3'.")
+def _connected_provider(config: StorageConfig) -> StorageProviderProtocol:
+    """The configured provider, connected; exits when none is configured."""
+    provider = get_storage_provider(config)
+    if provider is None:
+        print("No storage provider configured. Set provider in [Storage] section of settings.ini.")
         sys.exit(1)
+    provider.connect()
+    return provider
 
 
-def _get_remote_directory(provider_name: str) -> str:
-    """Return the remote directory path for the given provider."""
-    config = load_storage_config()
-    if provider_name == "dropbox":
-        return config.dropbox_directory
-    # S3 uses the bucket root or a prefix — use dropbox_directory as the key prefix
-    # to maintain path consistency across providers
-    return config.dropbox_directory.lstrip("/")
-
-
-def _exit_on_failure(result, max_shown: int = 5) -> None:
+def _exit_on_failure(result: SyncResult, max_shown: int = 5) -> None:
     """Print transfer errors and exit non-zero so callers never treat a failed sync as done."""
     if result.errors:
         print(f"\n{len(result.errors)} error(s) occurred:")
@@ -89,91 +58,33 @@ def _exit_on_failure(result, max_shown: int = 5) -> None:
         sys.exit(1)
 
 
-def cmd_download(args):
+def cmd_download(args: argparse.Namespace) -> None:
     """Download files from the configured storage provider."""
     config = load_storage_config()
-    provider = get_storage_provider(config)
+    provider = _connected_provider(config)
 
-    if provider is None:
-        print("No storage provider configured. Set provider in [Storage] section of settings.ini.")
-        sys.exit(1)
+    local_dir = load_local_dir()
+    remote_dir = get_remote_directory(config.provider, config)
 
-    provider.connect()
-
-    local_dir = _load_local_dir()
-    check_type = _load_check_type()
-
-    remote_dir = config.dropbox_directory
-    if config.provider == StorageProvider.S3:
-        remote_dir = config.dropbox_directory.lstrip("/")
-
-    if check_type == "LOG":
+    if load_sync_check_type() == "LOG":
         print(f"Downloading log file from {provider.get_provider_name()}...")
+        result = provider.download_log(remote_dir, local_dir)
     else:
         print(f"Downloading directory from {provider.get_provider_name()}...")
-
-    result = provider.download_directory(remote_dir, local_dir, check_type=check_type)
+        result = provider.download_directory(remote_dir, local_dir)
     _exit_on_failure(result)
-
-
-EXIT_CYCLE_FAILED = 2
-EXIT_CYCLE_SKIPPED = 3
-
-
-def _coordination_enabled() -> bool:
-    return os.environ.get("STORAGE_COORDINATION", "").strip().lower() in ("1", "true", "yes")
 
 
 def _refuse_when_coordinated(command: str) -> None:
     """Uncoordinated writes could overwrite a runner that holds the lease."""
-    if _coordination_enabled():
+    if cycle.coordination_enabled():
         print(f"Refusing {command}: STORAGE_COORDINATION is on, so only --cycle may write to storage.")
-        sys.exit(EXIT_CYCLE_FAILED)
-
-
-def _coordination_problems(config) -> list:
-    """Settings that coordinated runs do not support (yet), as readable messages."""
-    problems = []
-    if config.provider != StorageProvider.S3:
-        problems.append("coordination needs provider = s3")
-    if config.s3_endpoint_url and "amazonaws.com" not in config.s3_endpoint_url:
-        problems.append("coordination is only verified on AWS S3, not custom endpoints")
-    if not config.dropbox_directory.strip("/"):
-        problems.append("coordination needs a non-empty dropbox_directory (the S3 key prefix)")
-    parser = configparser.ConfigParser()
-    parser.read("settings.ini")
-    if parser.getboolean("Settings", "unsave_after_download", fallback=False):
-        problems.append("unsave_after_download = true can lose items if an upload fails")
-    if parser.getboolean("Settings", "process_gdpr", fallback=False):
-        problems.append("process_gdpr = true needs the CSV export on every runner")
-    if _load_check_type() != "LOG":
-        problems.append("coordination needs check_type = LOG")
-    return problems
-
-
-def _default_runner() -> str:
-    run_id = os.environ.get("GITHUB_RUN_ID")
-    if run_id:
-        return f"github:{run_id}:{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
-    return socket.gethostname()
-
-
-def _ping_healthcheck(success: bool) -> None:
-    """Optional dead-man's-switch ping (e.g. healthchecks.io); never fails the run."""
-    url = os.environ.get("HEALTHCHECK_URL")
-    if not url:
-        return
-    try:
-        import requests
-        requests.get(url if success else f"{url.rstrip('/')}/fail", timeout=10)
-    except Exception as exc:
-        # Only the type: the message would contain the ping URL, which is a secret.
-        print(f"Healthcheck ping failed: {type(exc).__name__}")
+        sys.exit(cycle.EXIT_CYCLE_FAILED)
 
 
 def _run_backup() -> bool:
     """Run reddit_stash in this process; True when it finished without error."""
-    import reddit_stash
+    import reddit_stash  # only --cycle needs praw and the whole backup pipeline
     try:
         reddit_stash.main()
         return True
@@ -184,149 +95,43 @@ def _run_backup() -> bool:
         return False
 
 
-def _sync_cycle(provider, lease, prefix: str, local_dir: str, require_stale) -> int:
-    """Body of --cycle while holding the lease; returns the exit code."""
-    if require_stale is not None:
-        last = lease.last_success(lease.body)
-        if last and datetime.now(timezone.utc) - last < timedelta(hours=require_stale):
-            print(f"Last successful run was at {last:%Y-%m-%d %H:%M} UTC, within "
-                  f"{require_stale}h; nothing to do.")
-            return EXIT_CYCLE_SKIPPED
-
-    result = provider.download_directory(prefix, local_dir, check_type="LOG")
-    if result.failed or result.errors:
-        print(f"Download failed: {result.errors[:3]}")
-        return EXIT_CYCLE_FAILED
-
-    if not _run_backup():
-        return EXIT_CYCLE_FAILED
-
-    if not lease.still_held():
-        print("Lease expired or was taken over during processing; not uploading.")
-        return EXIT_CYCLE_FAILED
-
-    result = provider.upload_directory(local_dir, prefix)
-    if result.failed or result.errors:
-        for err in result.errors[:5]:
-            print(f"  - {err}")
-        return EXIT_CYCLE_FAILED
-    return 0
+def cmd_cycle(args: argparse.Namespace) -> NoReturn:
+    """Coordinated run; see utils/storage/cycle.py."""
+    cycle.cmd_cycle(args, _run_backup)
 
 
-class _Terminated(BaseException):
-    """Raised on SIGTERM so cleanup runs; BaseException so `except Exception` cannot swallow it."""
-
-
-def _raise_terminated(signum, frame):
-    raise _Terminated()
-
-
-def _has_files(path: str) -> bool:
-    return any(files for _root, _dirs, files in os.walk(path))
-
-
-def _clear_dir(path: str) -> None:
-    """Empty the save directory this cycle filled (it was empty when the cycle started)."""
-    for name in os.listdir(path):
-        full = os.path.join(path, name)
-        if os.path.isdir(full) and not os.path.islink(full):
-            shutil.rmtree(full)
-        else:
-            os.remove(full)
-
-
-def _cycle(args) -> int:
-    if not _coordination_enabled():
-        print("--cycle needs STORAGE_COORDINATION=true.")
-        return EXIT_CYCLE_FAILED
-    config = load_storage_config()
-    problems = _coordination_problems(config)
-    local_dir = _load_local_dir()
-    if _has_files(local_dir):
-        # Leftover local files may be older than S3 and would be uploaded over newer copies.
-        problems.append(f"the save directory '{local_dir}' must be empty; use a separate "
-                        "folder (e.g. storage_utils.py --download) for a local copy")
-    if problems:
-        print("Coordinated run refused:")
-        for problem in problems:
-            print(f"  - {problem}")
-        return EXIT_CYCLE_FAILED
-
-    provider = get_storage_provider(config)
-    provider.connect()
-    provider.require_log_snapshot = True
-    prefix = config.dropbox_directory.strip("/")
-    lease = provider.lease(prefix, args.runner or _default_runner())
-
-    if not lease.acquire():
-        return EXIT_CYCLE_SKIPPED
-    code = EXIT_CYCLE_FAILED
-    try:
-        code = _sync_cycle(provider, lease, prefix, local_dir, args.require_stale)
-    finally:
-        # Release even on errors or SIGTERM; only a successful run refreshes last_success.
-        try:
-            released = lease.release(success=code == 0)
-        except Exception as exc:
-            print(f"Lease release failed: {type(exc).__name__}: {exc}")
-            released = False
-        if code == 0 and not released:
-            print("The lease was not released cleanly, so this run is not reported as successful.")
-            code = EXIT_CYCLE_FAILED
-        if code != EXIT_CYCLE_SKIPPED:
-            _ping_healthcheck(code == 0)
-        _clear_dir(local_dir)
-    return code
-
-
-def cmd_cycle(args):
-    """Lease -> download log -> back up -> upload -> release, in one process."""
-    signal.signal(signal.SIGTERM, _raise_terminated)
-    try:
-        code = _cycle(args)
-    except _Terminated:
-        print("Terminated (SIGTERM); lease released.")
-        code = EXIT_CYCLE_FAILED
-    except Exception as exc:
-        print(f"Coordinated run failed: {type(exc).__name__}: {exc}")
-        code = EXIT_CYCLE_FAILED
-    sys.exit(code)
-
-
-def cmd_upload(args):
+def cmd_upload(args: argparse.Namespace) -> None:
     """Upload files to the configured storage provider."""
     _refuse_when_coordinated("--upload")
     config = load_storage_config()
-    provider = get_storage_provider(config)
+    provider = _connected_provider(config)
 
-    if provider is None:
-        print("No storage provider configured. Set provider in [Storage] section of settings.ini.")
-        sys.exit(1)
-
-    provider.connect()
-
-    local_dir = _load_local_dir()
-
-    remote_dir = config.dropbox_directory
-    if config.provider == StorageProvider.S3:
-        remote_dir = config.dropbox_directory.lstrip("/")
+    # Upload only reads, so a read-only save directory is fine.
+    local_dir = configured_local_dir()
+    remote_dir = get_remote_directory(config.provider, config)
 
     print(f"Uploading to {provider.get_provider_name()}...")
     result = provider.upload_directory(local_dir, remote_dir)
     _exit_on_failure(result)
 
 
-def cmd_migrate(args):
+def cmd_migrate(args: argparse.Namespace) -> None:
     """Migrate files between storage providers."""
     if args.execute:
         _refuse_when_coordinated("--migrate --execute")
-    from utils.storage.migration import StorageMigration
-
-    source = _get_provider_for_name(args.source)
-    target = _get_provider_for_name(args.target)
 
     if args.source == args.target:
         print("Error: Source and target providers must be different.")
+        sys.exit(1)
+
+    config = load_storage_config()
+    source_kind = StorageProvider(args.source)
+    target_kind = StorageProvider(args.target)
+    try:
+        source = create_provider(source_kind, config)
+        target = create_provider(target_kind, config)
+    except ValueError as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
 
     print(f"Connecting to {source.get_provider_name()}...")
@@ -334,14 +139,11 @@ def cmd_migrate(args):
     print(f"Connecting to {target.get_provider_name()}...")
     target.connect()
 
-    source_dir = _get_remote_directory(args.source)
-    target_dir = _get_remote_directory(args.target)
-
     migration = StorageMigration(
         source=source,
         target=target,
-        source_directory=source_dir,
-        target_directory=target_dir,
+        source_directory=get_remote_directory(source_kind, config),
+        target_directory=get_remote_directory(target_kind, config),
     )
 
     if args.execute:
@@ -357,7 +159,8 @@ def cmd_migrate(args):
             print("\nNo files to migrate.")
 
 
-def main():
+def main() -> None:
+    configure_logging()
     parser = argparse.ArgumentParser(
         description="Reddit Stash storage management (Dropbox, S3)",
     )
@@ -370,8 +173,8 @@ def main():
                        help="Coordinated run: lease, download, back up, upload, release (S3)")
 
     # Migration-specific arguments
-    parser.add_argument("--source", choices=["dropbox", "s3"], help="Migration source provider")
-    parser.add_argument("--target", choices=["dropbox", "s3"], help="Migration target provider")
+    parser.add_argument("--source", choices=PROVIDER_NAMES, help="Migration source provider")
+    parser.add_argument("--target", choices=PROVIDER_NAMES, help="Migration target provider")
     parser.add_argument("--execute", action="store_true", help="Execute migration (default is dry-run)")
 
     # Cycle-specific arguments

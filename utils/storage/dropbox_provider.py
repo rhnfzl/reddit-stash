@@ -1,53 +1,54 @@
 """
 Dropbox storage provider implementing StorageProviderProtocol.
 
-Wraps the logic from dropbox_utils.py into a class-based provider
-that can be used interchangeably with other storage backends.
+Syncs the local save directory with a Dropbox folder, using Dropbox content
+hashes to skip unchanged files.
 """
 
 import hashlib
+import logging
 import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
 
-from utils.storage.base import StorageFileInfo, SyncResult
-from utils.storage.content_hash import compute_file_hash
+import dropbox
+import requests
+from dropbox.exceptions import ApiError
+from dropbox.files import FileMetadata
 
-# Lazy import — dropbox may not be installed
-_dropbox = None
-_ApiError = None
-_FileMetadata = None
+from utils.constants import BYTES_PER_MB, DEFAULT_TIMEOUT_SECONDS, LOG_FILE_NAME
+from utils.path_security import is_path_within
+from utils.storage.base import (
+    FileOutcome,
+    StorageError,
+    StorageFileInfo,
+    StorageProviderProtocol,
+    SyncResult,
+    SyncTally,
+    raises_storage_error,
+    split_log_file,
+    upload_candidates,
+)
+from utils.storage.content_hash import CHUNK_SIZE
 
-SINGLE_UPLOAD_LIMIT = 150 * 1024 * 1024  # 150 MB
-UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
+logger = logging.getLogger(__name__)
 
-
-def _ensure_dropbox():
-    """Lazy-import the dropbox SDK."""
-    global _dropbox, _ApiError, _FileMetadata
-    if _dropbox is None:
-        import dropbox
-        from dropbox.exceptions import ApiError
-        from dropbox.files import FileMetadata
-
-        _dropbox = dropbox
-        _ApiError = ApiError
-        _FileMetadata = FileMetadata
+SINGLE_UPLOAD_LIMIT = 150 * BYTES_PER_MB
+UPLOAD_CHUNK_SIZE = 4 * BYTES_PER_MB
 
 
 class _DropboxContentHasher:
     """Dropbox content hash algorithm (4 MB blocks, SHA256)."""
 
-    BLOCK_SIZE = 4 * 1024 * 1024
+    BLOCK_SIZE = 4 * BYTES_PER_MB
 
     def __init__(self):
         self._overall = hashlib.sha256()
         self._block = hashlib.sha256()
         self._block_pos = 0
 
-    def update(self, data: bytes):
+    def update(self, data: bytes) -> None:
         pos = 0
         while pos < len(data):
             if self._block_pos == self.BLOCK_SIZE:
@@ -71,11 +72,20 @@ def _dropbox_content_hash(file_path: str) -> str:
     hasher = _DropboxContentHasher()
     with open(file_path, "rb") as f:
         while True:
-            chunk = f.read(1024 * 1024)
+            chunk = f.read(CHUNK_SIZE)
             if not chunk:
                 break
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _api_path(remote_path: str) -> str:
+    """Dropbox rejects paths without a leading slash; S3-style keys arrive without one."""
+    return "/" + remote_path.lstrip("/")
+
+
+def _is_not_found(err: ApiError) -> bool:
+    return err.error.is_path() and err.error.get_path().is_not_found()
 
 
 def _sanitize_filename(name: str) -> str:
@@ -91,11 +101,10 @@ def _sanitize_filename(name: str) -> str:
     return sanitized
 
 
-class DropboxStorageProvider:
+class DropboxStorageProvider(StorageProviderProtocol):
     """Dropbox implementation of StorageProviderProtocol."""
 
-    def __init__(self, dropbox_directory: str = "/reddit"):
-        self._dropbox_directory = dropbox_directory
+    def __init__(self):
         self._dbx = None
         self._max_workers = 3
 
@@ -105,9 +114,6 @@ class DropboxStorageProvider:
 
     def connect(self) -> None:
         """Refresh the OAuth2 token and create a Dropbox client."""
-        _ensure_dropbox()
-        import requests as _requests
-
         refresh_token = os.getenv("DROPBOX_REFRESH_TOKEN")
         client_id = os.getenv("DROPBOX_APP_KEY")
         client_secret = os.getenv("DROPBOX_APP_SECRET")
@@ -118,7 +124,7 @@ class DropboxStorageProvider:
                 "DROPBOX_APP_KEY, and DROPBOX_APP_SECRET environment variables."
             )
 
-        resp = _requests.post(
+        resp = requests.post(
             "https://api.dropboxapi.com/oauth2/token",
             data={
                 "grant_type": "refresh_token",
@@ -126,45 +132,47 @@ class DropboxStorageProvider:
                 "client_id": client_id,
                 "client_secret": client_secret,
             },
+            timeout=DEFAULT_TIMEOUT_SECONDS,
         )
 
         if resp.status_code != 200:
             raise RuntimeError(f"Failed to refresh Dropbox token: {resp.text}")
 
         token = resp.json().get("access_token")
-        os.environ["DROPBOX_TOKEN"] = token
-        self._dbx = _dropbox.Dropbox(token)
-        print(" -- Dropbox Access Token Refreshed -- ")
+        self._dbx = dropbox.Dropbox(token)
+        logger.info(" -- Dropbox Access Token Refreshed -- ")
 
+    @raises_storage_error
     def upload_file(self, local_path: str, remote_path: str) -> StorageFileInfo:
         self._require_client()
+        remote_path = _api_path(remote_path)
         size = self._raw_upload(local_path, remote_path)
         return StorageFileInfo(
             remote_path=remote_path,
-            content_hash=compute_file_hash(local_path),
+            content_hash=_dropbox_content_hash(local_path),
             size_bytes=size,
         )
 
+    @raises_storage_error
     def download_file(self, remote_path: str, local_path: str) -> StorageFileInfo:
         self._require_client()
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        metadata, res = self._dbx.files_download(remote_path)
-        with open(local_path, "wb") as f:
-            f.write(res.content)
+        remote_path = _api_path(remote_path)
+        size = self._download_to(remote_path, local_path)
         return StorageFileInfo(
             remote_path=remote_path,
-            content_hash=compute_file_hash(local_path),
-            size_bytes=metadata.size,
+            content_hash=_dropbox_content_hash(local_path),
+            size_bytes=size,
         )
 
-    def list_files(self, remote_directory: str) -> List[StorageFileInfo]:
+    @raises_storage_error
+    def list_files(self, remote_directory: str) -> list[StorageFileInfo]:
         self._require_client()
-        result_list: List[StorageFileInfo] = []
+        result_list: list[StorageFileInfo] = []
         try:
             result = self._dbx.files_list_folder(remote_directory, recursive=True)
             while True:
                 for entry in result.entries:
-                    if isinstance(entry, _FileMetadata):
+                    if isinstance(entry, FileMetadata):
                         result_list.append(StorageFileInfo(
                             remote_path=entry.path_lower,
                             content_hash=entry.content_hash,  # Dropbox hash, not BLAKE3
@@ -173,172 +181,110 @@ class DropboxStorageProvider:
                 if not result.has_more:
                     break
                 result = self._dbx.files_list_folder_continue(result.cursor)
-        except _ApiError as err:
+        except ApiError as err:
             # A missing folder is a legitimate empty remote (first run); any other
             # error would hand callers a partial listing that looks complete.
-            if err.error.is_path() and err.error.get_path().is_not_found():
+            if _is_not_found(err):
                 return []
-            raise RuntimeError(f"Failed to list Dropbox folder {remote_directory}: {err}") from err
+            raise StorageError(f"Failed to list Dropbox folder {remote_directory}: {err}") from err
         return result_list
 
-    def get_file_info(self, remote_path: str) -> Optional[StorageFileInfo]:
+    @raises_storage_error
+    def get_file_info(self, remote_path: str) -> StorageFileInfo | None:
         self._require_client()
         try:
-            meta = self._dbx.files_get_metadata(remote_path)
-            if isinstance(meta, _FileMetadata):
-                return StorageFileInfo(
-                    remote_path=meta.path_lower,
-                    content_hash=meta.content_hash,
-                    size_bytes=meta.size,
-                )
-        except _ApiError:
-            pass
+            meta = self._dbx.files_get_metadata(_api_path(remote_path))
+        except ApiError as err:
+            if _is_not_found(err):
+                return None
+            raise
+        if isinstance(meta, FileMetadata):
+            return StorageFileInfo(
+                remote_path=meta.path_lower,
+                content_hash=meta.content_hash,
+                size_bytes=meta.size,
+            )
         return None
 
-    def file_exists(self, remote_path: str) -> bool:
-        return self.get_file_info(remote_path) is not None
-
-    def upload_directory(self, local_directory: str, remote_directory: str,
-                         check_type: str = "DIR") -> SyncResult:
+    def upload_directory(self, local_directory: str, remote_directory: str) -> SyncResult:
         self._require_client()
-        start = time.time()
+        tally = SyncTally(time.time())
+        dbx_hashes = self._remote_hashes(remote_directory)
+        regular_files, log_path = split_log_file(upload_candidates(local_directory))
 
-        # Build remote file hash map (Dropbox hashes)
-        dbx_hashes = {}
-        try:
-            for info in self.list_files(remote_directory):
-                dbx_hashes[info.remote_path] = info.content_hash
-        except RuntimeError as err:
-            # Hashes only skip unchanged files; uploading everything is still correct.
-            print(f"{err} -- uploading all files without change detection.")
-
-        files_to_upload = [
-            (root, fname)
-            for root, _dirs, files in os.walk(local_directory)
-            for fname in files
-            if not fname.startswith(".")
-        ]
-
-        log_entry = None
-        regular_files = []
-        for entry in files_to_upload:
-            if entry[1] == "file_log.json":
-                log_entry = entry
-            else:
-                regular_files.append(entry)
-
-        uploaded = 0
-        skipped = 0
-        failed = 0
-        bytes_transferred = 0
-        errors: List[str] = []
-
-        def _process(root_and_name):
-            root, fname = root_and_name
-            sanitized = _sanitize_filename(fname)
-            file_path = os.path.join(root, fname)
+        def _upload_if_changed(file_path: str) -> FileOutcome:
+            fname = os.path.basename(file_path)
             rel = os.path.relpath(file_path, local_directory).replace(os.sep, "/")
-            dbx_path = f"{remote_directory}/{rel}".replace(fname, sanitized)
-
-            # Skip unchanged files
-            if dbx_path.lower() in dbx_hashes:
-                local_hash = _dropbox_content_hash(file_path)
-                if dbx_hashes[dbx_path.lower()] == local_hash:
-                    return "skipped", 0, None
+            dbx_path = f"{remote_directory}/{rel}".replace(fname, _sanitize_filename(fname))
 
             try:
+                # Skip unchanged files
+                if dbx_path.lower() in dbx_hashes:
+                    local_hash = _dropbox_content_hash(file_path)
+                    if dbx_hashes[dbx_path.lower()] == local_hash:
+                        return "skipped", 0, None
+
                 size = self._raw_upload(file_path, dbx_path)
                 return "uploaded", size, None
             except Exception as exc:
                 return "failed", 0, f"{file_path}: {exc}"
 
-        def _record(status, size, error):
-            nonlocal uploaded, skipped, failed, bytes_transferred
-            if status == "uploaded":
-                uploaded += 1
-                bytes_transferred += size
-            elif status == "skipped":
-                skipped += 1
-            else:
-                failed += 1
-                errors.append(error)
-
         with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-            futures = {pool.submit(_process, f): f for f in regular_files}
+            futures = {pool.submit(_upload_if_changed, f): f for f in regular_files}
             for future in as_completed(futures):
-                _record(*future.result())
+                tally.record(*future.result())
 
-        if log_entry:
-            if failed:
-                print(
-                    "Skipping file_log.json upload because one or more content files failed."
-                )
+        if log_path:
+            if tally.failed:
+                logger.warning("Skipping file_log.json upload because one or more content files failed.")
             else:
-                _record(*_process(log_entry))
+                tally.record(*_upload_if_changed(log_path))
 
-        elapsed = time.time() - start
-        result = SyncResult(
-            uploaded=uploaded,
-            skipped=skipped,
-            failed=failed,
-            bytes_transferred=bytes_transferred,
-            elapsed_seconds=elapsed,
-            errors=errors,
-        )
-        print(f"Dropbox upload: {result.summary()}")
-        return result
+        return tally.finish("uploaded", "Dropbox upload")
 
-    def download_directory(self, remote_directory: str, local_directory: str,
-                           check_type: str = "DIR") -> SyncResult:
+    def download_directory(self, remote_directory: str, local_directory: str) -> SyncResult:
         self._require_client()
-        start = time.time()
+        tally = SyncTally(time.time())
 
-        if check_type == "LOG":
-            return self._download_log_only(remote_directory, local_directory, start)
-
-        remote_files = self.list_files(remote_directory)
-
-        downloaded = 0
-        skipped = 0
-        failed = 0
-        bytes_transferred = 0
-        errors: List[str] = []
-
-        for info in remote_files:
+        for info in tally.listing(self.list_files, remote_directory):
             local_path = os.path.join(
                 local_directory,
                 info.remote_path[len(remote_directory):].lstrip("/"),
             )
-
-            # Skip unchanged local files (compare Dropbox hashes)
-            if os.path.exists(local_path):
-                local_hash = _dropbox_content_hash(local_path)
-                if local_hash == info.content_hash:
-                    skipped += 1
-                    continue
+            if not is_path_within(local_directory, local_path):
+                tally.record("failed", error=f"{info.remote_path}: resolves outside {local_directory}")
+                continue
 
             try:
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                meta, res = self._dbx.files_download(info.remote_path)
-                with open(local_path, "wb") as f:
-                    f.write(res.content)
-                downloaded += 1
-                bytes_transferred += meta.size
-            except Exception as exc:
-                failed += 1
-                errors.append(f"{info.remote_path}: {exc}")
+                # Skip unchanged local files (compare Dropbox hashes)
+                if os.path.exists(local_path):
+                    local_hash = _dropbox_content_hash(local_path)
+                    if local_hash == info.content_hash:
+                        tally.record("skipped")
+                        continue
 
-        elapsed = time.time() - start
-        result = SyncResult(
-            downloaded=downloaded,
-            skipped=skipped,
-            failed=failed,
-            bytes_transferred=bytes_transferred,
-            elapsed_seconds=elapsed,
-            errors=errors,
-        )
-        print(f"Dropbox download: {result.summary()}")
-        return result
+                tally.record("downloaded", self._download_to(info.remote_path, local_path))
+            except Exception as exc:
+                tally.record("failed", error=f"{info.remote_path}: {exc}")
+
+        return tally.finish("downloaded", "Dropbox download")
+
+    def download_log(self, remote_directory: str, local_directory: str) -> SyncResult:
+        self._require_client()
+        start = time.time()
+        log_local = os.path.join(local_directory, LOG_FILE_NAME)
+
+        try:
+            size = self._download_to(f"{remote_directory}/{LOG_FILE_NAME}", log_local)
+        except Exception as exc:
+            if isinstance(exc, ApiError) and _is_not_found(exc):
+                logger.info("No existing log file in Dropbox — starting fresh.")
+                return SyncResult(elapsed_seconds=time.time() - start)
+            logger.error(f"Failed to download log file: {exc}")
+            return SyncResult(failed=1, elapsed_seconds=time.time() - start, errors=[str(exc)])
+
+        logger.info(f"Log file downloaded to {log_local}.")
+        return SyncResult(downloaded=1, bytes_transferred=size, elapsed_seconds=time.time() - start)
 
     def get_provider_name(self) -> str:
         return "Dropbox"
@@ -351,6 +297,15 @@ class DropboxStorageProvider:
         if self._dbx is None:
             raise RuntimeError("Call connect() before using the Dropbox provider.")
 
+    def _remote_hashes(self, remote_directory: str) -> dict[str, str | None]:
+        """Dropbox hash per remote path, empty when the listing fails."""
+        try:
+            return {info.remote_path: info.content_hash for info in self.list_files(remote_directory)}
+        except StorageError as err:
+            # Hashes only skip unchanged files; uploading everything is still correct.
+            logger.warning(f"{err} -- uploading all files without change detection.")
+            return {}
+
     def _raw_upload(self, local_path: str, remote_path: str) -> int:
         """Upload a single file, using chunked upload for large files."""
         file_size = os.path.getsize(local_path)
@@ -359,18 +314,18 @@ class DropboxStorageProvider:
             with open(local_path, "rb") as f:
                 self._dbx.files_upload(
                     f.read(), remote_path,
-                    mode=_dropbox.files.WriteMode.overwrite,
+                    mode=dropbox.files.WriteMode.overwrite,
                 )
         else:
             with open(local_path, "rb") as f:
                 chunk = f.read(UPLOAD_CHUNK_SIZE)
                 session = self._dbx.files_upload_session_start(chunk)
-                cursor = _dropbox.files.UploadSessionCursor(
+                cursor = dropbox.files.UploadSessionCursor(
                     session_id=session.session_id, offset=len(chunk),
                 )
-                commit = _dropbox.files.CommitInfo(
+                commit = dropbox.files.CommitInfo(
                     path=remote_path,
-                    mode=_dropbox.files.WriteMode.overwrite,
+                    mode=dropbox.files.WriteMode.overwrite,
                 )
                 while True:
                     chunk = f.read(UPLOAD_CHUNK_SIZE)
@@ -382,37 +337,10 @@ class DropboxStorageProvider:
 
         return file_size
 
-    def _download_log_only(self, remote_directory: str, local_directory: str,
-                           start: float) -> SyncResult:
-        """Download only file_log.json."""
-        log_remote = f"{remote_directory}/file_log.json"
-        log_local = os.path.join(local_directory, "file_log.json")
-
-        try:
-            os.makedirs(os.path.dirname(log_local), exist_ok=True)
-            meta, res = self._dbx.files_download(log_remote)
-            with open(log_local, "wb") as f:
-                f.write(res.content)
-            print(f"Log file downloaded to {log_local}.")
-            return SyncResult(
-                downloaded=1,
-                bytes_transferred=meta.size,
-                elapsed_seconds=time.time() - start,
-            )
-        except _ApiError as exc:
-            if exc.error.is_path() and exc.error.get_path().is_not_found():
-                print("No existing log file in Dropbox — starting fresh.")
-                return SyncResult(elapsed_seconds=time.time() - start)
-            print(f"Failed to download log file: {exc}")
-            return SyncResult(
-                failed=1,
-                elapsed_seconds=time.time() - start,
-                errors=[str(exc)],
-            )
-        except Exception as exc:
-            print(f"Failed to download log file: {exc}")
-            return SyncResult(
-                failed=1,
-                elapsed_seconds=time.time() - start,
-                errors=[str(exc)],
-            )
+    def _download_to(self, remote_path: str, local_path: str) -> int:
+        """Download one file to local_path, creating its folder; returns the size."""
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        meta, res = self._dbx.files_download(remote_path)
+        with open(local_path, "wb") as f:
+            f.write(res.content)
+        return meta.size

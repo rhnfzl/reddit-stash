@@ -1,11 +1,7 @@
 """
 Thread-safe SQLite connection manager for Reddit Stash.
 
-This module implements 2024-2025 best practices for SQLite threading safety:
-- Thread-local connections to ensure each thread has its own connection
-- WAL mode for better concurrency
-- Proper connection pooling and cleanup
-- Optimized PRAGMA settings for performance
+Gives each thread its own connection, in WAL mode, with shared PRAGMA settings.
 """
 
 import sqlite3
@@ -13,52 +9,47 @@ import threading
 import logging
 import time
 import contextlib
-from typing import Dict, Any, Optional, Generator
+from collections.abc import Generator
 from pathlib import Path
+
+from utils.constants import SQLITE_CACHE_SIZE_KB, SQLITE_MMAP_SIZE_BYTES
 
 
 class ThreadLocalSQLiteManager:
     """
     Thread-safe SQLite connection manager using thread-local storage.
 
-    This implementation follows 2024-2025 best practices:
-    - Each thread maintains its own database connection
-    - WAL mode enabled for concurrent read/write operations
-    - Optimized PRAGMA settings for performance
-    - Automatic connection cleanup and optimization
+    Each thread keeps its own connection, in WAL mode so reads and writes can overlap.
     """
 
-    def __init__(self, db_path: str, timeout: int = 30):
+    def __init__(self, db_path: str, timeout: int = 30) -> None:
         self.db_path = Path(db_path)
         self.timeout = timeout
         self._local = threading.local()
         self._lock = threading.RLock()
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-        # Connection settings optimized for 2024-2025 performance
         self.pragma_settings = {
             'journal_mode': 'WAL',
             'synchronous': 'NORMAL',
-            'cache_size': -64000,  # 64MB cache
+            'cache_size': -SQLITE_CACHE_SIZE_KB,  # negative means KiB, not pages
             'temp_store': 'MEMORY',
-            'mmap_size': 134217728,  # 128MB mmap
+            'mmap_size': SQLITE_MMAP_SIZE_BYTES,
             'foreign_keys': 'ON',
             'optimize': None  # Will run PRAGMA optimize periodically
         }
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get thread-local SQLite connection with optimized settings."""
+        """Get thread-local SQLite connection with the PRAGMA settings applied."""
         if not hasattr(self._local, 'connection') or self._local.connection is None:
             self._logger.debug(f"Creating new SQLite connection for thread {threading.current_thread().ident}")
 
-            # Create connection with optimized settings
             conn = sqlite3.connect(
                 str(self.db_path),
                 timeout=self.timeout,
                 check_same_thread=False  # Allow sharing across threads (handled by thread-local storage)
             )
 
-            # Apply optimized PRAGMA settings
             cursor = conn.cursor()
             for pragma, value in self.pragma_settings.items():
                 if value is not None:
@@ -109,37 +100,7 @@ class ThreadLocalSQLiteManager:
                     except sqlite3.Error as e:
                         self._logger.warning(f"Failed to optimize database: {e}")
 
-    def execute_query(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
-        """Execute a query with automatic transaction handling."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            conn.commit()
-            return cursor
-
-    def execute_many(self, query: str, params_list: list) -> sqlite3.Cursor:
-        """Execute multiple queries with automatic transaction handling."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.executemany(query, params_list)
-            conn.commit()
-            return cursor
-
-    def fetch_one(self, query: str, params: tuple = ()) -> Optional[tuple]:
-        """Execute query and fetch one result."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            return cursor.fetchone()
-
-    def fetch_all(self, query: str, params: tuple = ()) -> list:
-        """Execute query and fetch all results."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            return cursor.fetchall()
-
-    def close_connection(self):
+    def close_connection(self) -> None:
         """Close thread-local connection."""
         if hasattr(self._local, 'connection') and self._local.connection is not None:
             try:
@@ -152,83 +113,20 @@ class ThreadLocalSQLiteManager:
             finally:
                 self._local.connection = None
 
-    def vacuum_database(self) -> bool:
-        """Vacuum database to reclaim space and optimize."""
-        try:
-            with self.get_connection() as conn:
-                # Temporarily switch to DELETE mode for VACUUM
-                conn.execute("PRAGMA journal_mode=DELETE")
-                conn.execute("VACUUM")
-                # Switch back to WAL mode
-                conn.execute("PRAGMA journal_mode=WAL")
-                self._logger.info("Database vacuum completed successfully")
-                return True
-        except sqlite3.Error as e:
-            self._logger.error(f"Failed to vacuum database: {e}")
-            return False
-
-    def get_connection_info(self) -> Dict[str, Any]:
-        """Get information about current connection and database."""
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-
-                info = {}
-
-                # Basic connection info
-                info['thread_id'] = threading.current_thread().ident
-                info['database_path'] = str(self.db_path)
-
-                # PRAGMA information
-                pragma_queries = [
-                    'journal_mode', 'synchronous', 'cache_size',
-                    'page_count', 'page_size', 'encoding',
-                    'foreign_keys', 'temp_store'
-                ]
-
-                for pragma in pragma_queries:
-                    cursor.execute(f"PRAGMA {pragma}")
-                    result = cursor.fetchone()
-                    info[pragma] = result[0] if result else None
-
-                # Calculate database size
-                if info.get('page_count') and info.get('page_size'):
-                    info['size_bytes'] = info['page_count'] * info['page_size']
-                    info['size_mb'] = info['size_bytes'] / (1024 * 1024)
-
-                return info
-
-        except sqlite3.Error as e:
-            self._logger.error(f"Failed to get connection info: {e}")
-            return {'error': str(e)}
-
-    def __del__(self):
+    def __del__(self) -> None:
         """Cleanup when manager is destroyed."""
         self.close_connection()
 
 
-# Global instances for different databases
-_retry_queue_managers: Dict[str, ThreadLocalSQLiteManager] = {}
-_retry_queue_managers_lock = threading.Lock()
-_cache_managers: Dict[str, ThreadLocalSQLiteManager] = {}
-_cache_managers_lock = threading.Lock()
+_managers: dict[str, ThreadLocalSQLiteManager] = {}
+_managers_lock = threading.Lock()
 
 
-def get_retry_queue_manager(db_path: str = "reddit_stash_retry_queue.db") -> ThreadLocalSQLiteManager:
-    """Get the retry queue SQLite manager for a database path."""
-    with _retry_queue_managers_lock:
-        manager = _retry_queue_managers.get(db_path)
+def get_sqlite_manager(db_path: str) -> ThreadLocalSQLiteManager:
+    """Get the shared SQLite manager for a database path."""
+    with _managers_lock:
+        manager = _managers.get(db_path)
         if manager is None:
             manager = ThreadLocalSQLiteManager(db_path)
-            _retry_queue_managers[db_path] = manager
-        return manager
-
-
-def get_cache_manager(db_path: str = "retry_queue.db") -> ThreadLocalSQLiteManager:
-    """Get the cache SQLite manager for a database path."""
-    with _cache_managers_lock:
-        manager = _cache_managers.get(db_path)
-        if manager is None:
-            manager = ThreadLocalSQLiteManager(db_path)
-            _cache_managers[db_path] = manager
+            _managers[db_path] = manager
         return manager

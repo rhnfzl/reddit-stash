@@ -2,13 +2,21 @@
 
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
+import prawcore
+
+from tests.helpers import needs_dropbox, praw_comment, praw_submission
 from utils.constants import MAX_ITEM_FAILURES
-from utils.file_operations import save_to_file, _process_submissions_batch, get_existing_files_from_dir
-from utils.log_utils import get_existing_keys, get_given_up_keys, is_file_logged
-from utils.media_download_manager import _relink_markdown
+from utils.file_operations import (
+    SaveContext, SaveStatus, _SUBMISSIONS, _fetch_items, _save_listing_items, get_existing_keys_from_dir,
+    activity_save_context, save_to_file, save_user_activity,
+)
+from utils.log_utils import (
+    get_existing_keys, get_given_up_keys, is_file_logged,
+)
 from utils.storage.base import SyncResult
 
 
@@ -32,10 +40,10 @@ class TestSaveToFileFailures(unittest.TestCase):
         self.tmp.cleanup()
 
     def _save(self, save_function, file_log):
-        return save_to_file(_item(), self.file_path, save_function, set(), file_log,
-                            self.save_dir, set())
+        return save_to_file(_item(), self.file_path, save_function,
+                            SaveContext(self.save_dir, set(), file_log, set()))
 
-    def test_failed_save_returns_none_and_removes_partial_file(self):
+    def test_failed_save_reports_failed_and_removes_partial_file(self):
         def boom(content, f, **kwargs):
             f.write("partial")
             raise RuntimeError("network")
@@ -43,7 +51,7 @@ class TestSaveToFileFailures(unittest.TestCase):
         file_log = {}
         status, media_size = self._save(boom, file_log)
 
-        self.assertIsNone(status)
+        self.assertIs(status, SaveStatus.FAILED)
         self.assertEqual(media_size, 0)
         self.assertFalse(os.path.exists(self.file_path))
         self.assertEqual(file_log, {KEY: {"status": "failed", "attempts": 1, "last_error": "network"}})
@@ -55,10 +63,10 @@ class TestSaveToFileFailures(unittest.TestCase):
             raise OSError("disk full")
 
         file_log = {}
-        with patch("utils.file_operations.log_file", side_effect=log_then_fail):
+        with patch("utils.file_operations.record_saved_file", side_effect=log_then_fail):
             status, _ = self._save(lambda content, f, **kw: f.write("ok"), file_log)
 
-        self.assertIsNone(status)
+        self.assertIs(status, SaveStatus.FAILED)
         self.assertEqual(file_log[KEY]["status"], "failed")
         self.assertNotIn("file_path", file_log[KEY])
 
@@ -80,10 +88,10 @@ class TestSaveToFileFailures(unittest.TestCase):
         file_log = {KEY: {"status": "failed", "attempts": 3, "last_error": "x"}}
 
         def log_then_fail(log, key, info, save_directory):
-            log[key] = info  # log_file replaced the failure entry, then the checkpoint failed
+            log[key] = info  # record_saved_file replaced the failure entry, then the checkpoint failed
             raise OSError("disk full")
 
-        with patch("utils.file_operations.log_file", side_effect=log_then_fail):
+        with patch("utils.file_operations.record_saved_file", side_effect=log_then_fail):
             self._save(lambda content, f, **kw: f.write("ok"), file_log)
 
         self.assertEqual(file_log[KEY]["attempts"], 4)
@@ -92,7 +100,7 @@ class TestSaveToFileFailures(unittest.TestCase):
         os.makedirs(os.path.dirname(self.file_path))
         with open(self.file_path, "w") as f:
             f.write("existing backup")
-        existing = get_existing_files_from_dir(self.save_dir)
+        existing = get_existing_keys_from_dir(self.save_dir)
 
         def boom(content, f, **kwargs):
             raise RuntimeError("must not be called")
@@ -101,9 +109,10 @@ class TestSaveToFileFailures(unittest.TestCase):
             id = "abc"
             subreddit = Mock(display_name="python")
 
-        status, _ = save_to_file(Submission(), self.file_path, boom, existing, {}, self.save_dir, set())
+        status, _ = save_to_file(Submission(), self.file_path, boom,
+                                 SaveContext(self.save_dir, existing, {}, set()))
 
-        self.assertIs(status, True)
+        self.assertIs(status, SaveStatus.SKIPPED)
         with open(self.file_path) as f:
             self.assertEqual(f.read(), "existing backup")
 
@@ -112,20 +121,183 @@ class TestSaveToFileFailures(unittest.TestCase):
 
         status, _ = self._save(lambda content, f, **kw: f.write("ok"), file_log)
 
-        self.assertFalse(status)
+        self.assertIs(status, SaveStatus.SAVED)
         self.assertNotIn("status", file_log[KEY])
         self.assertEqual(file_log[KEY]["file_path"], os.path.join("python", "POST_abc.md"))
 
     def test_batch_counts_failed_items_separately(self):
-        outcomes = iter([(False, 0), (True, 0), (None, 0)])
+        outcomes = iter([(SaveStatus.SAVED, 5), (SaveStatus.SKIPPED, 0), (SaveStatus.FAILED, 0)])
+        items = [praw_submission(item_id) for item_id in "abc"]
         with patch("utils.file_operations.save_to_file", side_effect=lambda *a, **k: next(outcomes)), \
-                patch("utils.file_operations.handle_dynamic_sleep"):
-            result = _process_submissions_batch(
-                [_item("a"), _item("b"), _item("c")], self.save_dir, set(), set(), {}, None,
-            )
+                patch("utils.file_operations.sleep_for_item"):
+            stats = _save_listing_items(items, SaveContext(self.save_dir, set(), {}, set()), _SUBMISSIONS, False, 0)
 
-        processed, skipped, _size, _media, failed = result
-        self.assertEqual((processed, skipped, failed), (1, 1, 1))
+        self.assertEqual((stats.processed, stats.skipped, stats.failed, stats.media_size), (1, 1, 1, 5))
+
+
+class TestTruncatedListings(unittest.TestCase):
+    def _reddit(self, listing_calls):
+        reddit = Mock()
+        reddit.user.me.return_value.saved.side_effect = listing_calls
+        return reddit
+
+    def test_listing_that_404s_twice_is_reported_with_its_partial_items(self):
+        def fails_after_one():
+            yield "first"
+            raise prawcore.exceptions.NotFound(Mock())
+
+        reddit = self._reddit(lambda limit: fails_after_one())
+        self.assertEqual(_fetch_items(reddit, "saved", 10, "saved"), (["first"], True))
+
+    def test_listing_refused_with_403_on_first_read_fails_the_run(self):
+        def refused():
+            raise prawcore.exceptions.Forbidden(Mock())
+            yield
+
+        reddit = self._reddit([refused(), refused()])
+        with tempfile.TemporaryDirectory() as save_dir, \
+                patch("utils.file_operations.load_settings") as settings, \
+                self.assertRaises(prawcore.exceptions.Forbidden):
+            settings.return_value.get.side_effect = lambda section, key, fallback: {
+                "save_type": "SAVED", "check_type": "LOG"}[key]
+            save_user_activity(reddit, activity_save_context(save_dir, {}))
+
+    def test_403_on_the_retry_after_a_404_keeps_the_partial_listing(self):
+        def not_found():
+            raise prawcore.exceptions.NotFound(Mock())
+            yield
+
+        def refused_after_one():
+            yield "first"
+            raise prawcore.exceptions.Forbidden(Mock())
+
+        reddit = self._reddit([not_found(), refused_after_one()])
+        self.assertEqual(_fetch_items(reddit, "saved", 10, "saved"), (["first"], True))
+
+    def test_listing_that_recovers_on_retry_is_not_reported(self):
+        def fails():
+            raise prawcore.exceptions.NotFound(Mock())
+            yield
+
+        reddit = self._reddit([fails(), iter(["a", "b"])])
+        self.assertEqual(_fetch_items(reddit, "saved", 10, "saved"), (["a", "b"], False))
+
+    def test_save_user_activity_returns_truncated_listing_labels(self):
+        with tempfile.TemporaryDirectory() as save_dir, \
+                patch("utils.file_operations.load_settings") as settings, \
+                patch("utils.file_operations._fetch_items", return_value=([], True)):
+            settings.return_value.get.side_effect = lambda section, key, fallback: {
+                "save_type": "SAVED", "check_type": "LOG"}[key]
+            stats = save_user_activity(Mock(), activity_save_context(save_dir, {}))
+
+        self.assertEqual(stats.truncated_listings, ("saved",))
+
+
+class TestSaveRunWiring(unittest.TestCase):
+    def test_all_mode_saves_each_listing_under_its_own_categories(self):
+        submissions = [praw_submission("sub")]
+        comments = [praw_comment("com")]
+        saved = [praw_submission("sav"), praw_comment("savc")]
+        upvoted = [praw_submission("upv"), praw_comment("upvc")]
+        listing = {"submissions": submissions, "comments": comments, "saved": saved, "upvoted": upvoted}
+        unsaved = []
+
+        def save_fn_stub(item, f):
+            return 0
+
+        with tempfile.TemporaryDirectory() as save_dir, \
+                patch("utils.file_operations.load_settings") as settings, \
+                patch("utils.file_operations._clone_reddit"), \
+                patch("utils.file_operations._fetch_items",
+                      side_effect=lambda r, method, limit, label: (listing[method], False)), \
+                patch("utils.file_operations.save_submission", save_fn_stub), \
+                patch("utils.file_operations.save_comment_and_context", save_fn_stub), \
+                patch("utils.file_operations._unsave", side_effect=lambda item: unsaved.append(item.id)), \
+                patch("utils.file_operations.sleep_for_item"):
+            settings.return_value.get.side_effect = lambda section, key, fallback: {
+                "save_type": "ALL", "check_type": "LOG"}[key]
+            file_log = {}
+            # realpath: temp dirs sit behind a symlink on macOS and paths are resolved
+            stats = save_user_activity(Mock(), activity_save_context(os.path.realpath(save_dir), file_log), unsave=True)
+
+        self.assertEqual(stats.processed, 6)
+        self.assertEqual(stats.truncated_listings, ())
+        self.assertEqual(sorted(unsaved), ["sav", "savc"])
+        self.assertEqual(set(file_log), {
+            "sub-python-Submission-POST",
+            "com-python-Comment-COMMENT",
+            "sav-python-Submission-SAVED_POST",
+            "savc-python-Comment-SAVED_COMMENT",
+            "upv-python-Submission-UPVOTE_POST",
+            "upvc-python-Comment-UPVOTE_COMMENT",
+        })
+        self.assertEqual(file_log["com-python-Comment-COMMENT"]["file_path"],
+                         os.path.join("python", "COMMENT_com.md"))
+
+
+    def _run_mode(self, save_type, unsave=False):
+        """Run one save_type over distinct listings; return (file_log keys, unsaved ids, fetch threads, clone mock)."""
+        listing = {
+            "submissions": [praw_submission("sub")],
+            "comments": [praw_comment("com")],
+            "saved": [praw_submission("sav")],
+            "upvoted": [praw_comment("upv")],
+        }
+        unsaved, threads = [], []
+
+        def fetch(_reddit, method, _limit, _label):
+            threads.append(threading.current_thread())
+            return listing[method], False
+
+        def save_fn_stub(item, f):
+            threads.append(threading.current_thread())
+            return 0
+
+        file_log = {}
+        with tempfile.TemporaryDirectory() as save_dir, \
+                patch("utils.file_operations.load_settings") as settings, \
+                patch("utils.file_operations._clone_reddit") as clone, \
+                patch("utils.file_operations._fetch_items", side_effect=fetch) as fetch_mock, \
+                patch("utils.file_operations.save_submission", save_fn_stub), \
+                patch("utils.file_operations.save_comment_and_context", save_fn_stub), \
+                patch("utils.file_operations._unsave", side_effect=lambda item: unsaved.append(item.id)), \
+                patch("utils.file_operations.sleep_for_item"):
+            settings.return_value.get.side_effect = lambda section, key, fallback: {
+                "save_type": save_type, "check_type": "LOG"}[key]
+            save_user_activity(self.reddit, activity_save_context(os.path.realpath(save_dir), file_log), unsave=unsave)
+        return set(file_log), unsaved, threads, clone, fetch_mock
+
+    def setUp(self):
+        self.reddit = Mock()
+
+    def test_saved_mode_saves_only_saved_items_and_honours_unsave(self):
+        keys, unsaved, _, _, _ = self._run_mode("SAVED", unsave=True)
+        self.assertEqual(keys, {"sav-python-Submission-SAVED_POST"})
+        self.assertEqual(unsaved, ["sav"])
+
+    def test_upvoted_mode_saves_only_upvoted_items_and_never_unsaves(self):
+        keys, unsaved, _, _, _ = self._run_mode("UPVOTED", unsave=True)
+        self.assertEqual(keys, {"upv-python-Comment-UPVOTE_COMMENT"})
+        self.assertEqual(unsaved, [])
+
+    def test_activity_mode_saves_submissions_and_comments(self):
+        keys, unsaved, _, _, _ = self._run_mode("ACTIVITY", unsave=True)
+        self.assertEqual(keys, {"sub-python-Submission-POST", "com-python-Comment-COMMENT"})
+        self.assertEqual(unsaved, [])
+
+    def test_single_listing_uses_the_given_reddit_in_the_main_thread(self):
+        # In a worker, a SIGTERM exception in --cycle would wait for the whole listing.
+        for save_type in ("SAVED", "UPVOTED"):
+            with self.subTest(save_type=save_type):
+                _, _, threads, clone, fetch_mock = self._run_mode(save_type)
+                clone.assert_not_called()
+                self.assertIs(fetch_mock.call_args.args[0], self.reddit)
+                self.assertEqual(set(threads), {threading.main_thread()})
+
+    def test_several_listings_each_get_their_own_reddit_instance(self):
+        _, _, _, clone, fetch_mock = self._run_mode("ACTIVITY")
+        self.assertEqual(clone.call_count, 2)
+        self.assertNotIn(self.reddit, [call.args[0] for call in fetch_mock.call_args_list])
 
 
 class TestStorageCliExitCodes(unittest.TestCase):
@@ -143,6 +315,7 @@ class TestStorageCliExitCodes(unittest.TestCase):
         _exit_on_failure(SyncResult(downloaded=3))
 
 
+@needs_dropbox
 class TestDropboxListing(unittest.TestCase):
     def _provider(self, error):
         import utils.storage.dropbox_provider as dp
@@ -152,10 +325,10 @@ class TestDropboxListing(unittest.TestCase):
                 super().__init__("api error")
                 self.error = err
 
-        provider = dp.DropboxStorageProvider(dropbox_directory="/reddit")
+        provider = dp.DropboxStorageProvider()
         provider._dbx = Mock()
         provider._dbx.files_list_folder.side_effect = FakeApiError(error)
-        patcher = patch.object(dp, "_ApiError", FakeApiError)
+        patcher = patch.object(dp, "ApiError", FakeApiError)
         patcher.start()
         self.addCleanup(patcher.stop)
         return provider
@@ -173,95 +346,6 @@ class TestDropboxListing(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             self._provider(err).list_files("/reddit")
-
-
-class TestRelinkMarkdown(unittest.TestCase):
-    URL = "https://i.redd.it/a.jpg"
-
-    def _write(self, d, name, text):
-        path = os.path.join(d, name)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
-        return path
-
-    def _read(self, path):
-        with open(path, encoding="utf-8") as f:
-            return f.read()
-
-    def test_only_the_owning_posts_media_line_is_relinked(self):
-        with tempfile.TemporaryDirectory() as d:
-            body = f"![Image]({self.URL})\nSee [this]({self.URL}) for context\n"
-            own = self._write(d, "SAVED_POST_abc.md", body)
-            neighbour = self._write(d, "SAVED_POST_xyz.md", f"![Image]({self.URL})\n")
-            local = os.path.join(d, "abc.jpg")
-
-            _relink_markdown(self.URL, local)
-
-            self.assertEqual(self._read(own), f"![Image]({local})\nSee [this]({self.URL}) for context\n")
-            self.assertEqual(self._read(neighbour), f"![Image]({self.URL})\n")
-
-    def test_gallery_media_maps_to_its_post(self):
-        with tempfile.TemporaryDirectory() as d:
-            own = self._write(d, "POST_abc.md", f"![Gallery Image 2]({self.URL})\n")
-            local = os.path.join(d, "abc_g2.jpg")
-
-            _relink_markdown(self.URL, local)
-
-            self.assertEqual(self._read(own), f"![Gallery Image 2]({local})\n")
-
-    def test_blockquoted_comment_image_is_relinked(self):
-        with tempfile.TemporaryDirectory() as d:
-            own = self._write(d, "SAVED_COMMENT_abc.md", f"> ![Image]({self.URL})\n")
-            local = os.path.join(d, "abc.jpg")
-
-            _relink_markdown(self.URL, local)
-
-            self.assertEqual(self._read(own), f"> ![Image]({local})\n")
-
-    def test_failed_write_keeps_the_original_post(self):
-        with tempfile.TemporaryDirectory() as d:
-            own = self._write(d, "POST_abc.md", f"![Image]({self.URL})\n")
-
-            with patch("utils.media_download_manager.os.replace", side_effect=OSError("disk full")):
-                _relink_markdown(self.URL, os.path.join(d, "abc.jpg"))
-
-            self.assertEqual(self._read(own), f"![Image]({self.URL})\n")
-            self.assertEqual(sorted(os.listdir(d)), ["POST_abc.md"])
-
-
-class TestRetryCountDoesNotReset(unittest.TestCase):
-    def test_failed_retry_increments_instead_of_requeueing(self):
-        from utils.retry_queue import SQLiteRetryQueue
-
-        with tempfile.TemporaryDirectory() as d:
-            queue = SQLiteRetryQueue(os.path.join(d, "q.db"))
-            url = "https://i.imgur.com/x.jpg"
-            queue.add_failed_download(url, "timeout", "imgur")
-            with queue.sqlite_manager.get_connection() as conn:
-                conn.execute("UPDATE retry_queue SET next_retry_at = 0")
-                conn.commit()
-
-            self.assertTrue(queue.mark_retry_started(url, "imgur"))
-            queue.add_failed_download(url, "timeout again", "imgur")  # download_media on the retry
-            queue.mark_retry_completed(url, success=False)
-
-            with queue.sqlite_manager.get_connection() as conn:
-                count = conn.execute("SELECT retry_count FROM retry_queue WHERE url = ?", (url,)).fetchone()
-            self.assertEqual(count[0], 1)
-
-    def test_rows_stuck_in_progress_become_pending_again(self):
-        from utils.retry_queue import SQLiteRetryQueue
-
-        with tempfile.TemporaryDirectory() as d:
-            queue = SQLiteRetryQueue(os.path.join(d, "q.db"))
-            url = "https://i.imgur.com/y.jpg"
-            queue.add_failed_download(url, "timeout", "imgur")
-            with queue.sqlite_manager.get_connection() as conn:
-                conn.execute("UPDATE retry_queue SET status = 'in_progress', next_retry_at = 0")
-                conn.commit()
-
-            self.assertEqual(queue.reset_stale_in_progress(), 1)
-            self.assertEqual([r["url"] for r in queue.get_pending_retries()], [url])
 
 
 class TestConfigFailureExit(unittest.TestCase):

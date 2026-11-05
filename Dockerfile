@@ -1,6 +1,19 @@
 # Use a slim Python base image for smaller size
 # Supports Python 3.11 through 3.14 (default: 3.12)
 ARG PYTHON_VERSION=3.12
+
+# Build stage: a package without a wheel for this platform needs the compiler
+FROM python:${PYTHON_VERSION}-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libc6-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt requirements-minimal.txt requirements-dropbox.txt requirements-s3.txt constraints.txt ./
+# boto3 included so provider=s3 works in the published image
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt -r requirements-dropbox.txt -r requirements-s3.txt -c constraints.txt
+
+# Runtime stage: no compiler where credentials are present
 FROM python:${PYTHON_VERSION}-slim
 
 # Build arguments for metadata
@@ -29,18 +42,14 @@ RUN useradd -m -s /bin/bash appuser
 # Set the working directory
 WORKDIR /app
 
-# Install system dependencies
+# ffmpeg merges the separate video and audio streams of v.redd.it downloads
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libc6-dev \
+    ffmpeg \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only the requirements first to leverage Docker cache
-COPY requirements.txt requirements-s3.txt ./
-
-# Install dependencies (boto3 included so provider=s3 works in the published image)
-RUN pip install --no-cache-dir -r requirements.txt -r requirements-s3.txt
+# Python packages from the build stage
+COPY --from=build /install /usr/local
 
 # Copy the application code
 COPY . .

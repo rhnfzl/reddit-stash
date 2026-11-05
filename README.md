@@ -76,7 +76,7 @@ This gives you clear visibility into:
     - [[Settings] - Core Application Behavior](#settings---core-application-behavior)
     - [[Configuration] - Reddit API Credentials](#configuration---reddit-api-credentials)
     - [[Media] - Advanced Media Download System](#media---advanced-media-download-system)
-    - [[Imgur] - Imgur API Configuration](#imgur---imgur-api-configuration)
+    - [Imgur API credentials (environment only)](#imgur-api-credentials-environment-only)
     - [[Recovery] - Content Recovery System](#recovery---content-recovery-system)
     - [[Retry] - Retry Queue Configuration](#retry---retry-queue-configuration)
     - [[Storage] - Cloud Storage Backend](#storage---cloud-storage-backend)
@@ -271,8 +271,7 @@ Before proceeding with any installation method, ensure that you have set the Red
     - `AWS_S3_BUCKET`
     - `STORAGE_PROVIDER` = `s3`
     For Enhanced Media Downloads (Optional - Imgur API registration is permanently closed)
-    - `IMGUR_CLIENT_ID` (only if you already have an existing Imgur application)
-    - `IMGUR_CLIENT_SECRET` (only if you already have an existing Imgur application)
+    - `IMGUR_CLIENT_IDS` (only if you already have an existing Imgur application; one client ID, or several separated by commas)
 - Enter the respective secret values without any quotes.
 
 After adding all secrets: ![Repository Secrets](resources/repository_secrets.png).
@@ -303,7 +302,7 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     ```
 
 3. Set up cloud storage (optional). Choose one:
-   - **Dropbox**: Follow [Setting Up Dropbox App](#setting-up-dropbox-app)
+   - **Dropbox**: Run `pip install -r requirements-dropbox.txt`, then follow [Setting Up Dropbox App](#setting-up-dropbox-app)
    - **AWS S3**: Follow [Setting Up AWS S3](#setting-up-aws-s3)
    - **Local only**: Skip this step if you only want to save files locally on your system.
 
@@ -328,7 +327,6 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     export STORAGE_PROVIDER='s3'
     # Optional, for enhanced Imgur downloading (if you have existing API access)
     export IMGUR_CLIENT_ID='your_imgur_client_id'
-    export IMGUR_CLIENT_SECRET='your_imgur_client_secret'
     ```
 
     For Windows:
@@ -349,7 +347,6 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     set STORAGE_PROVIDER='s3'
     # Optional, for enhanced Imgur downloading (if you have existing API access)
     set IMGUR_CLIENT_ID='your_imgur_client_id'
-    set IMGUR_CLIENT_SECRET='your_imgur_client_secret'
     ```
 
     You can verify the setup with:
@@ -369,7 +366,6 @@ After adding all secrets: ![Repository Secrets](resources/repository_secrets.png
     echo $STORAGE_PROVIDER
     # If using Imgur:
     echo $IMGUR_CLIENT_ID
-    echo $IMGUR_CLIENT_SECRET
     ```
 
 6. Usage:
@@ -1147,7 +1143,7 @@ After completing your chosen installation method, verify that everything is work
 #### For Local Installation:
 - [ ] Python 3.11-3.14 installed and working (3.13 recommended)
 - [ ] Repository cloned successfully
-- [ ] Dependencies installed via `pip install -r requirements.txt`
+- [ ] Dependencies installed via `pip install -r requirements.txt` (add `requirements-dropbox.txt` or `requirements-s3.txt` for cloud storage)
 - [ ] Environment variables set correctly
 - [ ] Script runs without errors
 - [ ] Content saved to specified directory
@@ -1172,17 +1168,16 @@ Jump to any section or browse the complete settings index:
 |---------|----------------|---------|---------|
 | **[Settings]** | 8 | Core behavior (save paths, types, file checking) | [↓ View](#settings---core-application-behavior) |
 | **[Configuration]** | 4 | Reddit API credentials (use env vars!) | [↓ View](#configuration---reddit-api-credentials) |
-| **[Media]** | 14 | Media download controls (images, videos, albums) | [↓ View](#media---advanced-media-download-system) |
-| **[Imgur]** | 2 | Imgur API configuration (optional) | [↓ View](#imgur---imgur-api-configuration) |
-| **[Recovery]** | 11 | Content recovery system (3-provider cascade) | [↓ View](#recovery---content-recovery-system) |
+| **[Media]** | 5 | Media download controls (images, videos, albums) | [↓ View](#media---advanced-media-download-system) |
+| **[Recovery]** | 9 | Content recovery system (3-provider cascade) | [↓ View](#recovery---content-recovery-system) |
 | **[Retry]** | 7 | Retry queue management (exponential backoff) | [↓ View](#retry---retry-queue-configuration) |
 | **[Storage]** | 5 | Cloud storage backend (Dropbox, S3) | [↓ View](#storage---cloud-storage-backend) |
-| **Total** | **51 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
+| **Total** | **38 settings** | **Complete system configuration** | [↓ Settings Index](#settings-index-alphabetical) |
 
 **Quick Tips:**
 - 🔒 **Security First**: Use environment variables for credentials, not settings.ini
 - ⚡ **Performance**: `check_type=LOG`, `max_concurrent_downloads=3-5`
-- 💾 **Storage**: Configure `max_image_size`, `max_video_size`, `max_daily_storage_mb`
+- 💾 **Storage**: Turn off `download_videos` or `download_images` to use less space
 - 🔄 **Recovery**: Enable all 3 active providers for best deleted content recovery
 - 📖 **Full Docs**: Each setting includes type, defaults, examples, and trade-offs
 
@@ -1195,13 +1190,12 @@ Jump to any section or browse the complete settings index:
 ```ini
 [Settings]
 save_directory = reddit/                # Local directory for saved content
-dropbox_directory = /reddit             # Dropbox folder path
+dropbox_directory = /reddit             # Dropbox folder, or S3 key prefix
 save_type = ALL                        # Content types to save
 check_type = LOG                       # File existence checking method
 unsave_after_download = false          # Auto-unsave after downloading
 process_gdpr = false                   # Process GDPR export data
 process_api = true                     # Use Reddit API for content
-ignore_tls_errors = false              # Bypass SSL certificate validation (use with caution)
 ```
 
 #### Core Settings Explained:
@@ -1227,8 +1221,8 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     - Write permissions required for the directory
     - Avoid network drives for better performance
 
-* **`dropbox_directory`** - Dropbox cloud storage path
-  - **Type**: String (Dropbox path)
+* **`dropbox_directory`** - Remote root for every storage provider: the Dropbox folder, or the S3 key prefix when `provider = s3`
+  - **Type**: String (path)
   - **Default**: `/reddit`
   - **Valid Values**: Any valid Dropbox path starting with `/`
   - **Format Rules**:
@@ -1413,39 +1407,6 @@ ignore_tls_errors = false              # Bypass SSL certificate validation (use 
     process_api = false   # Skip API, only process GDPR
     ```
 
-* **`ignore_tls_errors`** - Bypass SSL certificate verification
-  - **Type**: Boolean
-  - **Default**: `false`
-  - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **⚠️ SECURITY WARNING**: Setting to `true` reduces security significantly!
-  - **What It Does**:
-    - `false` (default): Validates SSL certificates, rejects expired/invalid/self-signed certs
-    - `true`: Accepts ANY certificate, including expired, self-signed, or invalid
-  - **Security Implications**:
-    - Vulnerable to man-in-the-middle attacks
-    - No guarantee you're downloading from legitimate source
-    - Should NEVER be used with sensitive content
-  - **Legitimate Use Cases** (rare):
-    - Archiving content from sites with expired certificates
-    - Corporate networks with self-signed proxy certificates
-    - Historical content preservation where security less critical
-  - **What It Affects**:
-    - Only affects media downloads (images, videos)
-    - Does NOT affect Reddit API (always uses valid TLS)
-    - Third-party hosting: Imgur, Gfycat, etc.
-  - **Warnings Generated**:
-    - Script prints "⚠️ TLS verification disabled" on startup
-    - Configuration validator shows security warning
-  - **Examples**:
-    ```ini
-    ignore_tls_errors = false   # Secure default (recommended)
-    ignore_tls_errors = true    # Insecure, use only if absolutely necessary
-    ```
-  - **Better Alternatives**:
-    - Use content recovery system (often has archived copies)
-    - Manually download problematic images
-    - Report invalid certificates to site owners
-
 #### `[Configuration]` - Reddit API Credentials
 
 ```ini
@@ -1548,10 +1509,10 @@ Anyone can: Access your Reddit account, download your data, post as you
 
 ##### Credential Priority (How Reddit Stash Checks):
 
-1. **Environment Variables** (checked first) ← USE THIS
-2. **settings.ini values** (fallback) ← AVOID THIS
+1. **settings.ini values** (checked first) ← LEAVE AS `None`
+2. **Environment Variables** (used for any value not set in settings.ini) ← USE THIS
 
-If environment variable exists, settings.ini value is **completely ignored**.
+A real value in settings.ini **overrides the environment variable**, so leave these keys as `None` when you use environment variables.
 
 ##### Safe settings.ini Configuration:
 
@@ -1624,27 +1585,14 @@ For detailed instructions on setting up environment variables properly, see [Set
 # Global media download controls
 download_enabled = true                # Master switch for all media downloads
 download_images = true                 # Enable image downloads
-download_videos = true                 # Enable video downloads  
-download_audio = true                  # Enable audio downloads
-
-# Image processing settings
-thumbnail_size = 800                   # Thumbnail dimensions in pixels
-max_image_size = 5242880              # Max image file size (5MB in bytes)
-create_thumbnails = true               # Generate thumbnails for large images
-
-# Video settings  
-video_quality = high                   # Video quality preference
-max_video_size = 209715200            # Max video file size (200MB in bytes)
-
-# Album settings
+download_videos = true                 # Enable video downloads
 download_albums = true                 # Process image albums/galleries
-max_album_images = 50                 # Max images per album (0 = unlimited)
 
-# Performance and resource limits
-max_concurrent_downloads = 3           # Parallel download streams
-download_timeout = 30                  # Download timeout in seconds
-max_daily_storage_mb = 1024           # Daily storage limit in MB
+# Performance
+max_concurrent_downloads = 3           # Parallel downloads per gallery
 ```
+
+Older settings files may also hold `download_audio`, `thumbnail_size`, `max_image_size`, `create_thumbnails`, `video_quality`, `max_video_size`, `max_album_images`, `download_timeout` and `max_daily_storage_mb`. Nothing reads these keys, so they are ignored and do not limit downloads. File size caps are fixed in the downloaders.
 
 #### Media Settings Explained:
 
@@ -1697,156 +1645,12 @@ max_daily_storage_mb = 1024           # Daily storage limit in MB
   - **Dependencies**: 
     - ffmpeg recommended for v.redd.it audio merging
     - Without ffmpeg: video-only (no audio track)
+    - The Docker image includes ffmpeg; the GitHub Actions workflows and local installs use whatever the machine has
   - **Storage Warning**: Videos are large! Single video can be 50-500MB
   - **Examples**:
     ```ini
     download_videos = true   # Download videos
     download_videos = false  # Skip videos (save storage)
-    ```
-
-* **`download_audio`** - Control audio downloads
-  - **Type**: Boolean
-  - **Default**: `true`
-  - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **Requires**: `download_enabled = true`
-  - **What It Downloads**:
-    - Audio-only posts (podcasts, music)
-    - Audio tracks from videos (when separated)
-  - **Note**: Rarely used by Reddit, most audio is embedded in video
-  - **Examples**:
-    ```ini
-    download_audio = true   # Download audio files
-    download_audio = false  # Skip audio
-    ```
-
-**Image Processing:**
-
-* **`thumbnail_size`** - Maximum thumbnail dimension in pixels
-  - **Type**: Integer (positive)
-  - **Default**: `800`
-  - **Valid Range**: 100-4096 (recommended: 300-1200)
-  - **What It Means**: 
-    - Thumbnails are resized to fit within this width × height box
-    - Aspect ratio is preserved
-    - If image is 1920×1080 and thumbnail_size=800: → 800×450
-  - **Storage Impact Per Image**:
-    - 300px: ~50KB (very small)
-    - 800px: ~150KB (balanced)
-    - 1200px: ~300KB (high quality)
-  - **Use Cases**:
-    - 300-500: Quick previews, storage-constrained
-    - 800-1000: Balanced quality/size (recommended)
-    - 1200-2000: High quality, display on large screens
-  - **Examples**:
-    ```ini
-    thumbnail_size = 400   # Small previews
-    thumbnail_size = 800   # Default, good balance
-    thumbnail_size = 1200  # High quality
-    ```
-
-* **`max_image_size`** - Maximum image file size in bytes
-  - **Type**: Integer (positive)
-  - **Default**: `5242880` (5MB)
-  - **Valid Range**: 100,000 (100KB) to 52,428,800 (50MB)
-  - **What It Does**: 
-    - Images larger than this are SKIPPED (not downloaded)
-    - Not resized - full skip to save bandwidth/storage
-    - Applies BEFORE download (uses Content-Length header if available)
-  - **Size Conversion Guide**:
-    ```
-    1 MB  = 1048576 bytes
-    2 MB  = 2097152 bytes
-    5 MB  = 5242880 bytes (default)
-    10 MB = 10485760 bytes
-    20 MB = 20971520 bytes
-    50 MB = 52428800 bytes
-    ```
-  - **Trade-offs**:
-    - Small limit (1-2MB): Saves storage, may miss high-res images
-    - Medium limit (5-10MB): Balanced, gets most images
-    - Large limit (20-50MB): Complete archive, heavy storage
-  - **Examples**:
-    ```ini
-    max_image_size = 1048576   # 1MB limit (minimal)
-    max_image_size = 5242880   # 5MB limit (default)
-    max_image_size = 20971520  # 20MB limit (comprehensive)
-    ```
-
-* **`create_thumbnails`** - Generate thumbnail versions of images
-  - **Type**: Boolean
-  - **Default**: `true`
-  - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**:
-    - `true`: Creates smaller preview version alongside original
-    - `false`: Only saves original full-size image
-  - **File Naming**:
-    - Original: `abc123_media.jpg`
-    - Thumbnail: `abc123_media_thumb.jpg`
-  - **Storage Cost**: +10-20% additional space
-  - **Benefits**:
-    - Fast loading in file browsers
-    - Preview without opening large files
-    - Useful for browsing archives offline
-  - **Processing Cost**: +2-5 seconds per image
-  - **Examples**:
-    ```ini
-    create_thumbnails = true   # Generate previews
-    create_thumbnails = false  # Original only
-    ```
-
-**Video Processing:**
-
-* **`video_quality`** - Download quality preference for videos
-  - **Type**: String (enum)
-  - **Default**: `high`
-  - **Valid Values**: `high`, `low` (case-insensitive)
-  - **What It Means**:
-    
-    | Quality | Resolution | Bitrate | File Size (per min) | Use Case |
-    |---------|-----------|---------|---------------------|----------|
-    | **`high`** | 720p-1080p+ | High | 10-50MB/min | Best quality, storage available |
-    | **`low`** | 360p-480p | Lower | 3-10MB/min | Save bandwidth/storage |
-    
-  - **How It Works**:
-    - v.redd.it: Selects from available quality levels
-    - YouTube: Requests specific quality (if available)
-    - Gfycat: Downloads HD vs SD version
-  - **Important**: Not all sources provide multiple qualities
-  - **Examples**:
-    ```ini
-    video_quality = high   # Best quality (default)
-    video_quality = low    # Save storage
-    video_quality = HIGH   # Case doesn't matter
-    ```
-
-* **`max_video_size`** - Maximum video file size in bytes
-  - **Type**: Integer (positive)
-  - **Default**: `209715200` (200MB)
-  - **Valid Range**: 1,048,576 (1MB) to 1,073,741,824 (1GB)
-  - **What It Does**: Videos larger than this limit are SKIPPED
-  - **Size Conversion Guide**:
-    ```
-    10 MB  = 10485760 bytes
-    50 MB  = 52428800 bytes
-    100 MB = 104857600 bytes
-    200 MB = 209715200 bytes (default)
-    500 MB = 524288000 bytes
-    1 GB   = 1073741824 bytes
-    ```
-  - **Typical Video Sizes**:
-    - Short clip (30s): 5-20MB
-    - Medium video (2-5 min): 20-100MB
-    - Long video (10+ min): 100-500MB
-    - HD long video: 500MB-2GB
-  - **Recommendations By Use Case**:
-    - Storage-constrained: 50-100MB
-    - Balanced: 200-300MB (default range)
-    - Complete archive: 500MB-1GB
-  - **Examples**:
-    ```ini
-    max_video_size = 52428800   # 50MB (minimal)
-    max_video_size = 209715200  # 200MB (default)
-    max_video_size = 524288000  # 500MB (comprehensive)
     ```
 
 **Album Handling:**
@@ -1865,32 +1669,6 @@ max_daily_storage_mb = 1024           # Daily storage limit in MB
     ```ini
     download_albums = true   # Download all album images
     download_albums = false  # Skip albums entirely
-    ```
-
-* **`max_album_images`** - Limit images per album
-  - **Type**: Integer (non-negative)
-  - **Default**: `50`
-  - **Valid Values**: `0` (unlimited) or positive integer (1-1000+)
-  - **What It Does**:
-    - `0`: Download ALL images in album (no limit)
-    - `Positive number`: Download only first N images, skip rest
-  - **Why Limit?**:
-    - Some albums have 100+ images (massive storage)
-    - Prevent single post from consuming too much space
-    - Faster processing
-  - **Behavior Example**:
-    - Album has 80 images
-    - `max_album_images = 50`: Download first 50, skip remaining 30
-    - `max_album_images = 0`: Download all 80
-  - **Recommendations**:
-    - Conservative: 20-30 images
-    - Balanced: 50 images (default)
-    - Complete: 0 (unlimited, use with caution)
-  - **Examples**:
-    ```ini
-    max_album_images = 10   # First 10 only
-    max_album_images = 50   # First 50 (default)
-    max_album_images = 0    # No limit
     ```
 
 **Performance Controls:**
@@ -1921,154 +1699,14 @@ max_daily_storage_mb = 1024           # Daily storage limit in MB
     max_concurrent_downloads = 5  # Fast (requires good connection)
     ```
 
-* **`download_timeout`** - Per-file download timeout in seconds
-  - **Type**: Integer (positive)
-  - **Default**: `30`
-  - **Valid Range**: 5-600 (recommended: 15-120)
-  - **What It Does**: Max time to wait for single file download
-  - **What Happens on Timeout**: 
-    - Download cancelled
-    - Item added to retry queue
-    - Script continues to next file
-  - **Recommendations By File Type**:
-    - Images only: 15-30 seconds
-    - Mixed (images + small videos): 30-60 seconds (default range)
-    - Large videos: 60-300 seconds
-  - **Network Speed Considerations**:
-    - Slow connection (<1 Mbps): 60-120 seconds
-    - Medium (1-10 Mbps): 30-60 seconds
-    - Fast (10+ Mbps): 15-30 seconds
-  - **Examples**:
-    ```ini
-    download_timeout = 15   # Fast timeout (risk more failures)
-    download_timeout = 30   # Default (balanced)
-    download_timeout = 120  # Patient (for large files/slow networks)
-    ```
+#### Imgur API credentials (environment only)
 
-* **`max_daily_storage_mb`** - Daily storage consumption limit in megabytes
-  - **Type**: Integer (positive)
-  - **Default**: `1024` (1GB)
-  - **Valid Range**: 10-100,000+ (10MB to 100GB+)
-  - **What It Does**: 
-    - Tracks total storage used for media per run
-    - Stops downloading media when limit reached
-    - Text content (markdown) still saved
-    - Resets on next script run (not calendar day)
-  - **Why Use It**:
-    - Prevent unexpected storage exhaustion
-    - Control cloud storage costs (Dropbox/S3)
-    - GitHub Actions storage limits
-    - Predictable resource usage
-  - **Size Planning Guide**:
-    ```
-    100 MB:   ~500-1000 images OR ~2-5 short videos
-    500 MB:   ~2500-5000 images OR ~10-25 videos
-    1 GB:     ~5000-10000 images OR ~20-50 videos (default)
-    5 GB:     ~25000+ images OR 100+ videos
-    10 GB:    Complete large archive
-    ```
-  - **Recommendations By Use Case**:
-    - Testing: 100-200MB
-    - GitHub Actions (free): 500-1000MB
-    - Home backup: 2000-5000MB (2-5GB)
-    - Complete archive: 10000+ MB (10GB+)
-  - **Examples**:
-    ```ini
-    max_daily_storage_mb = 100    # Testing/minimal
-    max_daily_storage_mb = 1024   # 1GB default
-    max_daily_storage_mb = 5120   # 5GB comprehensive
-    max_daily_storage_mb = 0      # No limit (use with caution!)
-    ```
+Imgur settings come from environment variables; nothing reads an `[Imgur]` section, so an old one in `settings.ini` is ignored.
 
-#### `[Imgur]` - Imgur API Configuration
+* **`IMGUR_CLIENT_IDS`** - Comma-separated client IDs, rotated when one hits a rate limit (`abc123,def456`). Takes priority over `IMGUR_CLIENT_ID`.
+* **`IMGUR_CLIENT_ID`** - A single client ID.
 
-```ini
-[Imgur]
-# Optional: Comma-separated client IDs for rate limit rotation
-client_ids = None                      # Multiple Imgur client IDs
-recover_deleted = true                 # Attempt recovery of deleted content
-```
-
-#### Imgur Settings Explained:
-
-⚠️ **CRITICAL NOTE**: Imgur API registration permanently closed to new users in May 2024. These settings only work if you already have existing Imgur application credentials.
-
-* **`client_ids`** - Imgur application client IDs for API access
-  - **Type**: String (comma-separated list in settings.ini, single value in env var)
-  - **Default**: `None`
-  - **Valid Values**: 
-    - `None`: No Imgur API access (uses fallback methods)
-    - Single ID: `abc123def456`
-    - Multiple IDs (settings.ini only): `id1,id2,id3` (for rate limit rotation)
-  - **Format Rules**:
-    - No spaces around commas: `id1,id2,id3` ✅
-    - With spaces (invalid): `id1, id2, id3` ❌
-    - Each ID is alphanumeric, typically 15 characters
-  - **What It Does**:
-    - Enables official Imgur API access
-    - Higher rate limits (12,500 requests/day per app)
-    - Album support and metadata
-    - Multiple IDs (settings.ini only) rotate to avoid single-app rate limits
-  - **Without API Access**:
-    - Falls back to direct HTTP downloads
-    - Lower success rate (~30-40% vs ~70-80% with API)
-    - Frequent 429 rate limit errors (expected and normal)
-    - No album support
-  - **Configuration Methods**:
-    
-    | Method | Single ID | Multiple IDs | Best For |
-    |--------|-----------|--------------|----------|
-    | **Environment Variable** | ✅ Yes | ❌ No | Most users, single app |
-    | **settings.ini** | ✅ Yes | ✅ Yes | Advanced: rate limit rotation |
-    
-  - **How to Get** (only if you registered before May 2024):
-    1. Go to https://imgur.com/account/settings/apps
-    2. Select your application
-    3. Copy the "Client ID" value
-  - **Examples**:
-    ```ini
-    # settings.ini - Multiple IDs supported
-    client_ids = None                           # No API (most users)
-    client_ids = abc123def456                   # Single app
-    client_ids = abc123,def456,ghi789          # Multiple apps (rotation) ⚠️ settings.ini only
-    ```
-    ```bash
-    # Environment variable - Single ID only
-    export IMGUR_CLIENT_ID='abc123def456'       # Single app only
-    ```
-  - **⚠️ Important**: Multiple client ID rotation is **only supported in settings.ini**, not via environment variables. If you need rotation across multiple Imgur apps, you must use settings.ini configuration.
-
-* **`recover_deleted`** - Attempt recovery of deleted/unavailable Imgur content
-  - **Type**: Boolean
-  - **Default**: `true`
-  - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**:
-    - `true`: When Imgur returns 404, triggers content recovery cascade
-    - `false`: Skip recovery, treat as permanent failure
-  - **Recovery Process**:
-    1. Imgur returns 404 (not found) or 429 (rate limited)
-    2. System tries Wayback Machine for archived copy
-    3. Falls back to Reddit preview URLs
-    4. Checks other recovery providers
-    5. Caches result (success or failure) to avoid re-trying
-  - **Success Rates** (for deleted Imgur content):
-    - Recent deletions (<1 month): ~40-60% recovery
-    - Older deletions (1-6 months): ~20-40% recovery
-    - Very old (>6 months): ~10-20% recovery
-    - Popular images: Higher success (more likely archived)
-  - **Performance Impact**:
-    - Adds 5-15 seconds per failed Imgur image
-    - Only activates on failures (no cost for successful downloads)
-    - Results cached (subsequent failures instant)
-  - **When to Disable**:
-    - You don't care about deleted content
-    - Want faster processing (skip recovery attempts)
-    - Already know most Imgur links are dead
-  - **Examples**:
-    ```ini
-    recover_deleted = true   # Try to recover (default)
-    recover_deleted = false  # Skip recovery, faster
-    ```
+Without either, Imgur downloads use anonymous IP-based limits. Imgur closed API registration to new users in May 2024, so these only apply if you already have an application.
 
 #### `[Recovery]` - Content Recovery System
 
@@ -2078,8 +1716,6 @@ recover_deleted = true                 # Attempt recovery of deleted content
 use_wayback_machine = true             # Internet Archive Wayback Machine
 use_arctic_shift = true                # Archived Reddit posts and comments
 use_pushshift_api = true               # PullPush.io (Pushshift successor) 
-use_reddit_previews = false            # Retained compatibility setting, not an active provider
-use_reveddit_api = false               # Retained compatibility setting, not an active provider
 
 # Performance settings
 timeout_seconds = 10                   # Per-provider timeout
@@ -2141,27 +1777,7 @@ Reddit Stash includes a 3-provider cascade for unavailable content. Wayback can 
     use_pushshift_api = false  # Disable if service unavailable
     ```
 
-* **`use_reddit_previews`** - Legacy Reddit preview compatibility setting
-  - **Type**: Boolean
-  - **Default**: `false`
-  - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**: The application does not synthesize preview URLs because Reddit does not expose a reliable discovery path
-  - **Note**: This setting remains in configuration for compatibility but does not enable a recovery provider
-  - **Examples**:
-    ```ini
-    use_reddit_previews = false  # Keep unsupported preview probing disabled
-    ```
-
-* **`use_reveddit_api`** - Legacy Reveddit compatibility setting
-  - **Type**: Boolean
-  - **Default**: `false`
-  - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
-  - **What It Does**: Public Reveddit pages no longer expose archive content reliably, so the application does not send HTML probes to them
-  - **Note**: This setting remains in configuration for compatibility but does not enable a recovery provider
-  - **Examples**:
-    ```ini
-    use_reveddit_api = false  # Keep unsupported HTML probing disabled
-    ```
+**Retired recovery settings:** `use_reddit_previews` and `use_reveddit_api` no longer do anything. Those providers were removed, and any left in an old `settings.ini` are ignored.
 
 #### Recovery Performance Settings:
 
@@ -2169,10 +1785,10 @@ Reddit Stash includes a 3-provider cascade for unavailable content. Wayback can 
   - **Type**: Integer (positive)
   - **Default**: `10`
   - **Valid Range**: 3-120 seconds (recommended: 5-30)
-  - **What It Does**: Max time to wait for each recovery provider to respond
+  - **What It Does**: Overall time limit for one recovery lookup. All enabled providers run at the same time and share this limit
   - **Behavior on Timeout**:
-    - Provider attempt cancelled
-    - Moves to next provider in cascade
+    - Providers that have not answered yet are no longer waited for
+    - Answers already received are still used
     - Failure logged but doesn't stop processing
   - **Trade-offs**:
     
@@ -2182,12 +1798,10 @@ Reddit Stash includes a 3-provider cascade for unavailable content. Wayback can 
     | **10s** | Good (~70%) | Moderate | Default, balanced |
     | **20-30s** | Higher (~85%) | Slow | Thorough recovery, slow networks |
     
-  - **Cascade Example** (timeout=10s, 3 providers):
-    - Wayback: Try for 10s → Success/Fail → Next
-    - Arctic Shift: Try for archived Reddit text → Success/Fail → Next
-    - PullPush: Look up archived text and metadata → Success/Fail → Next
-    - Sequential total: 0-30 seconds per item (stops at first success)
-    - Parallel mode: Collects enabled provider results before selecting the highest-quality recovery
+  - **Lookup Example** (timeout=10s, 3 providers):
+    - Wayback, Arctic Shift and PullPush all start at once
+    - Total: at most 10 seconds per item
+    - The highest-quality result among the providers that answered is used
   - **Examples**:
     ```ini
     timeout_seconds = 5    # Fast, may miss some content
@@ -2203,7 +1817,7 @@ Reddit Stash includes a 3-provider cascade for unavailable content. Wayback can 
   - **What Gets Cached**:
     - Successful recoveries: URL → recovered content location
     - Failed attempts: URL → "not found" (avoid retrying same failure)
-  - **Cache Database**: `.recovery_cache.db` in save directory (SQLite)
+  - **Cache Database**: `retry_queue.db` in the working directory (SQLite)
   - **Why Cache?**:
     - Avoid re-querying same URL across runs
     - Respect provider rate limits
@@ -2218,7 +1832,7 @@ Reddit Stash includes a 3-provider cascade for unavailable content. Wayback can 
     | **168 hours (1 week)** | Weekly runs, stable content | Longer persistence |
     | **720 hours (30 days)** | Monthly runs, archival | Maximum persistence |
     
-  - **Auto-Cleanup**: Expired entries automatically removed based on `cleanup_interval_minutes`
+  - **Auto-Cleanup**: Expired entries are removed during recovery lookups, at most once per `cleanup_interval_minutes`
   - **Examples**:
     ```ini
     cache_duration_hours = 6     # 6 hours (short-term)
@@ -2289,7 +1903,7 @@ Reddit Stash includes a 3-provider cascade for unavailable content. Wayback can 
     - Entries older than `cache_duration_hours`
     - Excess entries beyond `max_cache_entries`
     - If size exceeds `max_cache_size_mb`
-  - **Trigger Timing**: Based on wall clock time
+  - **Trigger Timing**: On a run's first recovery lookup, then on the next lookup after each interval
   - **Performance Impact**: Minimal (<1 second per cleanup)
   - **Recommendations**:
     ```
@@ -2310,21 +1924,18 @@ Reddit Stash includes a 3-provider cascade for unavailable content. Wayback can 
   - **Default**: `true`
   - **Valid Values**: `true`, `false`, `yes`, `no`, `on`, `off`, `1`, `0`
   - **What It Does**:
-    - `true`: Runs cleanup automatically based on `cleanup_interval_minutes`
-    - `false`: Only cleans up when limits exceeded (manual mode)
-  - **Background Mode** (`true`):
-    - Periodic automatic cleanup
+    - `true`: Runs cleanup during recovery lookups, at most once per `cleanup_interval_minutes`
+    - `false`: Never cleans up; expired entries are ignored but stay in the file
+  - **Automatic** (`true`):
     - Prevents cache bloat
     - Recommended for most users
-  - **Manual Mode** (`false`):
-    - Only cleans when forced (size/entry limits hit)
-    - Slightly less overhead
-    - Cache may grow larger before cleanup
+  - **Off** (`false`):
+    - `max_cache_entries` and `max_cache_size_mb` are not enforced
     - Use if you want maximum cache retention
   - **Examples**:
     ```ini
     enable_background_cleanup = true   # Automatic (recommended)
-    enable_background_cleanup = false  # Manual only
+    enable_background_cleanup = false  # Off
     ```
 
 #### `[Retry]` - Retry Queue Configuration
@@ -2347,7 +1958,7 @@ dead_letter_threshold_days = 7         # Days before moving to dead letter queue
 
 #### Retry System Explained:
 
-The retry system ensures failed downloads are automatically retried across multiple runs with intelligent priority-based backoff strategies. Failed items are queued in a persistent SQLite database (`.retry_queue.db`) and retried on subsequent script runs.
+The retry system ensures failed downloads are automatically retried across multiple runs with intelligent priority-based backoff strategies. Failed items are queued in a persistent SQLite database (`reddit_stash_retry_queue.db` in the working directory) and retried on subsequent script runs.
 
 #### Retry Attempt Settings:
 
@@ -2537,7 +2148,7 @@ Items that exceed retry limits are moved to a "dead letter queue" for manual rev
     ```
 
 **Dead Letter Queue Management**:
-- View DLQ items: Check `.retry_queue.db` with SQLite browser
+- View DLQ items: Check `reddit_stash_retry_queue.db` with SQLite browser
 - Clear DLQ: Delete database file (creates fresh on next run)
 - Re-queue items: Manual SQL UPDATE statements
 - Monitor: Check logs for "moved to dead letter queue" messages
@@ -2682,40 +2293,30 @@ Quick alphabetical reference of all 51 settings with links to detailed documenta
 - **`check_type`** (String, default: LOG) - File existence checking method | [→ Settings Section](#core-settings-explained)
 - **`cleanup_interval_minutes`** (Integer, default: 60) - Cache cleanup frequency | [→ Recovery Section](#recovery-cache-management)
 - **`client_id`** (String, default: None) - Reddit API client ID | [→ Configuration Section](#api-configuration-settings)
-- **`client_ids`** (String, default: None) - Imgur client IDs (multiple in settings.ini only) | [→ Imgur Section](#imgur-settings-explained)
 - **`client_secret`** (String, default: None) - Reddit API client secret | [→ Configuration Section](#api-configuration-settings)
-- **`create_thumbnails`** (Boolean, default: true) - Generate thumbnail versions | [→ Media Section](#media-settings-explained)
 
 #### D-I
 - **`dead_letter_threshold_days`** (Integer, default: 7) - Days before moving to DLQ | [→ Retry Section](#dead-letter-queue-settings)
 - **`download_albums`** (Boolean, default: true) - Process multi-image posts | [→ Media Section](#media-settings-explained)
-- **`download_audio`** (Boolean, default: true) - Control audio downloads | [→ Media Section](#media-settings-explained)
 - **`download_enabled`** (Boolean, default: true) - Master media download switch | [→ Media Section](#media-settings-explained)
 - **`download_images`** (Boolean, default: true) - Control image downloads | [→ Media Section](#media-settings-explained)
-- **`download_timeout`** (Integer, default: 30) - Per-file download timeout | [→ Media Section](#media-settings-explained)
 - **`download_videos`** (Boolean, default: true) - Control video downloads | [→ Media Section](#media-settings-explained)
 - **`dropbox_directory`** (String, default: /reddit) - Cloud storage path (Dropbox folder / S3 key prefix) | [→ Settings Section](#core-settings-explained)
 - **`enable_background_cleanup`** (Boolean, default: true) - Automatic cache maintenance | [→ Recovery Section](#recovery-cache-management)
 - **`exponential_base_delay`** (Integer, default: 60) - Exponential backoff base delay | [→ Retry Section](#exponential-backoff-settings)
-- **`ignore_tls_errors`** (Boolean, default: false) - Bypass SSL certificate validation | [→ Settings Section](#core-settings-explained)
 
 #### M-P
-- **`max_album_images`** (Integer, default: 50) - Limit images per album | [→ Media Section](#media-settings-explained)
 - **`max_cache_entries`** (Integer, default: 10000) - Maximum cached recovery results | [→ Recovery Section](#recovery-cache-management)
 - **`max_cache_size_mb`** (Integer, default: 100) - Cache size limit in MB | [→ Recovery Section](#recovery-cache-management)
 - **`max_concurrent_downloads`** (Integer, default: 3) - Parallel download streams | [→ Media Section](#media-settings-explained)
-- **`max_daily_storage_mb`** (Integer, default: 1024) - Daily storage limit in MB | [→ Media Section](#media-settings-explained)
-- **`max_image_size`** (Integer, default: 5242880) - Max image file size in bytes | [→ Media Section](#media-settings-explained)
 - **`max_retries`** (Integer, default: 5) - Maximum retry attempts | [→ Retry Section](#retry-attempt-settings)
 - **`max_retry_delay`** (Integer, default: 86400) - Maximum retry delay cap | [→ Retry Section](#exponential-backoff-settings)
-- **`max_video_size`** (Integer, default: 209715200) - Max video file size in bytes | [→ Media Section](#media-settings-explained)
 - **`password`** (String, default: None) - Reddit account password | [→ Configuration Section](#api-configuration-settings)
 - **`process_api`** (Boolean, default: true) - Fetch content from Reddit API | [→ Settings Section](#core-settings-explained)
 - **`process_gdpr`** (Boolean, default: false) - Process GDPR export files | [→ Settings Section](#core-settings-explained)
 
 #### P-R
 - **`provider`** (String, default: none) - Cloud storage backend | [→ Storage Section](#storage-settings-explained)
-- **`recover_deleted`** (Boolean, default: true) - Attempt Imgur content recovery | [→ Imgur Section](#imgur-settings-explained)
 
 #### S-U
 - **`s3_bucket`** (String, default: None) - S3 bucket name | [→ Storage Section](#storage-settings-explained)
@@ -2724,18 +2325,14 @@ Quick alphabetical reference of all 51 settings with links to detailed documenta
 - **`s3_storage_class`** (String, default: STANDARD_IA) - S3 storage class | [→ Storage Section](#storage-settings-explained)
 - **`save_directory`** (String, default: reddit/) - Local save directory | [→ Settings Section](#core-settings-explained)
 - **`save_type`** (String, default: ALL) - What content to download | [→ Settings Section](#core-settings-explained)
-- **`thumbnail_size`** (Integer, default: 800) - Thumbnail dimensions in pixels | [→ Media Section](#media-settings-explained)
 - **`timeout_seconds`** (Integer, default: 10) - Per-provider recovery timeout | [→ Recovery Section](#recovery-performance-settings)
 - **`unsave_after_download`** (Boolean, default: false) - Auto-unsave after download | [→ Settings Section](#core-settings-explained)
 - **`use_arctic_shift`** (Boolean, default: true) - Use Arctic Shift archive provider | [→ Recovery Section](#recovery-provider-settings)
 - **`use_pushshift_api`** (Boolean, default: true) - Use PullPush.io provider | [→ Recovery Section](#recovery-provider-settings)
-- **`use_reddit_previews`** (Boolean, default: false) - Retained legacy Reddit preview setting | [→ Recovery Section](#recovery-provider-settings)
-- **`use_reveddit_api`** (Boolean, default: false) - Retained legacy Reveddit setting | [→ Recovery Section](#recovery-provider-settings)
 - **`use_wayback_machine`** (Boolean, default: true) - Use Internet Archive | [→ Recovery Section](#recovery-provider-settings)
 - **`username`** (String, default: None) - Reddit username | [→ Configuration Section](#api-configuration-settings)
 
 #### V
-- **`video_quality`** (String, default: high) - Video quality preference | [→ Media Section](#media-settings-explained)
 
 **💡 Tip**: Use your browser's search (Ctrl+F / Cmd+F) to quickly find a specific setting in the detailed sections above.
 
@@ -2749,14 +2346,12 @@ Quick alphabetical reference of all 51 settings with links to detailed documenta
 ```ini
 check_type = LOG
 max_concurrent_downloads = 5
-download_timeout = 15
 ```
 
 **For Maximum Reliability:**
 ```ini
 check_type = DIR  
 max_concurrent_downloads = 1
-download_timeout = 60
 ```
 
 ### Storage Optimization
@@ -2765,25 +2360,22 @@ download_timeout = 60
 ```ini
 download_images = true
 download_videos = false
-create_thumbnails = false
-max_image_size = 1048576  # 1MB
 ```
 
 **Complete Archive:**
 ```ini
+download_images = true
+download_videos = true
 download_albums = true
-max_video_size = 524288000  # 500MB
-max_album_images = 0  # unlimited
 ```
 
 ### Security Considerations
 
 * **Never commit settings.ini with credentials to version control**
 * **Use environment variables for production deployments**
-* **Keep `ignore_tls_errors = false` unless absolutely necessary**
 * **Regularly rotate API credentials**
 
-Note: Environment variables always take precedence over settings.ini values for credentials.
+Note: For Reddit credentials, a real value in settings.ini takes precedence over the environment variable, so leave those keys as `None`.
 
 #### Media Download Configuration
 
@@ -2824,7 +2416,6 @@ If you already have an Imgur application from before 2024:
 2. **Set environment variables**:
    ```bash
    export IMGUR_CLIENT_ID='your_imgur_client_id'
-   export IMGUR_CLIENT_SECRET='your_imgur_client_secret'
    ```
 3. **Enjoy enhanced features**: Better reliability, album support, fewer rate limits
 
@@ -2835,7 +2426,6 @@ For enhanced media downloading, you can optionally set these environment variabl
 ```bash
 # Imgur API (if you have existing credentials)
 export IMGUR_CLIENT_ID='your_imgur_client_id'
-export IMGUR_CLIENT_SECRET='your_imgur_client_secret'
 
 # These improve download reliability and enable advanced features
 # Leave unset if you don't have Imgur API access - basic downloads will still work
@@ -2906,6 +2496,8 @@ If neither is done, prawcore authentication will fail.
 Keep these credentials for the setup.
 
 #### Setting Up Dropbox app
+For a local install, first run `pip install -r requirements-dropbox.txt`; the Docker image and the GitHub Actions workflows already include it.
+
 * Go to [Dropbox Developer App](https://www.dropbox.com/developers/apps).
 * Click on Create app.
 * Select `Scoped access` and choose `Full Dropbox` or `App folder` for access type.
@@ -3622,6 +3214,8 @@ When using Reddit Stash, keep these security considerations in mind:
 ## Contributing
 
 Feel free to open issues or submit pull requests if you have any improvements or bug fixes.
+
+**Dependencies:** edit version ranges in `requirements-minimal.txt`, or `requirements.txt` for `curl-cffi`, which adds only that package to the minimal set for environments where it will not install. The storage backends are separate: `requirements-dropbox.txt` and `requirements-s3.txt`. The scheduled workflows and Docker image install the exact versions in `constraints.txt`; its header has the refresh command, and the compatibility workflow's scheduled `dependency-audit` job fails when a pin has a known vulnerability.
 
 ### Acknowledgement
 - This project was inspired by [reddit-saved-saver](https://github.com/tobiasvl/reddit-saved-saver).

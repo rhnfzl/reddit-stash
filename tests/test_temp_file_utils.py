@@ -1,15 +1,10 @@
 """Tests for temporary-file lifecycle helpers."""
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from utils.temp_file_utils import (
-    safe_temp_file,
-    temp_directory_cleanup,
-    temp_files_cleanup,
-)
+from utils.media_services.temp_file_utils import temp_files_cleanup
 
 
 class TestTemporaryFileUtilities(unittest.TestCase):
@@ -51,27 +46,6 @@ class TestTemporaryFileUtilities(unittest.TestCase):
             pass
 
         self.assertFalse(missing.exists())
-
-    def test_directory_is_removed_after_context(self):
-        directory = Path(self.temp_dir.name) / 'download'
-        directory.mkdir()
-        (directory / 'content.tmp').write_text('content', encoding='utf-8')
-
-        with temp_directory_cleanup(directory):
-            self.assertTrue(directory.exists())
-
-        self.assertFalse(directory.exists())
-
-    def test_safe_temp_file_creates_file_in_requested_directory(self):
-        path = safe_temp_file(suffix='.part', dir=self.temp_dir.name)
-
-        self.assertTrue(os.path.exists(path))
-        self.assertTrue(path.endswith('.part'))
-
-        with temp_files_cleanup(path):
-            pass
-
-        self.assertFalse(os.path.exists(path))
 
 
 if __name__ == '__main__':

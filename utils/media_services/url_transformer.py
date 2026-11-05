@@ -15,7 +15,6 @@ Usage:
 import re
 import logging
 from dataclasses import dataclass
-from typing import Optional, Dict
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 
@@ -24,16 +23,16 @@ class TransformResult:
     """Result of URL transformation"""
     url: str
     transformed: bool = False
-    platform: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
-    notes: Optional[str] = None
+    platform: str | None = None
+    headers: dict[str, str] | None = None
+    notes: str | None = None
 
 
 class URLTransformer:
     """Centralized URL transformer for direct download access"""
 
     def __init__(self):
-        self.logger = logging.getLogger(__name__)
+        self._logger = logging.getLogger(__name__)
 
         # Registry of URL transformation patterns
         # Each tuple contains: (pattern, transform_function, platform_name, notes)
@@ -149,7 +148,7 @@ class URLTransformer:
                 try:
                     transformed_url = transform_func(url, match)
                     if transformed_url and transformed_url != url:
-                        self.logger.debug(f"Transformed {platform} URL: {url} -> {transformed_url}")
+                        self._logger.debug(f"Transformed {platform} URL: {url} -> {transformed_url}")
                         return TransformResult(
                             url=transformed_url,
                             transformed=True,
@@ -157,12 +156,12 @@ class URLTransformer:
                             notes=notes
                         )
                 except Exception as e:
-                    self.logger.warning(f"Failed to transform {platform} URL {url}: {e}")
+                    self._logger.warning(f"Failed to transform {platform} URL {url}: {e}")
                     continue
 
         return TransformResult(url=url)
 
-    def get_domain_info(self, url: str) -> Optional[str]:
+    def get_domain_info(self, url: str) -> str | None:
         """Get platform name for domain-aware error messages"""
         domain_map = {
             'github.com': 'GitHub',
