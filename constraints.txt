@@ -1,0 +1,38 @@
+# Exact versions for unattended installs: scheduled workflows and the Docker image.
+# Use with: pip install -r requirements.txt -r requirements-dropbox.txt -r requirements-s3.txt -c constraints.txt
+# The compatibility workflow's weekly run installs without this file, so a breaking
+# release shows up there before anyone refreshes these pins. Its dependency-audit job fails
+# when a pin here has a known vulnerability. Nothing refreshes them automatically, so run
+# this for security releases too; without --upgrade uv keeps the pins:
+#   uv pip compile --upgrade --universal --python-version 3.11 --no-header --no-annotate \
+#     requirements.txt requirements-dropbox.txt requirements-s3.txt -o constraints.txt
+# and keep this header.
+blake3==1.0.11
+boto3==1.43.123
+botocore==1.43.123
+certifi==2026.10.23
+cffi==2.1.1
+charset-normalizer==3.5.2
+curl-cffi==0.17.0
+defusedxml==0.7.1
+dropbox==12.2.4
+idna==3.20
+jinja2==3.1.6
+jmespath==1.1.0
+markupsafe==3.0.4
+packaging==26.3
+pillow==13.0.0
+praw==8.0.3
+prawcore==4.0.0
+pycparser==3.12
+python-dateutil==2.9.0.post0
+requests==2.34.2
+s3transfer==0.19.3
+six==1.17.0
+stone==3.5.5
+tenacity==9.2.1
+tqdm==4.70.1
+typing-extensions==4.15.0
+update-checker==1.0.1
+urllib3==2.8.0
+websocket-client==1.9.2

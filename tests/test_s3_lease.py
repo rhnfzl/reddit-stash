@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import signal
 import tempfile
 import unittest
 from datetime import timedelta
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from utils.storage import s3_lease
 from utils.storage.s3_lease import S3Lease, is_control_key, lease_key
+from utils.storage.s3_provider import S3StorageProvider
 
 
 class ClientError(Exception):
@@ -221,7 +223,7 @@ class TestConditionalLogCommit(unittest.TestCase):
         s3.objects["reddit/file_log.json"] = (b"{}", '"v1"')
         provider = self._provider(s3)
         with tempfile.TemporaryDirectory() as d:
-            provider._download_log_snapshot("reddit/file_log.json", os.path.join(d, "file_log.json"), 0)
+            provider.download_log("reddit", d)
             local = os.path.join(d, "file_log.json")
             with open(local, "w") as f:
                 f.write('{"a": 1}')
@@ -239,7 +241,7 @@ class TestConditionalLogCommit(unittest.TestCase):
         provider = self._provider(s3)
         with tempfile.TemporaryDirectory() as d:
             local = os.path.join(d, "file_log.json")
-            provider._download_log_snapshot("reddit/file_log.json", local, 0)
+            provider.download_log("reddit", d)
             with open(local, "w") as f:
                 f.write("{}")
             s3.objects["reddit/file_log.json"] = (b'{"raced": 1}', '"x"')
@@ -253,7 +255,7 @@ class TestConditionalLogCommit(unittest.TestCase):
         provider = self._provider(s3)
         with tempfile.TemporaryDirectory() as d:
             local = os.path.join(d, "file_log.json")
-            provider._download_log_snapshot("reddit/file_log.json", local, 0)
+            provider.download_log("reddit", d)
             with open(local, "w") as f:
                 f.write('{"a": 1}')
             s3.fail_next_put_response = True
@@ -272,25 +274,26 @@ class TestCycle(unittest.TestCase):
     """storage_utils --cycle orchestration with the provider and backup mocked."""
 
     def setUp(self):
-        import storage_utils
-        self.su = storage_utils
+        from utils.storage import cycle
+        self.su = cycle
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
         self.s3 = FakeS3()
-        self.provider = MagicMock()
+        self.provider = MagicMock(spec=S3StorageProvider)
         self.provider.lease.side_effect = lambda prefix, runner: S3Lease(self.s3, "b", prefix, runner)
         ok = MagicMock(failed=0, errors=[])
-        self.provider.download_directory.return_value = ok
+        self.provider.download_log.return_value = ok
         self.provider.upload_directory.return_value = ok
-        config = MagicMock(dropbox_directory="/reddit")
+        config = MagicMock(remote_directory="/reddit")
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.local_dir = tmp.name  # never the real reddit/ folder: the cycle empties it
         patches = [
             patch.dict(os.environ, {"STORAGE_COORDINATION": "true"}),
-            patch.object(storage_utils, "load_storage_config", return_value=config),
-            patch.object(storage_utils, "_coordination_problems", return_value=[]),
-            patch.object(storage_utils, "get_storage_provider", return_value=self.provider),
-            patch.object(storage_utils, "_load_local_dir", return_value=self.local_dir),
-            patch.object(storage_utils, "_ping_healthcheck"),
+            patch.object(cycle, "load_storage_config", return_value=config),
+            patch.object(cycle, "_coordination_problems", return_value=[]),
+            patch.object(cycle, "get_storage_provider", return_value=self.provider),
+            patch.object(cycle, "load_local_dir", return_value=self.local_dir),
+            patch.object(cycle, "_ping_healthcheck"),
         ]
         for p in patches:
             p.start()
@@ -298,9 +301,8 @@ class TestCycle(unittest.TestCase):
 
     def _run(self, require_stale=None, backup_ok=True):
         args = MagicMock(runner="homelab", require_stale=require_stale)
-        with patch.object(self.su, "_run_backup", return_value=backup_ok), \
-                self.assertRaises(SystemExit) as ctx:
-            self.su.cmd_cycle(args)
+        with self.assertRaises(SystemExit) as ctx:
+            self.su.cmd_cycle(args, MagicMock(return_value=backup_ok))
         return ctx.exception.code
 
     def test_successful_cycle_uploads_and_records_success(self):
@@ -308,6 +310,10 @@ class TestCycle(unittest.TestCase):
         self.provider.upload_directory.assert_called_once()
         self.assertEqual(self.s3.body(lease_key("reddit"))["state"], "idle")
         self.assertIsNotNone(self.s3.body(lease_key("reddit"))["last_success"])
+
+    def test_cycle_makes_the_log_commit_conditional(self):
+        self.assertEqual(self._run(), 0)
+        self.assertIs(self.provider.require_log_snapshot, True)
 
     def test_failed_backup_does_not_upload_or_refresh_success(self):
         self.assertEqual(self._run(backup_ok=False), self.su.EXIT_CYCLE_FAILED)
@@ -318,14 +324,14 @@ class TestCycle(unittest.TestCase):
         S3Lease(self.s3, "b", "reddit", "github").acquire()
 
         self.assertEqual(self._run(), self.su.EXIT_CYCLE_SKIPPED)
-        self.provider.download_directory.assert_not_called()
+        self.provider.download_log.assert_not_called()
 
     def test_require_stale_skips_after_a_recent_success(self):
         self.assertEqual(self._run(), 0)
         self.provider.reset_mock()
 
         self.assertEqual(self._run(require_stale=6), self.su.EXIT_CYCLE_SKIPPED)
-        self.provider.download_directory.assert_not_called()
+        self.provider.download_log.assert_not_called()
         self.assertEqual(self.s3.body(lease_key("reddit"))["state"], "idle")
 
     def test_lost_lease_before_upload_aborts(self):
@@ -334,8 +340,8 @@ class TestCycle(unittest.TestCase):
             return True
 
         args = MagicMock(runner="homelab", require_stale=None)
-        with patch.object(self.su, "_run_backup", side_effect=steal), self.assertRaises(SystemExit) as ctx:
-            self.su.cmd_cycle(args)
+        with self.assertRaises(SystemExit) as ctx:
+            self.su.cmd_cycle(args, steal)
 
         self.assertEqual(ctx.exception.code, self.su.EXIT_CYCLE_FAILED)
         self.provider.upload_directory.assert_not_called()
@@ -356,8 +362,8 @@ class TestCycle(unittest.TestCase):
             return True
 
         args = MagicMock(runner="homelab", require_stale=None)
-        with patch.object(self.su, "_run_backup", side_effect=backup), self.assertRaises(SystemExit) as ctx:
-            self.su.cmd_cycle(args)
+        with self.assertRaises(SystemExit) as ctx:
+            self.su.cmd_cycle(args, backup)
 
         self.assertEqual(ctx.exception.code, 0)
         self.assertEqual(os.listdir(self.local_dir), [])
@@ -369,16 +375,57 @@ class TestCycle(unittest.TestCase):
     def test_errors_and_sigterm_exit_2_and_release_the_lease(self):
         for error in (OSError("disk"), self.su._Terminated()):
             with self.subTest(error=type(error).__name__):
-                self.provider.download_directory.side_effect = error
+                self.provider.download_log.side_effect = error
                 self.assertEqual(self._run(), self.su.EXIT_CYCLE_FAILED)
                 self.assertEqual(self.s3.body(lease_key("reddit"))["state"], "idle")
+
+    def test_sigterm_after_a_finished_cycle_does_not_fail_the_run(self):
+        real_cycle = self.su._run_cycle_with_lease
+
+        def cycle_then_sigterm(args, run_backup):
+            code = real_cycle(args, run_backup)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return code
+
+        with patch.object(self.su, "_run_cycle_with_lease", cycle_then_sigterm):
+            self.assertEqual(self._run(), 0)
+
+    def test_sigterm_during_release_still_releases_and_empties_the_folder(self):
+        real_release = S3Lease.release
+
+        def release_interrupted(lease, success):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return real_release(lease, success)
+
+        def backup():
+            with open(os.path.join(self.local_dir, "new.md"), "w") as f:
+                f.write("x")
+            return True
+
+        args = MagicMock(runner="homelab", require_stale=None)
+        with patch.object(S3Lease, "release", release_interrupted), \
+                self.assertRaises(SystemExit):
+            self.su.cmd_cycle(args, backup)
+
+        self.assertEqual(self.s3.body(lease_key("reddit"))["state"], "idle")
+        self.assertEqual(os.listdir(self.local_dir), [])
+
+    def test_sigterm_message_reports_what_happened_to_the_lease(self):
+        self.provider.download_log.side_effect = self.su._Terminated()
+        with patch.object(S3Lease, "release", return_value=False), \
+                self.assertLogs("utils.storage.cycle", level="INFO") as logs:
+            self.assertEqual(self._run(), self.su.EXIT_CYCLE_FAILED)
+        output = "\n".join(logs.output)
+        self.assertIn("Lease not released; unless another runner took it over", output)
+        self.assertNotIn("Lease released", output)
 
     def test_connect_failure_exits_2(self):
         self.provider.connect.side_effect = RuntimeError("Cannot access S3 bucket")
         self.assertEqual(self._run(), self.su.EXIT_CYCLE_FAILED)
 
     def test_upload_and_migrate_are_refused_when_coordinated(self):
-        for cmd, args in ((self.su.cmd_upload, None), (self.su.cmd_migrate, MagicMock(execute=True))):
+        import storage_utils
+        for cmd, args in ((storage_utils.cmd_upload, None), (storage_utils.cmd_migrate, MagicMock(execute=True))):
             with self.assertRaises(SystemExit) as ctx:
                 cmd(args)
             self.assertEqual(ctx.exception.code, self.su.EXIT_CYCLE_FAILED)

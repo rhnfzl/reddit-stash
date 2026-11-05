@@ -11,8 +11,8 @@ from utils.content_recovery.recovery_metadata import (
     RecoveryResult,
     RecoverySource,
 )
-from utils.media_download_manager import MediaDownloadManager
-from utils.service_abstractions import DownloadResult, DownloadStatus
+from utils.media_services.download_manager import MediaDownloadManager
+from utils.media_services.media_types import DownloadResult, DownloadStatus
 
 
 class _FailingDownloader:
@@ -70,11 +70,11 @@ class TestPullPushMetadataRecovery(unittest.TestCase):
             with patch(
                 'utils.content_recovery.providers.pullpush_provider.rate_limit_manager.report_response',
             ) as report_response:
-                records = provider.fetch_metadata_by_ids('posts', ['abc123'])
+                records = provider.fetch_posts(['abc123'])
 
         self.assertEqual(records['abc123']['title'], 'Archived title')
         self.assertEqual(provider.session.calls[0][1]['ids'], 'abc123')
-        report_response.assert_called_once_with('pullpush_io', 200)
+        report_response.assert_called_once_with('pullpush_io', 200, None)
 
     def test_archived_submission_is_successful_metadata_without_media_url(self):
         provider = PullPushProvider()
@@ -141,10 +141,6 @@ class TestPullPushMetadataRecovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as save_path:
             manager = MediaDownloadManager()
             manager._retry_queue = Mock()
-            manager._service_manager = Mock()
-            manager._service_manager.execute_with_protection.side_effect = (
-                lambda _name, operation, fallback_value: operation()
-            )
 
             with patch.object(manager, '_recovery_service', recovery_service), patch.object(
                 manager,
@@ -156,7 +152,7 @@ class TestPullPushMetadataRecovery(unittest.TestCase):
                     save_path,
                 )
 
-        self.assertIsNone(result)
+        self.assertIsNone(result.local_path)
         self.assertEqual(downloader.calls, ['https://i.redd.it/failing_image.jpg'])
 
 

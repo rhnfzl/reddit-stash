@@ -1,12 +1,16 @@
 """Regression tests for GDPR export processing."""
 
+import configparser
 import csv
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from utils.gdpr_processor import process_gdpr_export
+from utils.content_recovery.recovery_config import RecoveryConfig
+from utils.file_operations import RunStats, SaveContext, SaveStatus
+from utils.gdpr_processor import _COMMENTS, _POSTS, process_gdpr_export
 
 
 class TestGdprExportProcessing(unittest.TestCase):
@@ -42,19 +46,19 @@ class TestGdprExportProcessing(unittest.TestCase):
         return item
 
     def _process(self, reddit):
-        return process_gdpr_export(reddit, self.save_directory, set(), set(), {})
+        return process_gdpr_export(reddit, SaveContext(self.save_directory, set(), {}, set()))
 
     def test_saved_submission_tuple_result_is_unpacked(self):
         self._write_export('saved_posts.csv', 'post123')
         reddit = Mock()
         reddit.info.return_value = [self._reddit_item('post123', is_submission=True)]
 
-        with patch('utils.gdpr_processor.save_to_file', return_value=(False, 0)):
-            with patch('utils.gdpr_processor.os.path.getsize', return_value=42):
-                with patch('utils.gdpr_processor.dynamic_sleep'):
-                    processed, skipped, total_size, _ = self._process(reddit)
+        with patch('utils.file_operations.save_to_file', return_value=(SaveStatus.SAVED, 0)):
+            with patch('utils.file_operations.os.path.getsize', return_value=42):
+                with patch('utils.file_operations.dynamic_sleep'):
+                    stats = self._process(reddit)
 
-        self.assertEqual((processed, skipped, total_size), (1, 0, 42))
+        self.assertEqual((stats.processed, stats.skipped, stats.total_size), (1, 0, 42))
         reddit.submission.assert_not_called()
 
     def test_saved_comment_tuple_result_is_unpacked(self):
@@ -62,12 +66,12 @@ class TestGdprExportProcessing(unittest.TestCase):
         reddit = Mock()
         reddit.info.return_value = [self._reddit_item('comment123', is_submission=False)]
 
-        with patch('utils.gdpr_processor.save_to_file', return_value=(False, 0)):
-            with patch('utils.gdpr_processor.os.path.getsize', return_value=42):
-                with patch('utils.gdpr_processor.dynamic_sleep'):
-                    processed, skipped, total_size, _ = self._process(reddit)
+        with patch('utils.file_operations.save_to_file', return_value=(SaveStatus.SAVED, 0)):
+            with patch('utils.file_operations.os.path.getsize', return_value=42):
+                with patch('utils.file_operations.dynamic_sleep'):
+                    stats = self._process(reddit)
 
-        self.assertEqual((processed, skipped, total_size), (1, 0, 42))
+        self.assertEqual((stats.processed, stats.skipped, stats.total_size), (1, 0, 42))
         reddit.comment.assert_not_called()
 
     def test_already_saved_submission_is_skipped(self):
@@ -75,11 +79,11 @@ class TestGdprExportProcessing(unittest.TestCase):
         reddit = Mock()
         reddit.info.return_value = [self._reddit_item('post123', is_submission=True)]
 
-        with patch('utils.gdpr_processor.save_to_file', return_value=(True, 0)):
-            with patch('utils.gdpr_processor.dynamic_sleep') as sleep:
-                processed, skipped, total_size, _ = self._process(reddit)
+        with patch('utils.file_operations.save_to_file', return_value=(SaveStatus.SKIPPED, 0)):
+            with patch('utils.file_operations.dynamic_sleep') as sleep:
+                stats = self._process(reddit)
 
-        self.assertEqual((processed, skipped, total_size), (0, 1, 0))
+        self.assertEqual((stats.processed, stats.skipped, stats.total_size), (0, 1, 0))
         sleep.assert_not_called()
 
     def test_failed_submission_counts_as_failed_not_processed(self):
@@ -87,11 +91,11 @@ class TestGdprExportProcessing(unittest.TestCase):
         reddit = Mock()
         reddit.info.return_value = [self._reddit_item('post123', is_submission=True)]
 
-        with patch('utils.gdpr_processor.save_to_file', return_value=(None, 0)):
-            with patch('utils.gdpr_processor.dynamic_sleep'):
+        with patch('utils.file_operations.save_to_file', return_value=(SaveStatus.FAILED, 0)):
+            with patch('utils.file_operations.dynamic_sleep'):
                 result = self._process(reddit)
 
-        self.assertEqual(result, (0, 0, 0, 1))
+        self.assertEqual(result, RunStats(failed=1))
 
     def test_saved_posts_are_fetched_in_one_info_batch(self):
         self._write_export_rows('saved_posts.csv', ['post123', 'post456'])
@@ -101,14 +105,102 @@ class TestGdprExportProcessing(unittest.TestCase):
             self._reddit_item('post456', is_submission=True),
         ]
 
-        with patch('utils.gdpr_processor.save_to_file', return_value=(False, 0)):
-            with patch('utils.gdpr_processor.os.path.getsize', return_value=42):
-                with patch('utils.gdpr_processor.dynamic_sleep'):
-                    processed, skipped, total_size, _ = self._process(reddit)
+        with patch('utils.file_operations.save_to_file', return_value=(SaveStatus.SAVED, 0)):
+            with patch('utils.file_operations.os.path.getsize', return_value=42):
+                with patch('utils.file_operations.dynamic_sleep'):
+                    stats = self._process(reddit)
 
-        self.assertEqual((processed, skipped, total_size), (2, 0, 84))
+        self.assertEqual((stats.processed, stats.skipped, stats.total_size), (2, 0, 84))
         reddit.info.assert_called_once_with(fullnames=['t3_post123', 't3_post456'])
         reddit.submission.assert_not_called()
+
+    def test_api_mode_keeps_logging_under_the_post_category(self):
+        # Existing file_log.json files rely on this key, despite the GDPR_ file name.
+        self._write_export_rows('saved_posts.csv', ['post123'])
+        self._write_export_rows('saved_comments.csv', ['comment123'])
+        reddit = Mock()
+        reddit.info.side_effect = [
+            [self._reddit_item('post123', is_submission=True)],
+            [self._reddit_item('comment123', is_submission=False)],
+        ]
+        file_log = {}
+
+        with patch('utils.gdpr_processor._POSTS', replace(_POSTS, save_function=lambda item, f, unsave: 0)), \
+                patch('utils.gdpr_processor._COMMENTS', replace(_COMMENTS, save_function=lambda item, f, unsave: 0)), \
+                patch('utils.file_operations.dynamic_sleep'):
+            stats = process_gdpr_export(reddit, SaveContext(self.save_directory, set(), file_log, set()))
+
+        self.assertEqual(stats.processed, 2)
+        self.assertEqual(set(file_log), {'post123-test-Mock-POST', 'comment123-test-Mock-POST'})
+        self.assertTrue((Path(self.save_directory) / 'test' / 'GDPR_POST_post123.md').exists())
+        self.assertTrue((Path(self.save_directory) / 'test' / 'GDPR_COMMENT_comment123.md').exists())
+
+    def _run_csv_only_with_recovery(self, recovery):
+        self._write_export_rows('saved_posts.csv', ['post123'])
+        config = RecoveryConfig(timeout_seconds=7, **recovery)
+        with patch('utils.gdpr_processor.load_recovery_config', return_value=config), \
+                patch('utils.gdpr_processor.ArcticShiftClient') as arctic, \
+                patch('utils.gdpr_processor.PullPushProvider') as pullpush:
+            arctic.return_value.fetch_posts.return_value = {}
+            pullpush.return_value.fetch_posts.return_value = {}
+            stats = self._process(None)
+        return stats, arctic, pullpush
+
+    def test_csv_only_mode_respects_disabled_recovery_providers(self):
+        stats, arctic, pullpush = self._run_csv_only_with_recovery(
+            {'use_arctic_shift': False, 'use_pullpush': False})
+
+        arctic.assert_not_called()
+        pullpush.assert_not_called()
+        self.assertEqual(stats.processed, 1)  # the link-only export is still written
+
+    def test_csv_only_mode_uses_enabled_providers_with_configured_timeout(self):
+        _, arctic, pullpush = self._run_csv_only_with_recovery(
+            {'use_arctic_shift': True, 'use_pullpush': True})
+
+        arctic.assert_called_once_with(timeout=7)
+        pullpush.assert_called_once_with(7)
+        pullpush.return_value.fetch_posts.assert_called_once_with(['post123'])
+
+    def test_csv_only_mode_gates_each_provider_on_its_own_flag(self):
+        _, arctic, pullpush = self._run_csv_only_with_recovery(
+            {'use_arctic_shift': True, 'use_pullpush': False})
+        arctic.assert_called_once_with(timeout=7)
+        pullpush.assert_not_called()
+
+        _, arctic, pullpush = self._run_csv_only_with_recovery(
+            {'use_arctic_shift': False, 'use_pullpush': True})
+        arctic.assert_not_called()
+        pullpush.assert_called_once_with(7)
+
+    def test_csv_only_mode_names_the_section_of_a_malformed_recovery_value(self):
+        parser = configparser.ConfigParser()
+        parser.read_string('[Recovery]\ntimeout_seconds = abc\n')
+        with patch('utils.content_recovery.recovery_config.load_settings', return_value=parser), \
+                self.assertRaisesRegex(ValueError, r'\[Recovery\].*abc'):
+            self._process(None)
+
+    def test_csv_only_unsafe_path_counts_as_failed(self):
+        unsafe = Mock(is_safe=False, issues=['traversal'])
+        with self.assertLogs('utils.gdpr_processor', 'ERROR'), \
+                patch('utils.gdpr_processor.create_reddit_file_path', return_value=unsafe):
+            stats, _, _ = self._run_csv_only_with_recovery({'use_arctic_shift': False, 'use_pullpush': False})
+
+        self.assertEqual((stats.failed, stats.skipped, stats.processed), (1, 0, 0))
+
+    def test_csv_only_row_already_in_the_log_is_not_rewritten(self):
+        self._write_export_rows('saved_posts.csv', ['post123'])
+        config = RecoveryConfig(timeout_seconds=7, use_arctic_shift=False, use_pullpush=False)
+        ctx = SaveContext(self.save_directory, set(), {}, set())
+        with patch('utils.gdpr_processor.load_recovery_config', return_value=config):
+            process_gdpr_export(None, ctx)
+            export = next(Path(self.save_directory).rglob('GDPR_POST_post123*'))
+            export.write_text('kept', encoding='utf-8')
+
+            stats = process_gdpr_export(None, ctx)
+
+        self.assertEqual((stats.skipped, stats.processed), (1, 0))
+        self.assertEqual(export.read_text(encoding='utf-8'), 'kept')
 
     def test_archive_id_treats_missing_values_as_empty(self):
         # With pandas removed, empty CSV cells arrive as '' (not NaN); _archive_id

@@ -3,17 +3,17 @@
 import logging
 import re
 import time
-from typing import Optional, Tuple
 from urllib.parse import urlparse
 
-from ..arctic_shift import ArcticShiftClient
-from ..recovery_metadata import RecoveryMetadata, RecoveryQuality, RecoveryResult, RecoverySource
+from utils.content_recovery.arctic_shift import ArcticShiftClient
+from utils.content_recovery.recovery_metadata import RecoveryMetadata, RecoveryQuality, RecoveryResult, RecoverySource
+from utils.domain_matching import domain_matches
 
 
 class ArcticShiftProvider:
     """Recover Reddit post or comment text as metadata rather than media."""
 
-    def __init__(self, timeout: int = 10, client: Optional[ArcticShiftClient] = None):
+    def __init__(self, timeout: int = 10, client: ArcticShiftClient | None = None):
         self.timeout = timeout
         self.client = client or ArcticShiftClient(timeout=timeout)
         self._logger = logging.getLogger(f'{__name__}.{self.__class__.__name__}')
@@ -37,13 +37,14 @@ class ArcticShiftProvider:
             )
         except Exception as error:
             self._logger.warning(f'Arctic Shift recovery failed: {error}')
-            return RecoveryResult.failure_result(str(error), RecoverySource.ARCTIC_SHIFT)
+            return RecoveryResult.failure_from_exception(error, RecoverySource.ARCTIC_SHIFT, started_at)
 
         record = records.get(item_id)
         if not record:
             return RecoveryResult.failure_result(
                 'Content not found in Arctic Shift archive',
                 RecoverySource.ARCTIC_SHIFT,
+                confirmed_miss=True,
             )
 
         metadata = RecoveryMetadata(
@@ -62,17 +63,16 @@ class ArcticShiftProvider:
         return RecoveryResult.success_result(None, metadata)
 
     @staticmethod
-    def _parse_reddit_permalink(url: str) -> Optional[Tuple[str, str]]:
+    def _parse_reddit_permalink(url: str) -> tuple[str, str] | None:
         parsed = urlparse(url)
-        host = parsed.hostname.lower() if parsed.hostname else ''
         path_parts = [part for part in parsed.path.split('/') if part]
 
-        if host == 'redd.it' or host.endswith('.redd.it'):
+        if domain_matches(parsed.hostname, 'redd.it'):
             if path_parts and re.fullmatch(r'[a-z0-9]+', path_parts[0], re.IGNORECASE):
                 return 'post', path_parts[0]
             return None
 
-        if host != 'reddit.com' and not host.endswith('.reddit.com'):
+        if not domain_matches(parsed.hostname, 'reddit.com'):
             return None
 
         try:
@@ -91,11 +91,3 @@ class ArcticShiftProvider:
                 return 'comment', comment_id
 
         return 'post', post_id
-
-    def get_provider_info(self):
-        """Return provider metadata for diagnostics."""
-        return {
-            'name': 'Arctic Shift',
-            'source': RecoverySource.ARCTIC_SHIFT.value,
-            'type': 'metadata_only',
-        }

@@ -14,15 +14,20 @@ UNIT_MODULES = (
     'tests.test_arctic_shift',
     'tests.test_pullpush_metadata',
     'tests.test_recovery_negative_cache',
+    'tests.test_recovery_provider_failures',
     'tests.test_recovery_selection',
     'tests.test_retired_recovery_providers',
+    'tests.test_wayback_provider',
 )
 INTEGRATION_MODULES = ('tests.test_recovery_integration',)
 PROVIDER_MODULES = {
-    'wayback': ('tests.test_recovery_negative_cache', 'tests.test_recovery_selection'),
-    'pullpush': ('tests.test_pullpush_metadata',),
-    'reddit_preview': ('tests.test_retired_recovery_providers',),
-    'reveddit': ('tests.test_retired_recovery_providers',),
+    'wayback': (
+        'tests.test_recovery_negative_cache',
+        'tests.test_recovery_provider_failures',
+        'tests.test_recovery_selection',
+        'tests.test_wayback_provider',
+    ),
+    'pullpush': ('tests.test_pullpush_metadata', 'tests.test_recovery_provider_failures'),
 }
 
 
@@ -32,7 +37,6 @@ def main(argv=None):
     parser.add_argument('-v', '--verbose', action='store_true')
     parser.add_argument('--unit-only', action='store_true')
     parser.add_argument('--no-integration', action='store_true')
-    parser.add_argument('--no-performance', action='store_true')
     parser.add_argument('--provider', choices=PROVIDER_MODULES)
     args = parser.parse_args(argv)
 

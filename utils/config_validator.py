@@ -1,25 +1,30 @@
 """
 Configuration validator for Reddit Stash.
 
-This module provides comprehensive validation for all configuration settings
-with helpful error messages and suggestions for fixing issues.
+Validates the configuration settings before a run, with error messages and
+suggestions for fixing issues.
 """
 
 import os
 import configparser
-from typing import List, Optional, Dict, Any
-from .feature_flags import get_media_config, validate_media_config
+from typing import Any
+from utils import env_config
+from utils.content_recovery.recovery_config import load_recovery_config
+from utils.feature_flags import get_media_config, validate_media_config
+from utils.storage.base import StorageProvider
+from utils.storage.factory import load_storage_config
+from utils.storage.s3_provider import VALID_STORAGE_CLASSES
 
 
 class ConfigValidationError(Exception):
     """Custom exception for configuration validation errors."""
 
-    def __init__(self, message: str, suggestions: Optional[List[str]] = None):
+    def __init__(self, message: str, suggestions: list[str] | None = None):
         self.message = message
         self.suggestions = suggestions or []
         super().__init__(self.message)
 
-    def __str__(self):
+    def __str__(self) -> str:
         result = f"Configuration Error: {self.message}"
         if self.suggestions:
             result += "\n\nSuggestions:"
@@ -29,21 +34,16 @@ class ConfigValidationError(Exception):
 
 
 class ConfigValidator:
-    """Comprehensive configuration validator."""
+    """Validates settings.ini, warning about values that fall back to the environment."""
 
     def __init__(self):
-        self.config_parser = configparser.ConfigParser()
         self.errors = []
         self.warnings = []
-        self._load_config()
+        self.config_parser = self._load_config()
 
-    def _load_config(self):
+    def _load_config(self) -> configparser.ConfigParser:
         """Load configuration from settings.ini."""
-        # Dynamically determine the path to the root directory
-        BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        config_file_path = os.path.join(BASE_DIR, 'settings.ini')
-
-        if not os.path.exists(config_file_path):
+        if not os.path.exists(env_config.SETTINGS_PATH):
             raise ConfigValidationError(
                 "settings.ini file not found",
                 ["Create a settings.ini file in the root directory",
@@ -51,7 +51,7 @@ class ConfigValidator:
             )
 
         try:
-            self.config_parser.read(config_file_path)
+            return env_config.load_settings()
         except configparser.Error as e:
             raise ConfigValidationError(
                 f"Failed to parse settings.ini: {e}",
@@ -60,7 +60,7 @@ class ConfigValidator:
                  "Verify key=value format"]
             )
 
-    def validate_required_sections(self):
+    def validate_required_sections(self) -> None:
         """Validate that required configuration sections exist."""
         required_sections = ['Settings', 'Configuration']
         missing_sections = []
@@ -74,38 +74,33 @@ class ConfigValidator:
                 f"Missing required sections: {', '.join(missing_sections)}"
             )
 
-    def validate_settings_section(self):
+    def validate_settings_section(self) -> None:
         """Validate the [Settings] section."""
         if not self.config_parser.has_section('Settings'):
             return
 
-        # Validate save_directory
         save_dir = self.config_parser.get('Settings', 'save_directory', fallback='reddit/')
         if not save_dir or save_dir.isspace():
             self.errors.append("save_directory cannot be empty")
 
-        # Validate save_type
-        save_type = self.config_parser.get('Settings', 'save_type', fallback='ALL')
+        save_type = self.config_parser.get('Settings', 'save_type', fallback='ALL').upper()
         valid_save_types = ['ALL', 'SAVED', 'ACTIVITY', 'UPVOTED']
         if save_type not in valid_save_types:
             self.errors.append(
                 f"Invalid save_type '{save_type}'. Must be one of: {', '.join(valid_save_types)}"
             )
 
-        # Validate check_type
-        check_type = self.config_parser.get('Settings', 'check_type', fallback='LOG')
+        check_type = self.config_parser.get('Settings', 'check_type', fallback='LOG').upper()
         valid_check_types = ['LOG', 'DIR']
         if check_type not in valid_check_types:
             self.errors.append(
                 f"Invalid check_type '{check_type}'. Must be one of: {', '.join(valid_check_types)}"
             )
 
-        # Validate boolean settings
         boolean_settings = [
             'unsave_after_download',
             'process_gdpr',
             'process_api',
-            'ignore_tls_errors'
         ]
 
         for setting in boolean_settings:
@@ -116,92 +111,52 @@ class ConfigValidator:
                     f"Invalid boolean value for {setting}. Must be true or false"
                 )
 
-        # Security warning for TLS errors
-        if self.config_parser.getboolean('Settings', 'ignore_tls_errors', fallback=False):
-            self.warnings.append(
-                "ignore_tls_errors is enabled - this reduces security and should only be used for testing"
-            )
-
-    def validate_configuration_section(self):
-        """Validate the [Configuration] section."""
-        if not self.config_parser.has_section('Configuration'):
-            return
-
-        # Note: We don't validate Reddit credentials here since env_config.py handles that
-        # with proper environment variable fallbacks. Just check format.
-
-        config_keys = ['client_id', 'client_secret', 'username', 'password']
-        for key in config_keys:
-            value = self.config_parser.get('Configuration', key, fallback=None)
-            if value and value.isspace():
-                self.warnings.append(f"{key} contains only whitespace - will fallback to environment variable")
-
-    def validate_media_configuration(self):
+    def validate_media_configuration(self) -> None:
         """Validate media download configuration."""
         try:
             media_error = validate_media_config()
             if media_error:
                 self.errors.append(f"Media configuration error: {media_error}")
+            elif get_media_config().is_media_enabled():
+                self._validate_recovery_limits()
         except Exception as e:
             self.errors.append(f"Failed to validate media configuration: {e}")
 
-        # Check for media dependencies if media is enabled
-        media_config = get_media_config()
-        if media_config.is_media_enabled():
-            self._check_media_dependencies()
+    def _validate_recovery_limits(self) -> None:
+        recovery = load_recovery_config()
+        if recovery.timeout_seconds <= 0:
+            self.errors.append("Media configuration error: Recovery timeout_seconds must be greater than 0")
+        if recovery.cache_duration_hours <= 0:
+            self.errors.append("Media configuration error: Recovery cache_duration_hours must be greater than 0")
 
-    def _check_media_dependencies(self):
-        """Check if required dependencies are available for media features."""
-        optional_imports = {
-            'PIL': 'pillow',
-        }
-        missing_deps = []
-        for module, package in optional_imports.items():
-            try:
-                __import__(module)
-            except ImportError:
-                missing_deps.append(package)
+    def validate_storage_section(self) -> None:
+        """Validate the storage settings the run will use, whether from settings.ini or the environment."""
+        # The same reader the run uses, so env overrides count here too
+        try:
+            config = load_storage_config(self.config_parser)
+        except ValueError as e:
+            self.errors.append(str(e))
+            return
+        except configparser.InterpolationError as e:
+            # A provider=none run never uses these values, so this must not stop it
+            self.warnings.append(f"Storage settings could not be read: {e}")
+            return
+        provider = config.provider
 
-        if missing_deps:
-            self.warnings.append(
-                f"Media downloads enabled but missing optional dependencies: {', '.join(missing_deps)}. "
-                f"Install with: pip install {' '.join(missing_deps)}"
-            )
-
-    def validate_storage_section(self):
-        """Validate the [Storage] section."""
-        if not self.config_parser.has_section('Storage'):
-            return  # Section is optional
-
-        # Validate provider enum
-        provider = self.config_parser.get('Storage', 'provider', fallback='none').lower()
-        valid_providers = ['none', 'dropbox', 's3']
-        if provider not in valid_providers:
-            self.errors.append(
-                f"Invalid storage provider '{provider}'. Must be one of: {', '.join(valid_providers)}"
-            )
-
-        # S3-specific validation
-        if provider == 's3':
-            bucket = self.config_parser.get('Storage', 's3_bucket', fallback='None')
-            if not bucket or bucket == 'None':
+        if provider == StorageProvider.S3:
+            if not config.s3_bucket:
                 self.errors.append(
                     "S3 provider selected but s3_bucket is not set. "
                     "Set s3_bucket in [Storage] section or AWS_S3_BUCKET env var."
                 )
 
-            storage_class = self.config_parser.get('Storage', 's3_storage_class', fallback='STANDARD_IA').upper()
-            valid_classes = [
-                'STANDARD', 'STANDARD_IA', 'ONEZONE_IA', 'INTELLIGENT_TIERING',
-                'GLACIER_IR', 'GLACIER', 'DEEP_ARCHIVE',
-            ]
-            if storage_class not in valid_classes:
+            storage_class = config.s3_storage_class.upper()
+            if storage_class not in VALID_STORAGE_CLASSES:
                 self.errors.append(
                     f"Invalid s3_storage_class '{storage_class}'. "
-                    f"Must be one of: {', '.join(valid_classes)}"
+                    f"Must be one of: {', '.join(sorted(VALID_STORAGE_CLASSES))}"
                 )
 
-            # Check boto3 availability
             try:
                 __import__('boto3')
             except ImportError:
@@ -211,8 +166,7 @@ class ConfigValidator:
                 )
 
         # Dropbox provider needs credentials
-        if provider == 'dropbox':
-            import os
+        if provider == StorageProvider.DROPBOX:
             has_creds = all([
                 os.getenv('DROPBOX_REFRESH_TOKEN'),
                 os.getenv('DROPBOX_APP_KEY'),
@@ -224,14 +178,12 @@ class ConfigValidator:
                     "DROPBOX_APP_KEY, or DROPBOX_APP_SECRET env vars not set."
                 )
 
-    def validate_directory_permissions(self):
+    def validate_directory_permissions(self) -> None:
         """Validate that required directories are writable."""
         save_dir = self.config_parser.get('Settings', 'save_directory', fallback='reddit/')
 
-        # Expand user home directory if needed
         save_dir = os.path.expanduser(save_dir)
 
-        # Create parent directory path for testing
         parent_dir = os.path.dirname(os.path.abspath(save_dir)) if not os.path.isabs(save_dir) else os.path.dirname(save_dir)
 
         if parent_dir and not os.path.exists(parent_dir):
@@ -239,9 +191,9 @@ class ConfigValidator:
         elif parent_dir and not os.access(parent_dir, os.W_OK):
             self.errors.append(f"No write permission for save_directory parent: {parent_dir}")
 
-    def validate_all(self) -> Dict[str, Any]:
+    def validate_all(self) -> dict[str, Any]:
         """
-        Perform comprehensive validation of all configuration.
+        Validate all configuration.
 
         Returns:
             Dict with validation results including errors, warnings, and summary.
@@ -249,10 +201,8 @@ class ConfigValidator:
         self.errors = []
         self.warnings = []
 
-        # Run all validations
         self.validate_required_sections()
         self.validate_settings_section()
-        self.validate_configuration_section()
         self.validate_media_configuration()
         self.validate_storage_section()
         self.validate_directory_permissions()
@@ -265,36 +215,9 @@ class ConfigValidator:
             'warning_count': len(self.warnings)
         }
 
-    def get_configuration_summary(self) -> str:
-        """Get a human-readable summary of the current configuration."""
-        summary = []
 
-        # Basic settings
-        save_type = self.config_parser.get('Settings', 'save_type', fallback='ALL')
-        process_api = self.config_parser.getboolean('Settings', 'process_api', fallback=True)
-        process_gdpr = self.config_parser.getboolean('Settings', 'process_gdpr', fallback=False)
-
-        summary.append(f"Save Type: {save_type}")
-        summary.append(f"API Processing: {'Enabled' if process_api else 'Disabled'}")
-        summary.append(f"GDPR Processing: {'Enabled' if process_gdpr else 'Disabled'}")
-
-        # Media features summary (from feature_flags module)
-        from .feature_flags import get_feature_summary
-        summary.append(get_feature_summary())
-
-        return "\n".join(summary)
-
-
-def validate_configuration() -> Dict[str, Any]:
-    """
-    Convenience function to validate configuration.
-
-    Returns:
-        Dict with validation results.
-
-    Raises:
-        ConfigValidationError: If critical configuration errors are found.
-    """
+def validate_configuration() -> dict[str, Any]:
+    """Validate all configuration, raising ConfigValidationError on critical errors."""
     validator = ConfigValidator()
     result = validator.validate_all()
 
@@ -312,25 +235,3 @@ def validate_configuration() -> Dict[str, Any]:
         raise ConfigValidationError(error_msg, suggestions)
 
     return result
-
-def print_configuration_summary():
-    """Print a summary of the current configuration for debugging."""
-    try:
-        validator = ConfigValidator()
-        print("Configuration Summary:")
-        print("=" * 50)
-        print(validator.get_configuration_summary())
-
-        result = validator.validate_all()
-        if result['warnings']:
-            print("\nWarnings:")
-            for warning in result['warnings']:
-                print(f"  ⚠ {warning}")
-
-        if result['valid']:
-            print("\n✅ Configuration is valid")
-        else:
-            print(f"\n❌ Configuration has {result['error_count']} error(s)")
-
-    except Exception as e:
-        print(f"Failed to validate configuration: {e}")

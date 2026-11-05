@@ -1,9 +1,8 @@
 """
 URL security and validation module for Reddit Stash.
 
-This module provides comprehensive URL validation and security checks to prevent
-malicious URLs from being processed. Implements 2024 security best practices
-including domain blocklisting, URL sanitization, and input validation.
+Rejects URLs that are malformed, use a disallowed scheme or point at a blocked
+or private host, before anything is downloaded from them.
 """
 
 import ipaddress
@@ -12,9 +11,8 @@ import socket
 import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from urllib.parse import urlparse, urlunparse
-from typing import Set, Optional, Dict, Any
-from dataclasses import dataclass
-from .constants import MAX_URL_LENGTH, MIN_URL_LENGTH, URL_VALIDATION_TIMEOUT
+from dataclasses import dataclass, field
+from utils.constants import MAX_URL_LENGTH, MIN_URL_LENGTH, URL_VALIDATION_TIMEOUT
 
 
 logger = logging.getLogger(__name__)
@@ -36,22 +34,23 @@ def _resolve_hostname(hostname: str):
         raise OSError(f"DNS resolution timed out for '{hostname}'") from error
 
 
+_UNRESOLVED_RISK = "unresolved"  # High risk to callers, reported apart from a real rejection
+_RISK_RANK = {"low": 0, "medium": 1, _UNRESOLVED_RISK: 2, "high": 3}
+
+
 @dataclass
 class ValidationResult:
     """Result of URL validation with details about any security issues."""
     is_valid: bool
-    cleaned_url: Optional[str] = None
-    issues: list = None
-    risk_level: str = "low"  # low, medium, high
-
-    def __post_init__(self):
-        if self.issues is None:
-            self.issues = []
+    cleaned_url: str | None = None
+    issues: list[str] = field(default_factory=list)
+    risk_level: str = "low"  # low, medium, high. Only low is valid; the others say how bad a rejection is
+    dns_failed: bool = False  # The host did not resolve, which says nothing about its safety
 
 
 class URLSecurityValidator:
     """
-    Comprehensive URL security validator for preventing malicious URLs.
+    Checks whether a URL is safe to download from.
 
     Features:
     - Scheme validation (http/https only)
@@ -61,16 +60,8 @@ class URLSecurityValidator:
     - Input validation and normalization
     """
 
-    # Known malicious/suspicious domains (this would be expanded in production)
-    BLOCKED_DOMAINS = {
-        # Example blocked domains - in production this would be a larger list
-        'malware.com',
-        'phishing.example',
-        'suspicious.test',
-        'localhost',  # Block localhost for security
-        '127.0.0.1',  # Block loopback
-        '0.0.0.0',    # Block null route
-    }
+    # Rejected by name, before any lookup. IP literals are covered by the address checks.
+    BLOCKED_DOMAINS = {'localhost', 'malware.com'}
 
     # Suspicious URL patterns
     SUSPICIOUS_PATTERNS = [
@@ -82,22 +73,9 @@ class URLSecurityValidator:
         re.compile(r'%2e%2e%2f', re.IGNORECASE),  # URL-encoded traversal
     ]
 
-    def __init__(self, additional_blocked_domains: Optional[Set[str]] = None):
-        """
-        Initialize the URL security validator.
-
-        Args:
-            additional_blocked_domains: Additional domains to block beyond defaults
-        """
-        self.blocked_domains = self.BLOCKED_DOMAINS.copy()
-        if additional_blocked_domains:
-            self.blocked_domains.update(domain.lower() for domain in additional_blocked_domains)
-
-        logger.info(f"URL Security Validator initialized with {len(self.blocked_domains)} blocked domains")
-
     def validate_url(self, url: str) -> ValidationResult:
         """
-        Perform comprehensive validation of a URL.
+        Validate a URL.
 
         Args:
             url: URL to validate
@@ -115,7 +93,6 @@ class URLSecurityValidator:
         # Initial cleanup
         url = url.strip()
 
-        # Check URL length
         if len(url) > MAX_URL_LENGTH:
             return ValidationResult(
                 is_valid=False,
@@ -133,7 +110,6 @@ class URLSecurityValidator:
         issues = []
         risk_level = "low"
 
-        # Parse URL
         try:
             parsed = urlparse(url)
         except Exception as e:
@@ -143,7 +119,6 @@ class URLSecurityValidator:
                 risk_level="high"
             )
 
-        # Validate scheme
         if parsed.scheme.lower() not in ['http', 'https']:
             issues.append(f"Invalid scheme '{parsed.scheme}' - only http/https allowed")
             risk_level = "high"
@@ -152,37 +127,26 @@ class URLSecurityValidator:
             issues.append("Credentials in URLs are not allowed")
             risk_level = "high"
 
-        # Validate domain
         domain_issues, domain_risk = self._validate_domain(parsed.hostname)
-        issues.extend(domain_issues)
-        if domain_risk == "high":
-            risk_level = "high"
-        elif domain_risk == "medium" and risk_level == "low":
-            risk_level = "medium"
+        pattern_issues, pattern_risk = self._scan_suspicious_patterns(url)
+        issues.extend(domain_issues + pattern_issues)
 
-        # Check for suspicious patterns
-        pattern_issues, pattern_risk = self._check_suspicious_patterns(url)
-        issues.extend(pattern_issues)
-        if pattern_risk == "high":
-            risk_level = "high"
-        elif pattern_risk == "medium" and risk_level == "low":
-            risk_level = "medium"
+        # A failed lookup says nothing about safety, so it must not excuse a real rejection.
+        worst_risk = max(risk_level, domain_risk, pattern_risk, key=_RISK_RANK.__getitem__)
+        dns_failed = worst_risk == _UNRESOLVED_RISK
 
-        # Clean and normalize URL if no high-risk issues
-        cleaned_url = None
-        if risk_level != "high":
-            cleaned_url = self._clean_url(parsed)
-
-        is_valid = len(issues) == 0 or risk_level == "low"
+        is_valid = not issues
+        cleaned_url = self._clean_url(parsed) if is_valid else None
 
         return ValidationResult(
             is_valid=is_valid,
             cleaned_url=cleaned_url,
             issues=issues,
-            risk_level=risk_level
+            risk_level="high" if dns_failed else worst_risk,
+            dns_failed=dns_failed
         )
 
-    def _validate_domain(self, hostname: Optional[str]) -> tuple[list, str]:
+    def _validate_domain(self, hostname: str | None) -> tuple[list, str]:
         """
         Validate a hostname and every address it resolves to.
 
@@ -198,8 +162,7 @@ class URLSecurityValidator:
 
         hostname = hostname.lower()
 
-        # Check against blocked domains
-        if hostname in self.blocked_domains:
+        if hostname in self.BLOCKED_DOMAINS:
             issues.append(f"Domain '{hostname}' is blocked")
             return issues, "high"
 
@@ -225,11 +188,11 @@ class URLSecurityValidator:
             addresses = {result[4][0] for result in _resolve_hostname(hostname)}
         except OSError as error:
             issues.append(f"Could not resolve domain '{hostname}': {error}")
-            return issues, "high"
+            return issues, _UNRESOLVED_RISK
 
         if not addresses:
             issues.append(f"Could not resolve domain '{hostname}'")
-            return issues, "high"
+            return issues, _UNRESOLVED_RISK
 
         for resolved_address in addresses:
             if not ipaddress.ip_address(resolved_address).is_global:
@@ -242,16 +205,7 @@ class URLSecurityValidator:
         return issues, risk_level
 
     def _is_valid_domain_format(self, domain: str) -> bool:
-        """
-        Check if domain has a valid format.
-
-        Args:
-            domain: Domain to validate
-
-        Returns:
-            True if domain format is valid
-        """
-        # Basic domain validation - can be enhanced
+        """Check the hostname shape only; nothing is looked up."""
         domain_pattern = re.compile(
             r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
         )
@@ -267,17 +221,11 @@ class URLSecurityValidator:
             return ()
 
         try:
-            ipaddress.ip_address(hostname)
+            address = ipaddress.ip_address(hostname)
         except ValueError:
             if not self._is_valid_domain_format(hostname):
                 return ()
-
-        try:
-            address = ipaddress.ip_address(hostname)
-        except ValueError:
-            address = None
-
-        if address is not None:
+        else:
             return (str(address),) if address.is_global else ()
 
         try:
@@ -291,7 +239,7 @@ class URLSecurityValidator:
             return ()
         return tuple(sorted(addresses))
 
-    def _check_suspicious_patterns(self, url: str) -> tuple[list, str]:
+    def _scan_suspicious_patterns(self, url: str) -> tuple[list, str]:
         """
         Check URL for suspicious patterns.
 
@@ -309,139 +257,24 @@ class URLSecurityValidator:
         return issues, risk_level
 
     def _clean_url(self, parsed_url) -> str:
-        """
-        Clean and normalize a parsed URL.
-
-        Args:
-            parsed_url: Already parsed URL object
-
-        Returns:
-            Cleaned URL string
-        """
-        # Reconstruct URL with normalized components
-        cleaned = urlunparse((
+        """Lowercase the scheme and host and drop the fragment, which servers never receive."""
+        return urlunparse((
             parsed_url.scheme.lower(),
             parsed_url.netloc.lower(),
             parsed_url.path,
             parsed_url.params,
             parsed_url.query,
-            ''  # Remove fragment for security
+            '',
         ))
 
-        return cleaned
-
     def is_safe_for_download(self, url: str) -> bool:
-        """
-        Quick check if URL is safe for downloading.
-
-        Args:
-            url: URL to check
-
-        Returns:
-            True if URL is safe to download from
-        """
-        result = self.validate_url(url)
-        return result.is_valid and result.risk_level in ["low", "medium"]
-
-    def add_blocked_domain(self, domain: str) -> None:
-        """
-        Add a domain to the blocked domains list.
-
-        Args:
-            domain: Domain to block
-        """
-        self.blocked_domains.add(domain.lower())
-        logger.info(f"Added {domain} to blocked domains list")
-
-    def remove_blocked_domain(self, domain: str) -> bool:
-        """
-        Remove a domain from the blocked domains list.
-
-        Args:
-            domain: Domain to unblock
-
-        Returns:
-            True if domain was removed, False if it wasn't blocked
-        """
-        domain_lower = domain.lower()
-        if domain_lower in self.blocked_domains:
-            self.blocked_domains.remove(domain_lower)
-            logger.info(f"Removed {domain} from blocked domains list")
-            return True
-        return False
-
-    def get_security_report(self, url: str) -> Dict[str, Any]:
-        """
-        Generate a detailed security report for a URL.
-
-        Args:
-            url: URL to analyze
-
-        Returns:
-            Dictionary with detailed security analysis
-        """
-        result = self.validate_url(url)
-
-        report = {
-            "url": url,
-            "is_valid": result.is_valid,
-            "risk_level": result.risk_level,
-            "issues": result.issues,
-            "cleaned_url": result.cleaned_url,
-            "timestamp": __import__('time').time(),
-        }
-
-        if result.cleaned_url:
-            parsed = urlparse(result.cleaned_url)
-            report["analysis"] = {
-                "scheme": parsed.scheme,
-                "domain": parsed.netloc,
-                "path": parsed.path,
-                "has_query": bool(parsed.query),
-                "domain_blocked": parsed.netloc.lower() in self.blocked_domains,
-            }
-
-        return report
+        """Whether validate_url accepts the URL."""
+        return self.validate_url(url).is_valid
 
 
-# Global validator instance
-_global_validator = None
+_global_validator = URLSecurityValidator()
 
 
 def get_url_validator() -> URLSecurityValidator:
-    """
-    Get the global URL validator instance.
-
-    Returns:
-        Global URLSecurityValidator instance
-    """
-    global _global_validator
-    if _global_validator is None:
-        _global_validator = URLSecurityValidator()
+    """Get the shared URL validator, which holds no state of its own."""
     return _global_validator
-
-
-def validate_url(url: str) -> ValidationResult:
-    """
-    Convenience function to validate a URL using the global validator.
-
-    Args:
-        url: URL to validate
-
-    Returns:
-        ValidationResult
-    """
-    return get_url_validator().validate_url(url)
-
-
-def is_safe_url(url: str) -> bool:
-    """
-    Convenience function to check if URL is safe for downloading.
-
-    Args:
-        url: URL to check
-
-    Returns:
-        True if URL is safe
-    """
-    return get_url_validator().is_safe_for_download(url)

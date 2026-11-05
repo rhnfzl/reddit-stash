@@ -14,11 +14,16 @@ APIs Used:
 import time
 import requests
 import logging
-from typing import Optional, Dict, Any
+from typing import Any
 from urllib.parse import quote, urlparse
 
-from ..recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
-from ...rate_limiter import rate_limited
+from utils.content_recovery.providers.archive_session import archive_session
+from utils.content_recovery.recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality
+from utils.rate_limiter import RateLimitTimeout, parse_retry_after, rate_limit_manager, rate_limited
+
+
+WAYBACK_AVAILABILITY_API = 'https://archive.org/wayback/available'
+WAYBACK_BASE_URL = 'https://web.archive.org'
 
 
 class WaybackMachineProvider:
@@ -26,152 +31,120 @@ class WaybackMachineProvider:
 
     def __init__(self, timeout: int = 10):
         self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Reddit Stash Content Recovery/1.0 (Personal Archive Tool)',
-            'Accept': 'application/json'
-        })
+        self.session = archive_session()
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-        # Wayback Machine API endpoints (HTTPS to avoid redirect overhead)
-        self.availability_api = "https://archive.org/wayback/available"
-        self.cdx_api = "https://web.archive.org/cdx/search/cdx"
+    def attempt_recovery(self, url: str) -> RecoveryResult:
+        """Find the most recent Wayback Machine capture of a URL; every failure is a result."""
+        if not rate_limit_manager.acquire('wayback_machine', timeout=30):
+            return RecoveryResult.failure_result(
+                'wayback_machine recovery deferred by rate limiter',
+                RecoverySource.WAYBACK_MACHINE,
+            )
 
-    @rate_limited('wayback_machine', timeout=30)
-    def attempt_recovery(self, url: str, prefer_recent: bool = True) -> RecoveryResult:
-        """
-        Attempt to recover content from the Wayback Machine.
-
-        Args:
-            url: Original URL to recover
-            prefer_recent: Whether to prefer more recent snapshots
-
-        Returns:
-            RecoveryResult with status and recovered URL if successful
-        """
         start_time = time.time()
 
         try:
             self._logger.debug(f"Attempting Wayback Machine recovery for: {url}")
 
-            # First, try the simple Availability API
-            availability_result = self._check_availability(url)
-            if availability_result:
-                duration = time.time() - start_time
-                return self._create_success_result(url, availability_result, duration)
+            # Either API can answer alone, but a miss only counts when neither one failed.
+            lookup_error = None
+            for lookup in (self._lookup_availability, self._search_cdx):
+                try:
+                    archive_data = lookup(url)
+                except (requests.exceptions.RequestException, ValueError, RateLimitTimeout) as e:
+                    self._logger.debug(f"Wayback Machine lookup failed: {e}")
+                    # After a 429 the CDX token times out too; the 429 is the error worth reporting.
+                    lookup_error = lookup_error or e
+                    continue
+                if archive_data:
+                    return self._create_success_result(url, archive_data, time.time() - start_time)
 
-            # If availability API fails, try CDX Server API for more detailed search
-            cdx_result = self._search_cdx(url, prefer_recent)
-            if cdx_result:
-                duration = time.time() - start_time
-                return self._create_success_result(url, cdx_result, duration)
+            if lookup_error:
+                return RecoveryResult.failure_from_exception(
+                    lookup_error, RecoverySource.WAYBACK_MACHINE, start_time
+                )
 
-            # No archived version found
             duration = time.time() - start_time
             return RecoveryResult.failure_result(
                 f"No archived version found in Wayback Machine (search duration: {duration:.2f}s)",
-                RecoverySource.WAYBACK_MACHINE
+                RecoverySource.WAYBACK_MACHINE,
+                confirmed_miss=True,
             )
 
-        except requests.exceptions.Timeout:
-            duration = time.time() - start_time
-            return RecoveryResult.failure_result(
-                f"Wayback Machine request timed out after {duration:.2f}s",
-                RecoverySource.WAYBACK_MACHINE
-            )
-        except requests.exceptions.RequestException as e:
-            duration = time.time() - start_time
-            return RecoveryResult.failure_result(
-                f"Wayback Machine request failed: {str(e)} (duration: {duration:.2f}s)",
-                RecoverySource.WAYBACK_MACHINE
-            )
         except Exception as e:
-            duration = time.time() - start_time
             self._logger.error(f"Unexpected error in Wayback Machine recovery: {e}")
-            return RecoveryResult.failure_result(
-                f"Unexpected error: {str(e)} (duration: {duration:.2f}s)",
-                RecoverySource.WAYBACK_MACHINE
-            )
+            return RecoveryResult.failure_from_exception(e, RecoverySource.WAYBACK_MACHINE, start_time)
 
-    def _check_availability(self, url: str) -> Optional[Dict[str, Any]]:
-        """Check URL availability using the Wayback Machine Availability API."""
-        try:
-            encoded_url = quote(url, safe=':/?#[]@!$&\'()*+,;=')
-            availability_url = f"{self.availability_api}?url={encoded_url}"
+    def _lookup_availability(self, url: str) -> dict[str, Any] | None:
+        """Return the closest capture from the Availability API, or None when it has none."""
+        encoded_url = quote(url, safe=':/?#[]@!$&\'()*+,;=')
+        response = self.session.get(f"{WAYBACK_AVAILABILITY_API}?url={encoded_url}", timeout=self.timeout)
+        rate_limit_manager.report_response('wayback_machine', response.status_code, parse_retry_after(response))
+        response.raise_for_status()
 
-            response = self.session.get(availability_url, timeout=self.timeout)
-            response.raise_for_status()
+        payload = response.json()
+        snapshots = payload.get('archived_snapshots') if isinstance(payload, dict) else None
+        if not isinstance(snapshots, dict):
+            raise ValueError('unexpected Availability API response shape')
 
-            data = response.json()
-            archived_snapshots = data.get('archived_snapshots', {})
-            closest = archived_snapshots.get('closest', {})
+        closest = snapshots.get('closest', {})
+        if not closest.get('available'):
+            return None
 
-            if closest.get('available'):
-                self._logger.debug(f"Found archived version via Availability API: {closest.get('url')}")
-                return {
-                    'url': closest.get('url'),
-                    'timestamp': closest.get('timestamp'),
-                    'status': closest.get('status'),
-                    'api_source': 'availability'
-                }
+        self._logger.debug(f"Found archived version via Availability API: {closest.get('url')}")
+        return {
+            'url': closest.get('url'),
+            'timestamp': closest.get('timestamp'),
+            'status': closest.get('status'),
+            'api_source': 'availability'
+        }
 
-        except (requests.exceptions.RequestException, ValueError) as e:
-            self._logger.debug(f"Availability API failed: {e}")
+    # attempt_recovery's token covers the Availability request; this one is a second request.
+    @rate_limited('wayback_machine', timeout=30)
+    def _search_cdx(self, url: str) -> dict[str, Any] | None:
+        """Return the most recent successful capture from the CDX API, or None when it has none."""
+        if not urlparse(url).netloc:
+            return None
 
-        return None
+        params = {
+            'url': url,
+            'matchType': 'exact',
+            'output': 'json',
+            'limit': 10,
+            'filter': 'statuscode:200',
+            'sort': 'timestamp',
+            'reverse': 'true',
+        }
+        response = self.session.get(f"{WAYBACK_BASE_URL}/cdx/search/cdx", params=params, timeout=self.timeout)
+        rate_limit_manager.report_response('wayback_machine', response.status_code, parse_retry_after(response))
+        response.raise_for_status()
 
-    def _search_cdx(self, url: str, prefer_recent: bool = True) -> Optional[Dict[str, Any]]:
-        """Search for URL using the CDX Server API for more detailed results."""
-        try:
-            # Parse URL to search for domain and path patterns
-            parsed = urlparse(url)
-            if not parsed.netloc:
-                return None
+        data = response.json()
+        if not isinstance(data, list):
+            raise ValueError('unexpected CDX API response shape')
 
-            # CDX API parameters
-            params = {
-                'url': url,
-                'matchType': 'exact',
-                'output': 'json',
-                'limit': 10,  # Get up to 10 results
-                'filter': 'statuscode:200'  # Only successful captures
-            }
+        # CDX format: [urlkey, timestamp, original, mimetype, statuscode, digest, length]
+        # The first row is headers.
+        if len(data) < 2:
+            return None
 
-            if prefer_recent:
-                params['sort'] = 'timestamp'
-                params['reverse'] = 'true'  # Most recent first
+        capture = data[1]
+        if not isinstance(capture, list) or len(capture) < 3:
+            raise ValueError('unexpected CDX API capture row')
 
-            response = self.session.get(self.cdx_api, params=params, timeout=self.timeout)
-            response.raise_for_status()
+        timestamp = capture[1]
+        wayback_url = f"{WAYBACK_BASE_URL}/web/{timestamp}/{capture[2]}"
+        self._logger.debug(f"Found archived version via CDX API: {wayback_url}")
+        return {
+            'url': wayback_url,
+            'timestamp': timestamp,
+            'status': capture[4] if len(capture) > 4 else 'unknown',
+            'mimetype': capture[3] if len(capture) > 3 else 'unknown',
+            'api_source': 'cdx'
+        }
 
-            data = response.json()
-
-            # CDX format: [urlkey, timestamp, original, mimetype, statuscode, digest, length]
-            if len(data) > 1:  # First row is headers
-                # Take the first result (most recent if sorted)
-                capture = data[1]
-                if len(capture) >= 3:
-                    timestamp = capture[1]
-                    original_url = capture[2]
-
-                    # Construct wayback URL
-                    wayback_url = f"https://web.archive.org/web/{timestamp}/{original_url}"
-
-                    self._logger.debug(f"Found archived version via CDX API: {wayback_url}")
-                    return {
-                        'url': wayback_url,
-                        'timestamp': timestamp,
-                        'status': capture[4] if len(capture) > 4 else 'unknown',
-                        'mimetype': capture[3] if len(capture) > 3 else 'unknown',
-                        'api_source': 'cdx'
-                    }
-
-        except (requests.exceptions.RequestException, ValueError, IndexError) as e:
-            self._logger.debug(f"CDX API search failed: {e}")
-
-        return None
-
-    def _create_success_result(self, original_url: str, archive_data: Dict[str, Any],
+    def _create_success_result(self, original_url: str, archive_data: dict[str, Any],
                              duration: float) -> RecoveryResult:
         """Create a successful recovery result with metadata."""
 
@@ -194,7 +167,7 @@ class WaybackMachineProvider:
 
         return RecoveryResult.success_result(archive_data['url'], metadata)
 
-    def _assess_content_quality(self, archive_data: Dict[str, Any]) -> RecoveryQuality:
+    def _assess_content_quality(self, archive_data: dict[str, Any]) -> RecoveryQuality:
         """Assess the quality of archived content based on metadata."""
         timestamp = archive_data.get('timestamp', '')
         status = archive_data.get('status')
@@ -211,24 +184,10 @@ class WaybackMachineProvider:
                     return RecoveryQuality.HIGH_QUALITY
                 elif status == '200' and age_years <= 3:
                     return RecoveryQuality.MEDIUM_QUALITY
-                elif status == '200':
-                    return RecoveryQuality.LOW_QUALITY
                 else:
                     return RecoveryQuality.LOW_QUALITY
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e:
+            self._logger.debug(f"Could not parse Wayback timestamp {timestamp!r}: {e}")
 
         # Default quality for archived content
         return RecoveryQuality.MEDIUM_QUALITY
-
-    def get_provider_info(self) -> Dict[str, Any]:
-        """Get information about this recovery provider."""
-        return {
-            'name': 'Wayback Machine',
-            'source': RecoverySource.WAYBACK_MACHINE,
-            'description': 'Internet Archive Wayback Machine - free web archive',
-            'rate_limits': 'No hard limits, requests to be gentle and respectful',
-            'ethics': 'Fully ethical - public archive service designed for this purpose',
-            'reliability': 'Very high - operated by Internet Archive since 1996',
-            'coverage': 'Broad web coverage with billions of archived pages'
-        }

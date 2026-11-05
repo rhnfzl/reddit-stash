@@ -9,134 +9,102 @@ import json
 import time
 import logging
 from dataclasses import replace
-from typing import Optional, Dict, Any, FrozenSet
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 
-from .recovery_metadata import (
-    RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality, RecoveryAttempt
-)
-from .cache_manager import RecoveryCacheManager
-from .providers import (
-    WaybackMachineProvider,
-    ArcticShiftProvider,
-    PullPushProvider,
-)
-from ..feature_flags import get_media_config
-from ..rate_limiter import rate_limit_manager
+from utils.content_recovery.recovery_metadata import RecoveryResult, RecoveryMetadata, RecoverySource, RecoveryQuality, RecoveryAttempt, RecoveryCacheEntry
+from utils.content_recovery.cache_manager import RecoveryCacheManager
+from utils.content_recovery.recovery_config import RecoveryConfig, load_recovery_config
+from utils.content_recovery.providers import WaybackMachineProvider, ArcticShiftProvider, PullPushProvider
+from utils.rate_limiter import rate_limit_manager
 
 
-PARALLEL_RECOVERY_TIMEOUT_SECONDS = 30
 NEGATIVE_CACHE_TTL_HOURS = 1
+QUALITY_PRIORITIES = {
+    RecoveryQuality.ORIGINAL: 5,
+    RecoveryQuality.HIGH_QUALITY: 4,
+    RecoveryQuality.MEDIUM_QUALITY: 3,
+    RecoveryQuality.LOW_QUALITY: 2,
+    RecoveryQuality.METADATA_ONLY: 0,
+}
+PROVIDER_PRIORITIES = {
+    RecoverySource.WAYBACK_MACHINE: 5,
+    RecoverySource.ARCTIC_SHIFT: 4,
+    RecoverySource.PULLPUSH_IO: 3,
+}
 
 
 class ContentRecoveryService:
     """
     Central service for coordinating content recovery across multiple providers.
 
-    Implements a sophisticated recovery cascade that tries multiple archival
-    sources in order of reliability and success rate.
+    Asks every enabled archive at once and returns the best answer.
     """
 
-    def __init__(self, config=None, cache_path: Optional[str] = None):
-        self.config = config or get_media_config()
+    def __init__(self, config: RecoveryConfig | None = None, cache_path: str | None = None):
+        self.config = config or load_recovery_config()
         self.cache_manager = RecoveryCacheManager(cache_path)
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-        # Initialize providers
         self._init_providers()
-
-        # Recovery statistics
-        self._stats = {
-            'total_attempts': 0,
-            'cache_hits': 0,
-            'successful_recoveries': 0,
-            'failed_recoveries': 0,
-            'provider_stats': {}
-        }
 
     def _init_providers(self):
         """Initialize recovery providers based on configuration."""
         self.providers = {}
 
-        # Get recovery configuration
-        recovery_config = self.config.get_recovery_config()
-        timeout = recovery_config.get('timeout_seconds', 10)
-        self._parallel_timeout_seconds = timeout
+        timeout = self.config.timeout_seconds
+        self._deadline_seconds = timeout
 
-        # Initialize providers based on configuration
-        if recovery_config.get('use_wayback_machine', True):
+        if self.config.use_wayback_machine:
             self.providers[RecoverySource.WAYBACK_MACHINE] = WaybackMachineProvider(timeout)
             self._logger.debug("Initialized Wayback Machine provider")
 
-        if recovery_config.get('use_arctic_shift', True):
+        if self.config.use_arctic_shift:
             self.providers[RecoverySource.ARCTIC_SHIFT] = ArcticShiftProvider(timeout)
             self._logger.debug("Initialized Arctic Shift provider")
 
-        if recovery_config.get('use_pushshift_api', True):
+        if self.config.use_pullpush:
             self.providers[RecoverySource.PULLPUSH_IO] = PullPushProvider(timeout)
             self._logger.debug("Initialized PullPush.io provider")
-
-        if recovery_config.get('use_reddit_previews', False):
-            self._logger.warning(
-                "Reddit preview recovery is disabled because no authoritative preview discovery is available"
-            )
-
-        if recovery_config.get('use_reveddit_api', False):
-            self._logger.warning(
-                "Reveddit recovery is disabled because public pages no longer expose archive content"
-            )
 
         if not self.providers:
             self._logger.warning("No recovery providers enabled")
 
-    def attempt_recovery(self, url: str, original_failure_reason: Optional[str] = None,
-                        async_mode: bool = True) -> RecoveryResult:
+    def attempt_recovery(self, url: str, original_failure_reason: str | None = None) -> RecoveryResult:
         """
         Attempt to recover content from the given URL using available providers.
 
         Args:
             url: Original URL that failed to download
             original_failure_reason: Reason why the original download failed
-            async_mode: Whether to try providers in parallel (faster) or sequence
 
         Returns:
             RecoveryResult with the best recovery found, or failure if none found
         """
         start_time = time.time()
-        self._stats['total_attempts'] += 1
 
         try:
-            self._logger.info(f"Starting content recovery for: {url}")
+            self._logger.debug(f"Starting content recovery for: {url}")
 
-            # Check cache first
-            cached_result = self._check_cache(url)
+            cached_result = self._lookup_cached_result(url)
             if cached_result:
-                self._stats['cache_hits'] += 1
                 self._logger.debug(f"Cache hit for recovery of: {url}")
                 return cached_result
 
-            # Clean up expired cache entries periodically
-            if self._stats['total_attempts'] % 100 == 0:
-                self.cache_manager.cleanup_expired_cache()
+            self.cache_manager.cleanup_if_due()
 
-            # Try recovery providers
-            if async_mode and len(self.providers) > 1:
-                recovery_result = self._attempt_parallel_recovery(url, original_failure_reason)
-            else:
-                recovery_result = self._attempt_sequential_recovery(url, original_failure_reason)
+            recovery_result = self._run_providers(url, original_failure_reason)
 
             # Cache the result
-            if recovery_result and recovery_result.success:
+            if recovery_result.success:
                 self._cache_successful_result(url, recovery_result)
-                self._stats['successful_recoveries'] += 1
             else:
                 self._cache_negative_results(url, recovery_result.negative_cache_sources)
-                self._stats['failed_recoveries'] += 1
 
             duration = time.time() - start_time
             self._logger.info(
                 f"Recovery attempt completed in {duration:.2f}s: "
-                f"{'SUCCESS' if recovery_result and recovery_result.success else 'FAILED'}"
+                f"{'SUCCESS' if recovery_result.success else 'FAILED'}"
             )
 
             return recovery_result
@@ -144,68 +112,27 @@ class ContentRecoveryService:
         except Exception as e:
             duration = time.time() - start_time
             self._logger.error(f"Unexpected error in content recovery: {e}")
-            self._stats['failed_recoveries'] += 1
 
             return RecoveryResult.failure_result(
                 f"Recovery system error: {str(e)} (duration: {duration:.2f}s)"
             )
 
-    def _check_cache(self, url: str) -> Optional[RecoveryResult]:
+    def _lookup_cached_result(self, url: str) -> RecoveryResult | None:
         """Check if we have a cached recovery result for this URL."""
         try:
             successful_results = []
             negative_sources = set()
-            quality_priorities = {
-                RecoveryQuality.ORIGINAL: 5,
-                RecoveryQuality.HIGH_QUALITY: 4,
-                RecoveryQuality.MEDIUM_QUALITY: 3,
-                RecoveryQuality.LOW_QUALITY: 2,
-                RecoveryQuality.THUMBNAIL: 1,
-                RecoveryQuality.METADATA_ONLY: 0,
-            }
-            provider_priorities = {
-                RecoverySource.WAYBACK_MACHINE: 5,
-                RecoverySource.ARCTIC_SHIFT: 4,
-                RecoverySource.PULLPUSH_IO: 3,
-                RecoverySource.REDDIT_PREVIEWS: 2,
-                RecoverySource.REVEDDIT: 1,
-            }
-
-            for source in self.providers.keys():
+            for source in self.providers:
                 cached_entry = self.cache_manager.get_cached_result(url, source)
-                if cached_entry and not cached_entry.is_expired:
-                    additional_metadata = None
-                    if cached_entry.metadata_json:
-                        try:
-                            additional_metadata = json.loads(cached_entry.metadata_json)
-                        except (TypeError, json.JSONDecodeError):
-                            self._logger.debug("Cached recovery metadata could not be decoded")
-
-                    metadata = RecoveryMetadata(
-                        source=RecoverySource(cached_entry.recovery_source),
-                        recovered_url=cached_entry.recovered_url,
-                        recovery_timestamp=cached_entry.cached_at,
-                        content_quality=RecoveryQuality(cached_entry.content_quality),
-                        cache_hit=True,
-                        additional_metadata=additional_metadata,
-                    )
-
-                    if cached_entry.success:
-                        successful_results.append(RecoveryResult.success_result(
-                            cached_entry.recovered_url,
-                            metadata,
-                        ))
-                    else:
-                        negative_sources.add(source)
+                if not cached_entry:
+                    continue
+                if cached_entry.success:
+                    successful_results.append(self._cached_success(cached_entry))
+                else:
+                    negative_sources.add(source)
 
             if successful_results:
-                return max(
-                    successful_results,
-                    key=lambda result: (
-                        quality_priorities.get(result.metadata.content_quality, 0),
-                        provider_priorities.get(result.metadata.source, 0),
-                    ),
-                )
+                return self._best_result(successful_results)
 
             if set(self.providers).issubset(negative_sources):
                 return RecoveryResult.failure_result("Cached negative result")
@@ -215,181 +142,122 @@ class ContentRecoveryService:
 
         return None
 
-    def _attempt_sequential_recovery(self, url: str, failure_reason: Optional[str]) -> RecoveryResult:
-        """Try recovery providers sequentially in order of reliability."""
-
-        # Define provider order (most reliable first)
-        provider_order = [
-            RecoverySource.WAYBACK_MACHINE,    # Most reliable, no rate limits
-            RecoverySource.ARCTIC_SHIFT,        # Current Reddit text archive
-            RecoverySource.PULLPUSH_IO,        # Good for Reddit content
-            RecoverySource.REDDIT_PREVIEWS,    # Lower quality but sometimes works
-            RecoverySource.REVEDDIT            # Specific to moderator deletions
-        ]
-
-        completed_sources = set()
-        negative_cache_sources = set()
-
-        for source in provider_order:
-            if source not in self.providers:
-                continue
-
-            provider = self.providers[source]
-            self._logger.debug(f"Trying recovery provider: {source.value}")
-
-            if source == RecoverySource.PULLPUSH_IO and not rate_limit_manager.can_proceed(source.value):
-                deferred_result = RecoveryResult.failure_result(
-                    "PullPush.io recovery deferred by rate limiter",
-                    source,
-                )
-                self._record_attempt(url, source, deferred_result, failure_reason)
-                continue
-
+    def _cached_success(self, entry: RecoveryCacheEntry) -> RecoveryResult:
+        """Rebuild the result a provider returned when this entry was cached."""
+        additional_metadata = None
+        if entry.metadata_json:
             try:
-                result = provider.attempt_recovery(url)
-                completed_sources.add(source)
+                additional_metadata = json.loads(entry.metadata_json)
+            except (TypeError, json.JSONDecodeError):
+                self._logger.debug("Cached recovery metadata could not be decoded")
 
-                # Record the attempt
-                self._record_attempt(url, source, result, failure_reason)
+        return RecoveryResult.success_result(entry.recovered_url, RecoveryMetadata(
+            source=entry.recovery_source,
+            recovered_url=entry.recovered_url,
+            recovery_timestamp=entry.cached_at,
+            content_quality=entry.content_quality,
+            cache_hit=True,
+            additional_metadata=additional_metadata,
+        ))
 
-                if result.success:
-                    self._logger.info(f"Recovery successful via {source.value}: {result.recovered_url}")
-                    return replace(
-                        result,
-                        attempted_sources=result.attempted_sources | frozenset(completed_sources),
-                    )
-                else:
-                    self._logger.debug(f"Recovery failed via {source.value}: {result.error_message}")
-                    if self._is_authoritative_not_found(result):
-                        negative_cache_sources.add(source)
+    @staticmethod
+    def _deferred_by_rate_limiter(source: RecoverySource) -> bool:
+        """Skip a provider rather than park a worker in acquire() until its timeout."""
+        if source == RecoverySource.PULLPUSH_IO:
+            return not rate_limit_manager.can_proceed(source.value)
+        # Wayback only skips during a 429 backoff; a short token wait still runs as before.
+        return source == RecoverySource.WAYBACK_MACHINE and rate_limit_manager.in_backoff(source.value)
 
-            except Exception as e:
-                completed_sources.add(source)
-                self._logger.error(f"Provider {source.value} threw exception: {e}")
-                # Continue to next provider
-
-        # All providers failed
-        return RecoveryResult.failure_result(
-            "All recovery providers failed",
-            attempted_sources=frozenset(completed_sources),
-            negative_cache_sources=frozenset(negative_cache_sources),
+    @staticmethod
+    def _best_result(results: Iterable[RecoveryResult]) -> RecoveryResult:
+        """Pick the highest-quality result, breaking ties by provider reliability."""
+        return max(
+            results,
+            key=lambda result: (
+                QUALITY_PRIORITIES.get(
+                    result.metadata.content_quality if result.metadata else RecoveryQuality.METADATA_ONLY,
+                    0,
+                ),
+                PROVIDER_PRIORITIES.get(result.source, 0),
+            ),
         )
 
-    def _attempt_parallel_recovery(self, url: str, failure_reason: Optional[str]) -> RecoveryResult:
-        """Collect parallel recovery results and select the highest-quality result."""
+    def _skip_deferred(self, url: str, source: RecoverySource, failure_reason: str | None) -> bool:
+        """Record and skip a provider that the rate limiter is holding back."""
+        if not self._deferred_by_rate_limiter(source):
+            return False
+        deferred_result = RecoveryResult.failure_result(
+            f"{source.value} recovery deferred by rate limiter",
+            source,
+        )
+        self._record_attempt(url, source, deferred_result, failure_reason)
+        return True
 
-        provider_priorities = {
-            RecoverySource.WAYBACK_MACHINE: 5,
-            RecoverySource.ARCTIC_SHIFT: 4,
-            RecoverySource.PULLPUSH_IO: 3,
-            RecoverySource.REDDIT_PREVIEWS: 2,
-            RecoverySource.REVEDDIT: 1,
-        }
-        quality_priorities = {
-            RecoveryQuality.ORIGINAL: 5,
-            RecoveryQuality.HIGH_QUALITY: 4,
-            RecoveryQuality.MEDIUM_QUALITY: 3,
-            RecoveryQuality.LOW_QUALITY: 2,
-            RecoveryQuality.THUMBNAIL: 1,
-            RecoveryQuality.METADATA_ONLY: 0,
-        }
+    def _note_result(self, url: str, source: RecoverySource, result: RecoveryResult,
+                     failure_reason: str | None, negative_cache_sources: set[RecoverySource]) -> None:
+        """Record a provider's answer and note whether it confirmed an archive miss."""
+        self._record_attempt(url, source, result, failure_reason)
+        if result.success:
+            self._logger.debug(f"Recovery successful via {source.value}: {result.recovered_url}")
+            return
+        self._logger.debug(f"Recovery failed via {source.value}: {result.error_message}")
+        if result.confirmed_miss:
+            negative_cache_sources.add(source)
 
-        # Submit all provider attempts to thread pool.
-        executor = ThreadPoolExecutor(max_workers=min(4, len(self.providers)))
+    def _run_providers(self, url: str, failure_reason: str | None) -> RecoveryResult:
+        """Ask every enabled provider at once and keep the highest-quality answer."""
+
+        executor = ThreadPoolExecutor(max_workers=len(self.providers))
         completed_sources = set()
         negative_cache_sources = set()
+        successful_results = []
         try:
             future_to_source = {}
-
             for source, provider in self.providers.items():
-                if source == RecoverySource.PULLPUSH_IO and not rate_limit_manager.can_proceed(source.value):
-                    deferred_result = RecoveryResult.failure_result(
-                        "PullPush.io recovery deferred by rate limiter",
-                        source,
-                    )
-                    self._record_attempt(url, source, deferred_result, failure_reason)
-                    continue
-                future = executor.submit(provider.attempt_recovery, url)
-                future_to_source[future] = source
+                if not self._skip_deferred(url, source, failure_reason):
+                    future_to_source[executor.submit(provider.attempt_recovery, url)] = source
 
-            successful_results = []
             try:
                 # Process every completed result before choosing the best quality.
-                for future in as_completed(
-                    future_to_source,
-                    timeout=getattr(
-                        self,
-                        '_parallel_timeout_seconds',
-                        PARALLEL_RECOVERY_TIMEOUT_SECONDS,
-                    ),
-                ):
+                for future in as_completed(future_to_source, timeout=self._deadline_seconds):
                     source = future_to_source[future]
-
+                    completed_sources.add(source)
                     try:
                         result = future.result()
-                        completed_sources.add(source)
-                        self._record_attempt(url, source, result, failure_reason)
-
-                        if result.success:
-                            self._logger.info(
-                                f"Recovery successful via {source.value}: {result.recovered_url}"
-                            )
-                            successful_results.append((source, result))
-                        else:
-                            self._logger.debug(
-                                f"Recovery failed via {source.value}: {result.error_message}"
-                            )
-                            if self._is_authoritative_not_found(result):
-                                negative_cache_sources.add(source)
-
                     except Exception as e:
-                        completed_sources.add(source)
                         self._logger.error(f"Provider {source.value} threw exception: {e}")
+                        result = RecoveryResult.failure_result(f"{source.value} raised: {e}", source)
+
+                    self._note_result(url, source, result, failure_reason, negative_cache_sources)
+                    if result.success:
+                        successful_results.append(result)
             except FuturesTimeoutError:
-                for future in future_to_source:
-                    future.cancel()
-                self._logger.warning("Parallel recovery timed out before all providers returned")
+                self._logger.warning("Recovery timed out before all providers returned")
         finally:
             # Provider requests have their own I/O timeouts. Do not make the caller wait
             # for an already-running provider after the overall recovery deadline expires.
             executor.shutdown(wait=False, cancel_futures=True)
 
         if successful_results:
-            _, best_result = max(
-                successful_results,
-                key=lambda item: (
-                    quality_priorities.get(
-                        item[1].metadata.content_quality if item[1].metadata else RecoveryQuality.METADATA_ONLY,
-                        0,
-                    ),
-                    provider_priorities.get(item[0], 0),
-                ),
-            )
+            best_result = self._best_result(successful_results)
             return replace(
                 best_result,
                 attempted_sources=best_result.attempted_sources | frozenset(completed_sources),
             )
 
-        # All providers failed
         return RecoveryResult.failure_result(
             "All recovery providers failed",
             attempted_sources=frozenset(completed_sources),
             negative_cache_sources=frozenset(negative_cache_sources),
         )
 
-    @staticmethod
-    def _is_authoritative_not_found(result: RecoveryResult) -> bool:
-        """Return whether a provider confirmed that its archive lacks the item."""
-        message = (result.error_message or '').lower()
-        return 'not found' in message or 'no archived version found' in message
-
     def _record_attempt(self, url: str, source: RecoverySource, result: RecoveryResult,
-                       failure_reason: Optional[str]):
+                       failure_reason: str | None):
         """Record recovery attempt for analytics."""
         try:
             attempt = RecoveryAttempt(
                 original_url=url,
-                recovery_source=source.value,
+                recovery_source=source,
                 success=result.success,
                 recovered_url=result.recovered_url,
                 error_message=result.error_message or failure_reason,
@@ -398,14 +266,6 @@ class ContentRecoveryService:
 
             self.cache_manager.record_attempt(attempt)
 
-            # Update provider statistics
-            if source.value not in self._stats['provider_stats']:
-                self._stats['provider_stats'][source.value] = {'attempts': 0, 'successes': 0}
-
-            self._stats['provider_stats'][source.value]['attempts'] += 1
-            if result.success:
-                self._stats['provider_stats'][source.value]['successes'] += 1
-
         except Exception as e:
             self._logger.debug(f"Failed to record recovery attempt: {e}")
 
@@ -413,15 +273,12 @@ class ContentRecoveryService:
         """Cache a successful recovery result."""
         try:
             if result.metadata:
-                recovery_config = self.config.get_recovery_config()
-                cache_hours = recovery_config.get('cache_duration_hours', 24)
-
                 self.cache_manager.cache_result(
                     url=url,
                     source=result.metadata.source,
                     recovered_url=result.recovered_url,
                     quality=result.metadata.content_quality,
-                    ttl_hours=cache_hours,
+                    ttl_hours=self.config.cache_duration_hours,
                     metadata=result.metadata.additional_metadata
                 )
 
@@ -431,11 +288,11 @@ class ContentRecoveryService:
     def _cache_negative_results(
         self,
         url: str,
-        completed_sources: FrozenSet[RecoverySource],
+        negative_sources: frozenset[RecoverySource],
     ):
         """Cache only provider outcomes that confirmed an archive miss."""
         try:
-            for source in completed_sources:
+            for source in negative_sources:
                 self.cache_manager.cache_result(
                     url=url,
                     source=source,
@@ -447,61 +304,6 @@ class ContentRecoveryService:
         except Exception as e:
             self._logger.debug(f"Failed to cache negative recovery result: {e}")
 
-    def get_provider_info(self) -> Dict[str, Dict[str, Any]]:
-        """Get information about all available providers."""
-        info = {}
-        for source, provider in self.providers.items():
-            try:
-                info[source.value] = provider.get_provider_info()
-            except Exception as e:
-                self._logger.debug(f"Failed to get info for provider {source.value}: {e}")
-                info[source.value] = {'error': str(e)}
-
-        return info
-
-    def get_recovery_statistics(self, days: int = 30) -> Dict[str, Any]:
-        """Get recovery statistics for the specified period."""
-        try:
-            # Get database statistics
-            db_stats = self.cache_manager.get_recovery_statistics(days)
-
-            # Combine with current session statistics
-            stats = {
-                'session_stats': self._stats.copy(),
-                'database_stats': db_stats,
-                'cache_size': self.cache_manager.get_cache_size(),
-                'enabled_providers': list(self.providers.keys()),
-                'period_days': days
-            }
-
-            return stats
-
-        except Exception as e:
-            self._logger.error(f"Failed to get recovery statistics: {e}")
-            return {'error': str(e)}
-
     def is_enabled(self) -> bool:
         """Check if content recovery is enabled."""
         return len(self.providers) > 0
-
-    def test_providers(self) -> Dict[str, bool]:
-        """Test all providers with a known URL to check connectivity."""
-        test_url = "https://httpbin.org/status/404"  # URL that should be in archives
-        results = {}
-
-        for source, provider in self.providers.items():
-            try:
-                # Quick test with short timeout
-                old_timeout = getattr(provider, 'timeout', 10)
-                provider.timeout = 5  # Quick test
-
-                provider.attempt_recovery(test_url)
-                results[source.value] = True  # Provider responded (success/failure doesn't matter)
-
-                provider.timeout = old_timeout  # Restore original timeout
-
-            except Exception as e:
-                self._logger.debug(f"Provider {source.value} test failed: {e}")
-                results[source.value] = False
-
-        return results

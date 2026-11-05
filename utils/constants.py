@@ -1,34 +1,26 @@
 """
 Centralized constants for Reddit Stash configuration.
 
-This module defines all configurable constants used throughout the application,
-replacing magic numbers to improve maintainability and allow easier tuning.
-Addresses PR feedback regarding hardcoded values.
+Numeric limits, timeouts and sizes shared across the application.
 """
 
 # Download Configuration
+BYTES_PER_MB = 1024 * 1024
+
+LOG_FILE_NAME = "file_log.json"  # the dedup log, in the save directory and at the storage root
 DOWNLOAD_CHUNK_SIZE = 65536  # 64KB chunks for streaming downloads
 DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_CONNECT_TIMEOUT = 5.0
 FFMPEG_TIMEOUT_SECONDS = 300  # 5 minutes for video merging
+FFMPEG_PROBE_TIMEOUT_SECONDS = 10  # `ffmpeg -version` availability check
 DEFAULT_MAX_FILE_SIZE = 52428800  # 50MB default limit
 
 # Disk Space Management
 DISK_SPACE_SAFETY_FACTOR = 1.2  # 20% extra space required beyond file size
 MIN_FREE_SPACE_MB = 100  # Minimum free space to maintain (in MB)
 
-# Rate Limiting Configuration
-IMGUR_REQUESTS_PER_MINUTE = 4  # Conservative rate for IP limits
-REDDIT_REQUESTS_PER_MINUTE = 100  # Aligned with API limits
-GENERIC_REQUESTS_PER_MINUTE = 30  # Conservative for unknown sites
-
-# Content Recovery Rate Limits
-WAYBACK_REQUESTS_PER_MINUTE = 60
-PULLPUSH_REQUESTS_PER_MINUTE = 12  # Under 15 soft limit
-REDDIT_PREVIEWS_REQUESTS_PER_MINUTE = 30
-REVEDDIT_REQUESTS_PER_MINUTE = 20
-
 # Retry Configuration
+SECONDS_PER_DAY = 86400
 DEFAULT_MAX_RETRIES = 3
 EXPONENTIAL_BACKOFF_MULTIPLIER = 1
 EXPONENTIAL_BACKOFF_MIN_SECONDS = 1
@@ -40,6 +32,7 @@ DEFAULT_RATE_LIMIT_TIMEOUT = 15
 
 # SQLite Configuration
 SQLITE_CACHE_SIZE_KB = 64000  # 64MB cache for better performance
+SQLITE_MMAP_SIZE_BYTES = 134217728  # 128MB
 SQLITE_TIMEOUT_SECONDS = 10.0
 RECOVERY_CACHE_TTL_HOURS = 24  # Cache recovery results for 24 hours
 
@@ -52,7 +45,6 @@ RETRY_BACKOFF_FACTOR = 0.3
 # File Processing
 MIN_MEDIA_FILE_SIZE = 100  # Minimum size for media files (avoid empty/truncated)
 IMAGE_VALIDATION_ENABLED = True
-HASH_ALGORITHM_PREFERENCE = "BLAKE3"  # "BLAKE3" or "SHA256"
 
 # Jitter Configuration
 REDDIT_API_JITTER_PERCENT = 10  # ±10% for Reddit API calls
@@ -83,15 +75,16 @@ DEFAULT_IMAGE_EXTENSION = '.jpg'
 DEFAULT_VIDEO_EXTENSION = '.mp4'
 DEFAULT_AUDIO_EXTENSION = '.mp3'
 
-VALID_IMAGE_EXTENSIONS = {
-    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff'
-}
-VALID_VIDEO_EXTENSIONS = {
-    '.mp4', '.webm', '.mov', '.avi', '.mkv'
-}
-VALID_AUDIO_EXTENSIONS = {
-    '.mp3', '.m4a', '.wav', '.ogg', '.flac'
-}
+# URLs ending in one of these are treated as images.
+IMAGE_URL_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff')
+# A comment body ending in one of these has its image downloaded. Narrower than the
+# above: widening it would rewrite already-saved comments.
+COMMENT_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif')
+# Extensions a URL keeps in its saved file name; any other is saved as .jpg. Saved names
+# are part of the backup layout, so changing this renames future downloads.
+SAVED_MEDIA_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.webm')
+# Extensions a save path keeps however the server labels the content.
+TRUSTED_FILE_EXTENSIONS = SAVED_MEDIA_EXTENSIONS + ('.mov', '.mp3', '.m4a', '.wav')
 
 # User Agent
 DEFAULT_USER_AGENT = "Reddit Stash Media Downloader/1.0"
@@ -105,7 +98,9 @@ URL_VALIDATION_TIMEOUT = 5.0  # Timeout for URL validation checks
 # Processing Pipeline
 DYNAMIC_SLEEP_BASE_SECONDS = 0.005  # Courtesy delay between items (PRAW handles API rate limiting)
 DYNAMIC_SLEEP_MAX_SECONDS = 0.5  # Cap on adaptive sleep time
+DYNAMIC_SLEEP_CHARS_PER_STEP = 10000  # Sleep a little longer per this many characters of content
 MAX_ITEM_FAILURES = 5  # Stop retrying a post/comment after this many failed runs
+COMMENT_FETCH_MAX_ATTEMPTS = 12  # With capped backoff, about 10 minutes: outlasts Reddit's rate limit window
 FILE_LOG_CHECKPOINT_INTERVAL = 200  # Save file_log.json every N items (trade-off: crash loss vs I/O)
 
 # Trusted Media Domains (skip URL validation for these)

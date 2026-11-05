@@ -13,6 +13,32 @@ on:
         description: Only run when the last success is older than this many hours (empty = always)
         type: string
         default: ''
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      AWS_DEFAULT_REGION:
+        required: false
+      AWS_S3_BUCKET:
+        required: false
+      S3_STORAGE_CLASS:
+        required: false
+      REDDIT_CLIENT_ID:
+        required: false
+      REDDIT_CLIENT_SECRET:
+        required: false
+      REDDIT_USERNAME:
+        required: false
+      REDDIT_PASSWORD:
+        required: false
+      IMGUR_CLIENT_IDS:
+        required: false
+      HEALTHCHECK_URL:
+        required: false
+
+permissions:
+  contents: read
 
 jobs:
   cycle:
@@ -32,7 +58,9 @@ jobs:
         cache: 'pip'
         cache-dependency-path: |
           requirements.txt
+          requirements-minimal.txt
           requirements-s3.txt
+          constraints.txt
 
     - name: Install dependencies
       env:
@@ -40,7 +68,7 @@ jobs:
         PIP_ROOT_USER_ACTION: ignore
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt -r requirements-s3.txt
+        pip install -r requirements.txt -r requirements-s3.txt -c constraints.txt
 
     - name: Run coordinated cycle
       env:

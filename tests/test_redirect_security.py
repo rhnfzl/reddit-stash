@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from utils.media_services.base_downloader import BaseHTTPDownloader
-from utils.service_abstractions import DownloadStatus, ServiceConfig
+from utils.media_services.safe_http import pin_resolved_addresses, pin_standard_requests
+from utils.media_services.media_types import DownloadStatus, ServiceConfig
 
 
 class TestRedirectSecurity(unittest.TestCase):
@@ -25,8 +26,9 @@ class TestRedirectSecurity(unittest.TestCase):
 
         validator = MagicMock()
         validator.is_safe_for_download.side_effect = [True, False]
+        validator.validate_url.return_value.dns_failed = False
         validator.resolve_public_addresses.return_value = ('93.184.216.34',)
-        with patch('utils.media_services.base_downloader.get_url_validator', return_value=validator):
+        with patch('utils.media_services.safe_http.get_url_validator', return_value=validator):
             with patch.object(self.downloader._session, 'get', return_value=redirect) as get:
                 result = self.downloader.download_file(
                     'https://public.example/image.jpg',
@@ -48,7 +50,7 @@ class TestRedirectSecurity(unittest.TestCase):
         validator = MagicMock()
         validator.is_safe_for_download.side_effect = [True, True]
         validator.resolve_public_addresses.return_value = ('93.184.216.34',)
-        with patch('utils.media_services.base_downloader.get_url_validator', return_value=validator):
+        with patch('utils.media_services.safe_http.get_url_validator', return_value=validator):
             with patch.object(self.downloader._session, 'get', side_effect=[redirect, final]) as get:
                 response, final_url = self.downloader._get_with_safe_redirects(
                     'https://public.example/image.jpg',
@@ -71,7 +73,7 @@ class TestRedirectSecurity(unittest.TestCase):
         validator = MagicMock()
         validator.is_safe_for_download.side_effect = [True, True]
         validator.resolve_public_addresses.return_value = ('93.184.216.34',)
-        with patch('utils.media_services.base_downloader.get_url_validator', return_value=validator):
+        with patch('utils.media_services.safe_http.get_url_validator', return_value=validator):
             with patch.object(self.downloader._session, 'get', side_effect=[redirect, final]) as get:
                 self.downloader._get_with_safe_redirects(
                     'https://public.example/image.jpg',
@@ -113,7 +115,7 @@ class TestRedirectSecurity(unittest.TestCase):
         validator.is_safe_for_download.side_effect = [True, True]
         validator.resolve_public_addresses.return_value = ('93.184.216.34',)
         headers = {'Authorization': 'Bearer secret', 'X-Request-ID': 'trace'}
-        with patch('utils.media_services.base_downloader.get_url_validator', return_value=validator):
+        with patch('utils.media_services.safe_http.get_url_validator', return_value=validator):
             with patch.object(self.downloader._session, 'get', side_effect=[redirect, final]) as get:
                 self.downloader._get_with_safe_redirects(
                     'https://public.example/image.jpg',
@@ -133,7 +135,7 @@ class TestRedirectSecurity(unittest.TestCase):
         validator = MagicMock()
         validator.is_safe_for_download.return_value = True
         validator.resolve_public_addresses.return_value = ('93.184.216.34',)
-        with patch('utils.media_services.base_downloader.get_url_validator', return_value=validator):
+        with patch('utils.media_services.safe_http.get_url_validator', return_value=validator):
             with patch.object(self.downloader._session, 'get', side_effect=redirects) as get:
                 with self.assertRaisesRegex(ValueError, 'Redirect limit exceeded'):
                     self.downloader._get_with_safe_redirects(
@@ -143,8 +145,22 @@ class TestRedirectSecurity(unittest.TestCase):
 
         self.assertEqual(get.call_count, 3)
 
+    def test_unfollowable_redirects_stay_queueable(self):
+        looping = MagicMock(status_code=302, headers={'location': '/again.jpg'})
+        no_location = MagicMock(status_code=302, headers={})
+        validator = MagicMock()
+        validator.is_safe_for_download.return_value = True
+        validator.resolve_public_addresses.return_value = ('93.184.216.34',)
+        for label, response in (('loop', looping), ('no location', no_location)):
+            with self.subTest(label), \
+                    patch('utils.media_services.safe_http.get_url_validator', return_value=validator), \
+                    patch.object(self.downloader._session, 'get', return_value=response):
+                result = self.downloader.download('https://public.example/image.jpg', '/unused/image.jpg')
+            self.assertEqual(result.status, DownloadStatus.REJECTED)
+            self.assertTrue(result.should_retry)
+
     def test_standard_requests_preserves_hostname_while_pinning_dns(self):
-        with self.downloader._pin_standard_requests(
+        with pin_standard_requests(
             'public.example',
             ('93.184.216.34',),
         ):
@@ -158,9 +174,9 @@ class TestRedirectSecurity(unittest.TestCase):
 
     def test_curl_requests_receive_pinned_resolve_option(self):
         curl_opt = SimpleNamespace(RESOLVE='RESOLVE')
-        with patch('utils.media_services.base_downloader.CURL_CFFI_AVAILABLE', True):
-            with patch('utils.media_services.base_downloader.CurlOpt', curl_opt):
-                request_kwargs, _ = self.downloader._pin_resolved_addresses(
+        with patch('utils.media_services.safe_http.CURL_CFFI_AVAILABLE', True):
+            with patch('utils.media_services.safe_http.CurlOpt', curl_opt):
+                request_kwargs, _ = pin_resolved_addresses(
                     'https://public.example/image.jpg',
                     {'stream': True},
                     ('93.184.216.34',),

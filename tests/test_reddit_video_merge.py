@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from utils.media_services.reddit_media import RedditMediaDownloader
-from utils.service_abstractions import DownloadResult, DownloadStatus
+from utils.media_services.media_types import DownloadResult, DownloadStatus
 
 
 class TestRedditVideoMerge(unittest.TestCase):
@@ -56,6 +56,15 @@ class TestRedditVideoMerge(unittest.TestCase):
         self.assertEqual(result.bytes_downloaded, 6)
         with open(self.save_path, 'rb') as merged_file:
             self.assertEqual(merged_file.read(), b'merged')
+
+    def test_missing_ffmpeg_warns_that_the_video_has_no_audio(self):
+        with patch.object(self.downloader, '_is_ffmpeg_available', return_value=False), \
+                patch.object(self.downloader, 'download_file', side_effect=self._download), \
+                self.assertLogs(self.downloader._logger, level='WARNING') as logs:
+            result = self.downloader._download_reddit_video(self.video_url, self.save_path)
+
+        self.assertTrue(result.is_success)
+        self.assertIn('ffmpeg not found', logs.output[0])
 
     def test_merge_failure_keeps_the_downloaded_video(self):
         result = self._download_video(

@@ -1,16 +1,14 @@
 """
 Path security module for Reddit Stash.
 
-This module provides secure path handling to prevent directory traversal attacks
-and ensure all file operations stay within designated directories. Implements
-2024 security best practices for file path validation and sanitization.
+Sanitizes path components and keeps file operations inside their base directory,
+so saved names cannot traverse out of it.
 """
 
 import os
 import re
 import logging
-from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import unquote
 
 
@@ -21,13 +19,17 @@ logger = logging.getLogger(__name__)
 class PathValidationResult:
     """Result of path validation with security details."""
     is_safe: bool
-    safe_path: Optional[str] = None
-    issues: list = None
-    sanitized_component: Optional[str] = None
+    safe_path: str | None = None
+    issues: list[str] = field(default_factory=list)
+    sanitized_component: str | None = None
 
-    def __post_init__(self):
-        if self.issues is None:
-            self.issues = []
+
+def _is_inside(path: str, base: str) -> bool:
+    """Whether a resolved path is inside a resolved base directory."""
+    try:
+        return os.path.commonpath([path, base]) == base
+    except ValueError:  # different Windows drives, or one path relative
+        return False
 
 
 class SecurePathHandler:
@@ -37,13 +39,9 @@ class SecurePathHandler:
     Features:
     - Path traversal prevention using realpath validation
     - Input sanitization for filenames and directory names
-    - Safe character allowlisting
     - Length validation
     - Reserved name detection
     """
-
-    # Safe characters for filenames and directory names
-    SAFE_CHARS_PATTERN = re.compile(r'^[a-zA-Z0-9._\-\s]+$')
 
     # Characters to remove/replace
     DANGEROUS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -102,7 +100,6 @@ class SecurePathHandler:
                 issues=["Component is empty after stripping whitespace"]
             )
 
-        # Check length
         if len(component) > self.max_component_length:
             issues.append(f"Component too long ({len(component)} > {self.max_component_length})")
             component = component[:self.max_component_length]
@@ -114,9 +111,8 @@ class SecurePathHandler:
                 issues.append(f"Directory traversal pattern detected: {pattern.pattern}")
 
         # Remove dangerous characters
-        original_length = len(component)
-        component = self.DANGEROUS_CHARS.sub('_', component)
-        if len(component) != original_length:
+        component, replaced = self.DANGEROUS_CHARS.subn('_', component)
+        if replaced:
             issues.append("Dangerous characters replaced with underscores")
 
         # Additional cleanup
@@ -209,7 +205,6 @@ class SecurePathHandler:
             safe_components.append(result.sanitized_component)
             all_issues.extend(result.issues)
 
-        # Build the path
         try:
             safe_path = os.path.join(base_directory, *safe_components)
             safe_path = os.path.realpath(safe_path)
@@ -220,13 +215,12 @@ class SecurePathHandler:
             )
 
         # Verify the path is within base directory
-        if not self._is_path_within_base(safe_path, base_directory):
+        if not _is_inside(safe_path, base_directory):
             return PathValidationResult(
                 is_safe=False,
                 issues=all_issues + ["Path escapes base directory"]
             )
 
-        # Check total path length
         if len(safe_path) > self.max_path_length:
             return PathValidationResult(
                 is_safe=False,
@@ -238,24 +232,6 @@ class SecurePathHandler:
             safe_path=safe_path,
             issues=all_issues
         )
-
-    def _is_path_within_base(self, path: str, base: str) -> bool:
-        """
-        Check if a path is within the base directory.
-
-        Args:
-            path: Path to check
-            base: Base directory
-
-        Returns:
-            True if path is within base directory
-        """
-        try:
-            # Use os.path.commonpath to check containment
-            return os.path.commonpath([path, base]) == base
-        except ValueError:
-            # Different drives on Windows or other issues
-            return False
 
     def validate_existing_path(self, path: str, base_directory: str) -> PathValidationResult:
         """
@@ -279,8 +255,7 @@ class SecurePathHandler:
             resolved_path = os.path.realpath(path)
             resolved_base = os.path.realpath(base_directory)
 
-            # Check containment
-            if not self._is_path_within_base(resolved_path, resolved_base):
+            if not _is_inside(resolved_path, resolved_base):
                 return PathValidationResult(
                     is_safe=False,
                     issues=["Path is outside base directory"]
@@ -311,7 +286,6 @@ class SecurePathHandler:
         Returns:
             PathValidationResult with safe file path
         """
-        # Validate content type
         valid_types = {'POST', 'COMMENT', 'SAVED_POST', 'SAVED_COMMENT',
                       'UPVOTE_POST', 'UPVOTE_COMMENT', 'GDPR_POST', 'GDPR_COMMENT'}
 
@@ -321,58 +295,45 @@ class SecurePathHandler:
                 issues=[f"Invalid content type: {content_type}"]
             )
 
-        # Create filename
         filename = f"{content_type}_{content_id}.md"
 
-        # Create safe path
         return self.create_safe_path(base_directory, subreddit_name, filename)
 
 
-# Global instance
-_global_path_handler = None
+_global_path_handler = SecurePathHandler()
 
 
 def get_path_handler() -> SecurePathHandler:
-    """
-    Get the global secure path handler instance.
-
-    Returns:
-        Global SecurePathHandler instance
-    """
-    global _global_path_handler
-    if _global_path_handler is None:
-        _global_path_handler = SecurePathHandler()
+    """Get the shared path handler, which holds only its fixed limits."""
     return _global_path_handler
 
 
-def create_safe_path(base_directory: str, *components: str) -> PathValidationResult:
-    """
-    Convenience function to create a safe path.
-
-    Args:
-        base_directory: Base directory
-        *components: Path components
-
-    Returns:
-        PathValidationResult
-    """
-    return get_path_handler().create_safe_path(base_directory, *components)
+def is_path_within(base_directory: str, path: str) -> bool:
+    """True when path, with symlinks resolved, stays inside base_directory."""
+    base = os.path.realpath(base_directory)
+    try:
+        resolved = os.path.realpath(path)
+    except ValueError:  # embedded NUL: not a path the filesystem can hold
+        return False
+    return _is_inside(resolved, base)
 
 
 def create_reddit_file_path(base_directory: str, subreddit_name: str,
                           content_type: str, content_id: str) -> PathValidationResult:
-    """
-    Convenience function to create safe Reddit file path.
-
-    Args:
-        base_directory: Base directory
-        subreddit_name: Subreddit name
-        content_type: Content type
-        content_id: Content ID
-
-    Returns:
-        PathValidationResult
-    """
+    """Build the safe path of a saved Reddit item with the global handler."""
     return get_path_handler().create_reddit_file_path(
         base_directory, subreddit_name, content_type, content_id
     )
+
+
+def ensure_writable_directory(path: str) -> str:
+    """Create path if needed and return it as absolute.
+
+    Raises OSError when it is unusable: backing up or syncing another folder instead
+    would silently use the wrong file log and files.
+    """
+    path = os.path.abspath(path)
+    os.makedirs(path, exist_ok=True)
+    if not os.access(path, os.W_OK):
+        raise PermissionError(f"Save directory {path} is not writable.")
+    return path

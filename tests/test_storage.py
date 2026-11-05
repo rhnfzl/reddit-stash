@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests.helpers import clear_storage_env, needs_dropbox
 from utils.storage.base import StorageProvider, StorageFileInfo, SyncResult
 from utils.storage.content_hash import compute_file_hash, compute_bytes_hash, hashes_match
 
@@ -168,6 +169,13 @@ class TestContentHash(unittest.TestCase):
 class TestStorageFactory(unittest.TestCase):
     """Test storage config loading and factory function."""
 
+    def test_missing_dropbox_package_names_the_requirements_file(self):
+        from utils.storage.factory import StorageConfig, create_provider
+        with patch.dict(sys.modules, {"dropbox": None}):
+            sys.modules.pop("utils.storage.dropbox_provider", None)
+            with self.assertRaisesRegex(ValueError, "requirements-dropbox.txt"):
+                create_provider(StorageProvider.DROPBOX, StorageConfig())
+
     @patch.dict(os.environ, {"STORAGE_PROVIDER": "none"}, clear=False)
     def test_provider_none(self):
         from utils.storage.factory import load_storage_config, get_storage_provider
@@ -175,6 +183,7 @@ class TestStorageFactory(unittest.TestCase):
         self.assertEqual(config.provider, StorageProvider.NONE)
         self.assertIsNone(get_storage_provider(config))
 
+    @needs_dropbox
     @patch.dict(os.environ, {"STORAGE_PROVIDER": "dropbox"}, clear=False)
     def test_provider_dropbox(self):
         from utils.storage.factory import load_storage_config, get_storage_provider
@@ -266,26 +275,25 @@ class TestS3StorageProvider(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             provider.list_files("/test")
 
-    @patch("utils.storage.s3_provider._ensure_boto3")
-    def test_connect(self, mock_ensure):
+    def test_connect(self):
         provider = self._make_provider()
         mock_client = MagicMock()
-        mock_session = MagicMock()
-        mock_session.client.return_value = mock_client
+        fake_boto3 = MagicMock()
+        fake_boto3.Session.return_value.client.return_value = mock_client
 
-        with patch("utils.storage.s3_provider._boto3") as mock_boto3, \
-             patch("utils.storage.s3_provider._botocore") as mock_botocore, \
-             patch("utils.storage.s3_provider._TransferConfig") as mock_tc:
-            mock_boto3.Session.return_value = mock_session
-            mock_botocore.config.Config.return_value = MagicMock()
-            mock_tc.return_value = MagicMock()
-
+        # boto3 is optional, so the minimal-manifest job runs this without it installed.
+        with patch.dict(sys.modules, {
+            "boto3": fake_boto3,
+            "boto3.s3": MagicMock(),
+            "boto3.s3.transfer": MagicMock(),
+            "botocore": MagicMock(),
+            "botocore.config": MagicMock(),
+        }):
             provider.connect()
-            self.assertIsNotNone(provider._s3)
-            mock_client.head_bucket.assert_called_once_with(Bucket="test-bucket")
+        self.assertIsNotNone(provider._s3)
+        mock_client.head_bucket.assert_called_once_with(Bucket="test-bucket")
 
-    @patch("utils.storage.s3_provider._ensure_boto3")
-    def test_upload_file(self, mock_ensure):
+    def test_upload_file(self):
         provider = self._make_provider()
         mock_client = MagicMock()
         provider._s3 = mock_client
@@ -304,8 +312,7 @@ class TestS3StorageProvider(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    @patch("utils.storage.s3_provider._ensure_boto3")
-    def test_file_log_always_standard(self, mock_ensure):
+    def test_file_log_always_standard(self):
         """file_log.json should always use STANDARD class regardless of config."""
         provider = self._make_provider(storage_class="DEEP_ARCHIVE")
         mock_client = MagicMock()
@@ -313,7 +320,8 @@ class TestS3StorageProvider(unittest.TestCase):
         provider._transfer_config = MagicMock()
 
         # Simulate file not existing on S3 (404) so Glacier check passes
-        error_response = {"Error": {"Code": "404", "Message": "Not Found"}}
+        error_response = {"Error": {"Code": "404", "Message": "Not Found"},
+                          "ResponseMetadata": {"HTTPStatusCode": 404}}
         client_error_type = type("ClientError", (Exception,), {})
         mock_client.exceptions.ClientError = client_error_type
         client_error = client_error_type()
@@ -335,12 +343,13 @@ class TestS3StorageProvider(unittest.TestCase):
 # Dropbox provider (mocked)
 # ---------------------------------------------------------------
 
+@needs_dropbox
 class TestDropboxStorageProvider(unittest.TestCase):
     """Test Dropbox provider with mocked dropbox SDK."""
 
     def _make_provider(self):
         from utils.storage.dropbox_provider import DropboxStorageProvider
-        return DropboxStorageProvider(dropbox_directory="/reddit")
+        return DropboxStorageProvider()
 
     def test_provider_name(self):
         provider = self._make_provider()
@@ -356,9 +365,8 @@ class TestDropboxStorageProvider(unittest.TestCase):
         "DROPBOX_APP_KEY": "test_key",
         "DROPBOX_APP_SECRET": "test_secret",
     })
-    @patch("utils.storage.dropbox_provider._ensure_dropbox")
-    @patch("utils.storage.dropbox_provider._dropbox")
-    def test_connect(self, mock_dbx_module, mock_ensure):
+    @patch("utils.storage.dropbox_provider.dropbox")
+    def test_connect(self, mock_dbx_module):
         provider = self._make_provider()
 
         mock_response = MagicMock()
@@ -369,6 +377,20 @@ class TestDropboxStorageProvider(unittest.TestCase):
             mock_dbx_module.Dropbox.return_value = MagicMock()
             provider.connect()
             self.assertIsNotNone(provider._dbx)
+            self.assertNotIn("DROPBOX_TOKEN", os.environ)
+
+    @patch.dict(os.environ, {
+        "DROPBOX_REFRESH_TOKEN": "test_token",
+        "DROPBOX_APP_KEY": "test_key",
+        "DROPBOX_APP_SECRET": "test_secret",
+    })
+    @patch("utils.storage.dropbox_provider.dropbox")
+    def test_token_refresh_cannot_hang_forever(self, _mock_dbx_module):
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {"access_token": "new_token"}
+        with patch("requests.post", return_value=mock_response) as mock_post:
+            self._make_provider().connect()
+        self.assertGreater(mock_post.call_args.kwargs["timeout"], 0)
 
     @patch.dict(os.environ, {}, clear=False)
     def test_connect_missing_creds(self):
@@ -378,9 +400,8 @@ class TestDropboxStorageProvider(unittest.TestCase):
         for key in ["DROPBOX_REFRESH_TOKEN", "DROPBOX_APP_KEY", "DROPBOX_APP_SECRET"]:
             os.environ.pop(key, None)
 
-        with patch("utils.storage.dropbox_provider._ensure_dropbox"):
-            with self.assertRaises(RuntimeError):
-                provider.connect()
+        with self.assertRaises(RuntimeError):
+            provider.connect()
 
     def test_upload_skips_log_when_a_content_file_fails(self):
         provider = self._make_provider()
@@ -552,6 +573,9 @@ class TestStorageMigration(unittest.TestCase):
 class TestConfigValidatorStorage(unittest.TestCase):
     """Test config_validator.py storage validation."""
 
+    def setUp(self):
+        clear_storage_env(self)
+
     def _get_validator(self):
         from utils.config_validator import ConfigValidator
         return ConfigValidator()
@@ -589,6 +613,49 @@ class TestConfigValidatorStorage(unittest.TestCase):
             validator.validate_storage_section()
         self.assertTrue(any("s3_bucket" in e for e in validator.errors))
 
+    def test_bucket_from_the_environment_satisfies_s3(self):
+        validator = self._get_validator()
+        validator.config_parser.set('Storage', 'provider', 's3')
+        validator.config_parser.set('Storage', 's3_bucket', 'None')
+        # boto3 is optional, so the minimal-manifest job runs this without it installed.
+        with patch.dict(os.environ, {'AWS_S3_BUCKET': 'env-bucket'}), \
+                patch.dict(sys.modules, {'boto3': MagicMock()}):
+            validator.validate_storage_section()
+        self.assertEqual(validator.errors, [])
+
+    def test_missing_boto3_is_reported_when_the_environment_selects_s3(self):
+        validator = self._get_validator()
+        validator.config_parser.set('Storage', 'provider', 'none')
+        # A None entry makes the import raise ImportError, as if boto3 were not installed
+        with patch.dict(os.environ, {'STORAGE_PROVIDER': 's3', 'AWS_S3_BUCKET': 'env-bucket'}), \
+                patch.dict(sys.modules, {'boto3': None}):
+            validator.validate_storage_section()
+        self.assertTrue(any("boto3 is not installed" in e for e in validator.errors))
+
+    def test_bad_interpolation_in_a_setting_warns_instead_of_raising(self):
+        validator = self._get_validator()
+        # read_string skips the set() check, as a hand-edited file would
+        validator.config_parser.read_string('[Settings]\ndropbox_directory = /red%dit\n')
+        validator.validate_storage_section()
+        self.assertEqual(validator.errors, [])
+        self.assertTrue(any('could not be read' in w for w in validator.warnings))
+
+    def test_provider_from_the_environment_is_validated(self):
+        validator = self._get_validator()
+        validator.config_parser.set('Storage', 'provider', 'none')
+        validator.config_parser.set('Storage', 's3_bucket', 'None')
+        with patch.dict(os.environ, {'STORAGE_PROVIDER': 's3'}):
+            os.environ.pop('AWS_S3_BUCKET', None)
+            validator.validate_storage_section()
+        self.assertTrue(any("s3_bucket" in e for e in validator.errors))
+
+    def test_invalid_provider_from_the_environment_is_reported(self):
+        validator = self._get_validator()
+        validator.config_parser.remove_section('Storage')
+        with patch.dict(os.environ, {'STORAGE_PROVIDER': 'gcs'}):
+            validator.validate_storage_section()
+        self.assertTrue(any("Invalid storage provider" in e for e in validator.errors))
+
     def test_s3_invalid_storage_class(self):
         validator = self._get_validator()
         if not validator.config_parser.has_section('Storage'):
@@ -609,13 +676,13 @@ class TestStorageSummary(unittest.TestCase):
 
     @patch.dict(os.environ, {"STORAGE_PROVIDER": "none"}, clear=False)
     def test_summary_none(self):
-        from utils.feature_flags import get_storage_summary
+        from utils.storage.factory import get_storage_summary
         summary = get_storage_summary()
         self.assertIn("DISABLED", summary)
 
     @patch.dict(os.environ, {"STORAGE_PROVIDER": "dropbox"}, clear=False)
     def test_summary_dropbox(self):
-        from utils.feature_flags import get_storage_summary
+        from utils.storage.factory import get_storage_summary
         summary = get_storage_summary()
         self.assertIn("Dropbox", summary)
 
@@ -625,11 +692,207 @@ class TestStorageSummary(unittest.TestCase):
         "S3_STORAGE_CLASS": "GLACIER_IR",
     }, clear=False)
     def test_summary_s3(self):
-        from utils.feature_flags import get_storage_summary
+        from utils.storage.factory import get_storage_summary
         summary = get_storage_summary()
         self.assertIn("S3", summary)
         self.assertIn("my-bucket", summary)
         self.assertIn("GLACIER_IR", summary)
+
+
+class TestS3SkippedFilesReportProgress(unittest.TestCase):
+    """A run of unchanged files must still print progress in both directions."""
+
+    def _provider_with_matching_remote(self, local_dir, name, content):
+        from utils.storage.s3_provider import S3StorageProvider
+        path = os.path.join(local_dir, name)
+        with open(path, "w", encoding="utf-8") as output_file:
+            output_file.write(content)
+        provider = S3StorageProvider(bucket="b")
+        provider._s3 = MagicMock()
+        provider.list_files = MagicMock(return_value=[StorageFileInfo(remote_path=f"reddit/{name}")])
+        provider.get_file_info = MagicMock(
+            return_value=StorageFileInfo(remote_path=f"reddit/{name}", content_hash=compute_file_hash(path))
+        )
+        return provider
+
+    def test_upload_of_unchanged_files_reports_progress(self):
+        with tempfile.TemporaryDirectory() as local_dir:
+            provider = self._provider_with_matching_remote(local_dir, "post.md", "same")
+            with self.assertLogs("utils.storage.sync_progress", level="INFO") as logs:
+                result = provider.upload_directory(local_dir, "reddit")
+        self.assertEqual(result.skipped, 1)
+        self.assertIn("[1/1] 100%", logs.output[0])
+
+    def test_download_of_unchanged_files_reports_progress(self):
+        with tempfile.TemporaryDirectory() as local_dir:
+            provider = self._provider_with_matching_remote(local_dir, "post.md", "same")
+            with self.assertLogs("utils.storage.sync_progress", level="INFO") as logs:
+                result = provider.download_directory("reddit", local_dir)
+        self.assertEqual(result.skipped, 1)
+        self.assertIn("[1/1] 100%", logs.output[0])
+
+
+class TestS3UploadKeys(unittest.TestCase):
+    def test_empty_prefix_and_nested_files_keep_their_key(self):
+        from utils.storage.s3_provider import S3StorageProvider
+        provider = S3StorageProvider(bucket="b")
+        provider._s3 = MagicMock()
+        provider.list_files = MagicMock(return_value=[])
+        with tempfile.TemporaryDirectory() as local_dir:
+            os.mkdir(os.path.join(local_dir, "r_sub"))
+            for rel in ("r_sub/post.md", "file_log.json"):
+                with open(os.path.join(local_dir, rel), "w", encoding="utf-8") as output_file:
+                    output_file.write("x")
+            for remote_dir, want in (
+                ("", ["r_sub/post.md", "file_log.json"]),
+                ("/reddit/", ["reddit/r_sub/post.md", "reddit/file_log.json"]),
+            ):
+                provider._s3.upload_file.reset_mock()
+                provider.upload_directory(local_dir, remote_dir)
+                keys = [call.args[2] for call in provider._s3.upload_file.call_args_list]
+                self.assertEqual(keys, want)  # log last, after the content it records
+
+
+class TestS3SyncSafetyGates(unittest.TestCase):
+    """file_log.json must never reach S3 unless all the content it records did."""
+
+    def setUp(self):
+        from utils.storage.s3_provider import S3StorageProvider
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.local_dir = tmp.name
+        self.provider = S3StorageProvider(bucket="b")
+        self.provider._s3 = MagicMock()
+        self.provider.list_files = MagicMock(return_value=[])
+        self.provider.upload_file = MagicMock(
+            side_effect=lambda path, key: StorageFileInfo(remote_path=key, size_bytes=os.path.getsize(path))
+        )
+
+    def _write(self, rel, content="x"):
+        path = os.path.join(self.local_dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as output_file:
+            output_file.write(content)
+        return path
+
+    def _uploaded_keys(self):
+        return [call.args[1] for call in self.provider.upload_file.call_args_list]
+
+    def _do_upload(self, cancelled=(False,)):
+        flags = iter(cancelled)
+        return self.provider._do_upload_directory(
+            self.local_dir, "reddit", 0.0, lambda: next(flags, cancelled[-1]),
+        )
+
+    def test_held_back_log_is_reported(self):
+        self._write("post.md")
+        self._write("file_log.json")
+        self.provider.upload_file.side_effect = OSError("disk error")
+        with self.assertLogs("utils.storage.s3_provider", level="ERROR") as logs:
+            self.provider.upload_directory(self.local_dir, "reddit")
+        self.assertTrue(any("SKIPPING file_log.json upload: 1 file(s)" in line for line in logs.output))
+
+    def test_failed_content_keeps_the_log_back(self):
+        path = self._write("post.md")
+        self._write("file_log.json")
+        self.provider.upload_file.side_effect = OSError("disk error")
+        result = self.provider.upload_directory(self.local_dir, "reddit")
+        self.assertEqual((result.uploaded, result.failed), (0, 1))
+        self.assertEqual(result.errors, [f"{path}: disk error"])
+        self.assertEqual(self._uploaded_keys(), ["reddit/post.md"])
+
+    def test_cancel_before_any_upload_counts_every_file_as_failed(self):
+        self._write("a.md")
+        self._write("b.md")
+        self._write("file_log.json")
+        result = self._do_upload(cancelled=(True,))
+        self.assertEqual((result.uploaded, result.failed), (0, 2))
+        self.assertEqual(result.errors, ["Upload interrupted by SIGTERM"])
+        self.assertEqual(self._uploaded_keys(), [])
+
+    def test_cancel_after_the_last_content_file_keeps_the_log_back(self):
+        self._write("post.md")
+        self._write("file_log.json")
+        result = self._do_upload(cancelled=(False, True))
+        self.assertEqual((result.uploaded, result.failed), (1, 0))
+        self.assertEqual(self._uploaded_keys(), ["reddit/post.md"])
+
+    def test_uncoordinated_log_uses_a_plain_upload(self):
+        self._write("post.md")
+        self._write("file_log.json")
+        result = self._do_upload()
+        self.assertEqual(result.uploaded, 2)
+        self.assertEqual(self._uploaded_keys(), ["reddit/post.md", "reddit/file_log.json"])
+        self.provider._s3.put_object.assert_not_called()
+
+    def test_coordinated_log_is_a_conditional_put_on_the_downloaded_etag(self):
+        self._write("post.md")
+        self._write("file_log.json")
+        self.provider.require_log_snapshot = True
+        self.provider._log_snapshot_taken = True
+        self.provider._log_etag = "etag-1"
+        self.provider._s3.put_object.return_value = {"ETag": "etag-2"}
+        result = self._do_upload()
+        self.assertEqual(result.uploaded, 2)
+        self.assertEqual(self._uploaded_keys(), ["reddit/post.md"])
+        put = self.provider._s3.put_object.call_args.kwargs
+        self.assertEqual((put["Key"], put["IfMatch"]), ("reddit/file_log.json", "etag-1"))
+
+    def test_log_only_upload_counts_its_bytes(self):
+        self._write("file_log.json", "12345")
+        result = self.provider.upload_directory(self.local_dir, "reddit")
+        self.assertEqual((result.uploaded, result.bytes_transferred), (1, 5))
+
+    def test_log_only_upload_failure_is_counted_with_its_path(self):
+        path = self._write("file_log.json")
+        self.provider.upload_file.side_effect = OSError("disk error")
+        result = self.provider.upload_directory(self.local_dir, "reddit")
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.errors, [f"{path}: disk error"])
+
+    def test_nested_log_with_no_content_keeps_the_root_key(self):
+        self._write("sub/file_log.json")
+        self.provider.upload_directory(self.local_dir, "reddit")
+        self.assertEqual(self._uploaded_keys(), ["reddit/file_log.json"])
+
+    def test_unreadable_file_with_a_remote_copy_is_counted_as_failed(self):
+        self._write("post.md")
+        self._write("file_log.json")
+        self.provider.list_files.return_value = [StorageFileInfo(remote_path="reddit/post.md")]
+        self.provider.get_file_info = MagicMock(
+            return_value=StorageFileInfo(remote_path="reddit/post.md", content_hash="abc")
+        )
+        with patch("utils.storage.s3_provider.compute_file_hash", side_effect=PermissionError("denied")):
+            result = self.provider.upload_directory(self.local_dir, "reddit")
+        self.assertEqual(result.failed, 1)
+        self.assertIn("denied", result.errors[0])
+        self.assertEqual(self._uploaded_keys(), [])
+
+    def test_unreadable_file_with_no_remote_copy_is_counted_as_failed(self):
+        self._write("post.md")
+        self._write("file_log.json")
+        self.provider.upload_file.side_effect = PermissionError("denied")
+        result = self.provider.upload_directory(self.local_dir, "reddit")
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(self._uploaded_keys(), ["reddit/post.md"])
+
+    def test_failed_download_is_counted_with_its_key(self):
+        self.provider.list_files.return_value = [StorageFileInfo(remote_path="reddit/post.md")]
+        self.provider.download_file = MagicMock(side_effect=OSError("disk full"))
+        result = self.provider.download_directory("reddit", self.local_dir)
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.errors, ["reddit/post.md: disk full"])
+
+    def test_unreadable_local_file_on_download_is_counted_as_failed(self):
+        self._write("post.md")
+        self.provider.list_files.return_value = [StorageFileInfo(remote_path="reddit/post.md")]
+        self.provider.get_file_info = MagicMock(
+            return_value=StorageFileInfo(remote_path="reddit/post.md", content_hash="abc")
+        )
+        with patch("utils.storage.s3_provider.compute_file_hash", side_effect=PermissionError("denied")):
+            result = self.provider.download_directory("reddit", self.local_dir)
+        self.assertEqual(result.failed, 1)
+        self.assertIn("denied", result.errors[0])
 
 
 if __name__ == "__main__":

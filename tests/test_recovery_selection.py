@@ -1,8 +1,9 @@
 """Tests for parallel recovery result selection."""
 
+import threading
 import time
 import unittest
-from types import SimpleNamespace
+from concurrent.futures import as_completed
 from unittest.mock import patch
 
 from utils.content_recovery.recovery_metadata import (
@@ -11,7 +12,9 @@ from utils.content_recovery.recovery_metadata import (
     RecoveryResult,
     RecoverySource,
 )
-from utils.content_recovery.recovery_service import ContentRecoveryService
+from tests.recovery_helpers import recovery_service
+
+URL = 'https://example.com/image.jpg'
 
 
 class _Provider:
@@ -37,39 +40,57 @@ def _result(source, quality):
     return RecoveryResult.success_result(metadata.recovered_url, metadata)
 
 
-class TestParallelRecoverySelection(unittest.TestCase):
-    def _service(self, providers):
-        service = ContentRecoveryService.__new__(ContentRecoveryService)
-        service.providers = providers
-        service._logger = SimpleNamespace(
-            debug=lambda *_: None,
-            error=lambda *_: None,
-            info=lambda *_: None,
-            warning=lambda *_: None,
-        )
-        service._record_attempt = lambda *_: None
-        return service
+class _BlockedProvider:
+    """Stays inside attempt_recovery until the test releases it."""
 
+    def __init__(self, release):
+        self.release = release
+        self.finished = threading.Event()
+
+    def attempt_recovery(self, _):
+        self.release.wait(30)
+        self.finished.set()
+        return RecoveryResult.failure_result('missing')
+
+
+class TestRecoverySelection(unittest.TestCase):
     def test_selects_best_result_not_first_completed_result(self):
-        low_quality = _result(RecoverySource.REDDIT_PREVIEWS, RecoveryQuality.THUMBNAIL)
+        low_quality = _result(RecoverySource.ARCTIC_SHIFT, RecoveryQuality.LOW_QUALITY)
         high_quality = _result(RecoverySource.WAYBACK_MACHINE, RecoveryQuality.HIGH_QUALITY)
-        service = self._service({
-            RecoverySource.REDDIT_PREVIEWS: _Provider(low_quality),
+        service = recovery_service({
+            RecoverySource.ARCTIC_SHIFT: _Provider(low_quality),
             RecoverySource.WAYBACK_MACHINE: _Provider(high_quality, delay=0.01),
         })
 
-        result = service._attempt_parallel_recovery('https://example.com/image.jpg', None)
+        result = service.attempt_recovery(URL)
 
         self.assertTrue(result.success)
         self.assertEqual(result.metadata.source, RecoverySource.WAYBACK_MACHINE)
 
+    def test_equal_quality_is_settled_by_provider_reliability(self):
+        wayback = _result(RecoverySource.WAYBACK_MACHINE, RecoveryQuality.HIGH_QUALITY)
+        pullpush = _result(RecoverySource.PULLPUSH_IO, RecoveryQuality.HIGH_QUALITY)
+
+        for wayback_delay, pullpush_delay in ((0.01, 0), (0, 0.01)):
+            service = recovery_service({
+                RecoverySource.WAYBACK_MACHINE: _Provider(wayback, delay=wayback_delay),
+                RecoverySource.PULLPUSH_IO: _Provider(pullpush, delay=pullpush_delay),
+            })
+            with patch(
+                'utils.content_recovery.recovery_service.rate_limit_manager.can_proceed',
+                return_value=True,
+            ):
+                result = service.attempt_recovery(URL)
+
+            self.assertEqual(result.metadata.source, RecoverySource.WAYBACK_MACHINE)
+
     def test_returns_failure_when_no_provider_recovers_content(self):
-        service = self._service({
+        service = recovery_service({
             RecoverySource.WAYBACK_MACHINE: _Provider(RecoveryResult.failure_result('missing')),
-            RecoverySource.REDDIT_PREVIEWS: _Provider(RecoveryResult.failure_result('missing')),
+            RecoverySource.ARCTIC_SHIFT: _Provider(RecoveryResult.failure_result('missing')),
         })
 
-        result = service._attempt_parallel_recovery('https://example.com/image.jpg', None)
+        result = service.attempt_recovery(URL)
 
         self.assertFalse(result.success)
         self.assertEqual(result.error_message, 'All recovery providers failed')
@@ -80,80 +101,102 @@ class TestParallelRecoverySelection(unittest.TestCase):
         self.assertEqual(result.attempted_sources, frozenset({RecoverySource.WAYBACK_MACHINE}))
 
     def test_success_preserves_all_completed_provider_sources(self):
-        service = self._service({
+        service = recovery_service({
             RecoverySource.WAYBACK_MACHINE: _Provider(RecoveryResult.failure_result('missing')),
-            RecoverySource.REDDIT_PREVIEWS: _Provider(
-                _result(RecoverySource.REDDIT_PREVIEWS, RecoveryQuality.THUMBNAIL),
+            RecoverySource.ARCTIC_SHIFT: _Provider(
+                _result(RecoverySource.ARCTIC_SHIFT, RecoveryQuality.LOW_QUALITY),
             ),
         })
 
-        result = service._attempt_sequential_recovery('https://example.com/image.jpg', None)
+        result = service.attempt_recovery(URL)
 
         self.assertTrue(result.success)
         self.assertEqual(
             result.attempted_sources,
             frozenset({
                 RecoverySource.WAYBACK_MACHINE,
-                RecoverySource.REDDIT_PREVIEWS,
+                RecoverySource.ARCTIC_SHIFT,
             }),
         )
 
     def test_rate_limited_pullpush_is_not_started(self):
-        provider = _Provider(_result(RecoverySource.PULLPUSH_IO, RecoveryQuality.MEDIUM_QUALITY))
-        service = self._service({RecoverySource.PULLPUSH_IO: provider})
+        pullpush = _Provider(_result(RecoverySource.PULLPUSH_IO, RecoveryQuality.MEDIUM_QUALITY))
+        arctic = _Provider(RecoveryResult.failure_result('missing'))
+        service = recovery_service({RecoverySource.PULLPUSH_IO: pullpush, RecoverySource.ARCTIC_SHIFT: arctic})
 
         with patch(
             'utils.content_recovery.recovery_service.rate_limit_manager.can_proceed',
             return_value=False,
         ):
-            result = service._attempt_parallel_recovery('https://example.com/image.jpg', None)
+            result = service.attempt_recovery(URL)
 
-        self.assertFalse(result.success)
-        self.assertEqual(provider.attempts, 0)
+            self.assertFalse(result.success)
+            self.assertEqual(pullpush.attempts, 0)
+            self.assertEqual(arctic.attempts, 1)
 
-    def test_sequential_rate_limited_pullpush_is_not_started(self):
-        provider = _Provider(_result(RecoverySource.PULLPUSH_IO, RecoveryQuality.MEDIUM_QUALITY))
-        service = self._service({RecoverySource.PULLPUSH_IO: provider})
+    def test_wayback_in_backoff_is_not_started(self):
+        wayback = _Provider(_result(RecoverySource.WAYBACK_MACHINE, RecoveryQuality.HIGH_QUALITY))
+        arctic = _Provider(_result(RecoverySource.ARCTIC_SHIFT, RecoveryQuality.MEDIUM_QUALITY))
+        service = recovery_service({
+            RecoverySource.WAYBACK_MACHINE: wayback,
+            RecoverySource.ARCTIC_SHIFT: arctic,
+        })
+
+        with patch(
+            'utils.content_recovery.recovery_service.rate_limit_manager.in_backoff',
+            return_value=True,
+        ):
+            result = service.attempt_recovery(URL)
+
+            self.assertEqual(result.metadata.source, RecoverySource.ARCTIC_SHIFT)
+            self.assertEqual(wayback.attempts, 0)
+
+    def test_wayback_with_only_an_empty_token_bucket_is_still_started(self):
+        wayback = _Provider(_result(RecoverySource.WAYBACK_MACHINE, RecoveryQuality.HIGH_QUALITY))
+        service = recovery_service({RecoverySource.WAYBACK_MACHINE: wayback})
 
         with patch(
             'utils.content_recovery.recovery_service.rate_limit_manager.can_proceed',
             return_value=False,
+        ), patch(
+            'utils.content_recovery.recovery_service.rate_limit_manager.in_backoff',
+            return_value=False,
         ):
-            result = service._attempt_sequential_recovery('https://example.com/image.jpg', None)
+            result = service.attempt_recovery(URL)
 
-        self.assertFalse(result.success)
-        self.assertEqual(provider.attempts, 0)
+            self.assertTrue(result.success)
+            self.assertEqual(wayback.attempts, 1)
 
     def test_parallel_timeout_returns_without_waiting_for_running_provider(self):
-        provider = _Provider(
-            _result(RecoverySource.WAYBACK_MACHINE, RecoveryQuality.HIGH_QUALITY),
-            delay=0.1,
+        release = threading.Event()
+        self.addCleanup(release.set)
+        providers = [_BlockedProvider(release), _BlockedProvider(release)]
+        service = recovery_service(
+            dict(zip((RecoverySource.WAYBACK_MACHINE, RecoverySource.ARCTIC_SHIFT), providers)),
+            timeout_seconds=0.01,
         )
-        service = self._service({RecoverySource.WAYBACK_MACHINE: provider})
-        service._parallel_timeout_seconds = 0.01
 
-        started_at = time.monotonic()
-        result = service._attempt_parallel_recovery('https://example.com/image.jpg', None)
-        duration = time.monotonic() - started_at
+        result = service.attempt_recovery(URL)
 
         self.assertFalse(result.success)
-        self.assertLess(duration, 0.05)
+        self.assertFalse(any(provider.finished.is_set() for provider in providers))
 
     def test_provider_timeout_configures_parallel_timeout(self):
-        service = ContentRecoveryService.__new__(ContentRecoveryService)
-        service.config = SimpleNamespace(
-            get_recovery_config=lambda: {
-                'timeout_seconds': 120,
-                'use_wayback_machine': False,
-                'use_arctic_shift': False,
-                'use_pushshift_api': False,
+        service = recovery_service(
+            {
+                RecoverySource.WAYBACK_MACHINE: _Provider(RecoveryResult.failure_result('missing')),
+                RecoverySource.ARCTIC_SHIFT: _Provider(RecoveryResult.failure_result('missing')),
             },
+            timeout_seconds=120,
         )
-        service._logger = SimpleNamespace(debug=lambda *_: None, warning=lambda *_: None)
 
-        service._init_providers()
+        with patch(
+            'utils.content_recovery.recovery_service.as_completed',
+            wraps=as_completed,
+        ) as completed:
+            service.attempt_recovery(URL)
 
-        self.assertEqual(service._parallel_timeout_seconds, 120)
+        self.assertEqual(completed.call_args.kwargs['timeout'], 120)
 
 
 if __name__ == '__main__':

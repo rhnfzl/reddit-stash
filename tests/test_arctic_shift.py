@@ -1,13 +1,13 @@
 """Unit tests for the Arctic Shift archive client and recovery provider."""
 
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from utils.content_recovery.arctic_shift import ArcticShiftClient
+from utils.content_recovery.recovery_metadata import ArchiveLookupError
 from utils.content_recovery.providers.arctic_shift_provider import ArcticShiftProvider
 from utils.content_recovery.recovery_metadata import RecoveryQuality, RecoverySource
-from utils.content_recovery.recovery_service import ContentRecoveryService
+from tests.recovery_helpers import recovery_service
 
 
 class _Response:
@@ -68,17 +68,13 @@ class TestArcticShiftClient(unittest.TestCase):
         self.assertEqual(session.calls[1][1]['ids'], 'b2')
         self.assertIn('title', session.calls[0][1]['fields'])
 
-    def test_invalid_archive_response_returns_no_records(self):
-        session = _Session([_Response({'unexpected': []})])
-        client = ArcticShiftClient(session=session)
+    def test_unusable_archive_payloads_are_failed_lookups(self):
+        for payload in ({'unexpected': []}, {'error': 'overloaded'}, {'data': 'x'}, [], None):
+            with self.subTest(payload=payload):
+                client = ArcticShiftClient(session=_Session([_Response(payload)]))
 
-        self.assertEqual(client.fetch_comments(['t1_comment']), {})
-
-    def test_non_object_archive_payload_returns_no_records(self):
-        session = _Session([_Response([])])
-        client = ArcticShiftClient(session=session)
-
-        self.assertEqual(client.fetch_comments(['t1_comment']), {})
+                with self.assertRaises(ArchiveLookupError):
+                    client.fetch_comments(['t1_comment'])
 
 
 class TestArcticShiftRecoveryProvider(unittest.TestCase):
@@ -132,23 +128,10 @@ class TestArcticShiftRecoveryProvider(unittest.TestCase):
 
 class TestArcticShiftRecoveryServiceIntegration(unittest.TestCase):
     def test_recovery_service_registers_arctic_shift_before_pullpush(self):
-        service = ContentRecoveryService.__new__(ContentRecoveryService)
-        service.config = SimpleNamespace(
-            get_recovery_config=lambda: {
-                'timeout_seconds': 10,
-                'use_wayback_machine': True,
-                'use_arctic_shift': True,
-                'use_pushshift_api': True,
-                'use_reddit_previews': False,
-                'use_reveddit_api': False,
-            },
-        )
-        service._logger = SimpleNamespace(debug=lambda *_: None, warning=lambda *_: None)
-
         with patch('utils.content_recovery.recovery_service.WaybackMachineProvider'), patch(
             'utils.content_recovery.recovery_service.ArcticShiftProvider',
         ), patch('utils.content_recovery.recovery_service.PullPushProvider'):
-            service._init_providers()
+            service = recovery_service(use_wayback_machine=True, use_arctic_shift=True, use_pullpush=True)
 
         self.assertEqual(
             list(service.providers),

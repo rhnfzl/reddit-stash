@@ -1,32 +1,35 @@
 import os
-import json
 import csv
 import logging
+from dataclasses import dataclass
+from typing import Any
+from collections.abc import Callable
+
+import praw
 from tqdm import tqdm
-from utils.file_operations import save_to_file
-from utils.save_utils import save_submission, save_comment_and_context
-from utils.time_utilities import dynamic_sleep
-from utils.env_config import get_ignore_tls_errors
+from utils.content_recovery import ArchiveLookupError, ArcticShiftClient
+from utils.content_recovery.providers import PullPushProvider
+from utils.content_recovery.recovery_config import load_recovery_config
+from utils.file_operations import RunStats, SaveContext, save_item
+from utils.save_utils import save_submission, save_comment_and_context, yaml_frontmatter
 from utils.path_security import create_reddit_file_path
-from utils.log_utils import log_file, is_file_logged, is_given_up, record_failure
-from utils.content_recovery.arctic_shift import ArcticShiftClient
-from utils.content_recovery.providers.pullpush_provider import PullPushProvider
+from utils.log_utils import record_saved_file, is_file_logged, is_given_up, record_failure
 
 
 logger = logging.getLogger(__name__)
 
-def get_gdpr_directory(save_directory):
+def get_gdpr_directory(save_directory: str) -> str:
     """Return the path to the GDPR data directory."""
     # This function only checks for the directory's existence and
-    # prints a message if it's missing. Creation should be handled
+    # logs a message if it's missing. Creation should be handled
     # by the caller.
     gdpr_dir = os.path.join(save_directory, 'gdpr_data')
     if not os.path.exists(gdpr_dir):
-        print(f"GDPR data directory not found at: {gdpr_dir}")
+        logger.warning(f"GDPR data directory not found at: {gdpr_dir}")
     return gdpr_dir
 
 
-def _read_csv_rows(path):
+def _read_csv_rows(path: str) -> list[dict[str, str]]:
     """Read a GDPR export CSV into a list of row dicts using the stdlib csv module.
 
     Uses utf-8-sig so a byte-order mark (which pandas stripped automatically) does not
@@ -36,112 +39,39 @@ def _read_csv_rows(path):
         return list(csv.DictReader(handle))
 
 
-def _save_csv_only_post(
-    row,
-    save_directory,
-    existing_files,
-    file_log,
-    created_dirs_cache,
-    archived_data=None,
-):
-    """Save a minimal markdown file for a GDPR post using only CSV metadata (no API)."""
-    post_id = str(row['id'])
+def _save_csv_only(row: dict[str, str], ctx: SaveContext, kind: "_GdprKind",
+                   archived_data: dict[str, Any] | None = None) -> RunStats:
+    """Save a minimal markdown file for a GDPR row using only CSV metadata (no API)."""
+    item_id = str(row['id'])
     permalink = row.get('permalink', '')
-    unique_key = f"GDPR_POST_{post_id}"
+    unique_key = f"{kind.category}_{item_id}"
 
-    # Use a generic subreddit folder since we can't determine it from CSV alone
+    # Use a generic subreddit folder when the CSV permalink does not name one
     subreddit = _extract_subreddit_from_permalink(permalink)
-    path_result = create_reddit_file_path(save_directory, subreddit, "GDPR_POST", post_id)
+    path_result = create_reddit_file_path(ctx.save_directory, subreddit, kind.category, item_id)
     if not path_result.is_safe:
-        # Raise so the caller counts it as failed; (0, 0) means "already saved".
-        raise ValueError(f"Unsafe path for GDPR post {post_id}: {path_result.issues}")
+        logger.error(f"Unsafe path for GDPR {kind.noun} {item_id}: {path_result.issues}")
+        return RunStats(failed=1)
 
     file_path = path_result.safe_path
-    already_saved = unique_key in existing_files or is_file_logged(file_log, unique_key)
-    archive_enriched = _has_archive_text(archived_data, ('title', 'selftext'))
-    if is_given_up(file_log.get(unique_key)):
-        return 0, 0  # failed MAX_ITEM_FAILURES times; no longer retried
+    already_saved = is_file_logged(ctx.file_log, unique_key)
+    archive_enriched = _has_archive_text(archived_data, kind.archive_fields)
+    if is_given_up(ctx.file_log.get(unique_key)):
+        return RunStats(skipped=1)  # failed MAX_ITEM_FAILURES times; no longer retried
     if already_saved and not (archive_enriched and _is_link_only_csv_export(file_path)):
-        return 0, 0  # skipped
-
-    # Ensure directory exists
-    dir_path = os.path.dirname(file_path)
-    if dir_path not in created_dirs_cache:
-        os.makedirs(dir_path, exist_ok=True)
-        created_dirs_cache.add(dir_path)
-
-    reddit_url = f"https://www.reddit.com{permalink}" if permalink else f"https://www.reddit.com/comments/{post_id}"
-    content = _csv_only_post_markdown(
-        post_id,
-        reddit_url,
-        archived_data if archive_enriched else None,
-    )
-    return _write_csv_only_export(
-        file_path,
-        content,
-        unique_key,
-        'GDPR_POST',
-        post_id,
-        archive_enriched,
-        existing_files,
-        file_log,
-        save_directory,
-    )
-
-
-def _save_csv_only_comment(
-    row,
-    save_directory,
-    existing_files,
-    file_log,
-    created_dirs_cache,
-    archived_data=None,
-):
-    """Save a minimal markdown file for a GDPR comment using only CSV metadata (no API)."""
-    comment_id = str(row['id'])
-    permalink = row.get('permalink', '')
-    unique_key = f"GDPR_COMMENT_{comment_id}"
-
-    subreddit = _extract_subreddit_from_permalink(permalink)
-    path_result = create_reddit_file_path(save_directory, subreddit, "GDPR_COMMENT", comment_id)
-    if not path_result.is_safe:
-        # Raise so the caller counts it as failed; (0, 0) means "already saved".
-        raise ValueError(f"Unsafe path for GDPR comment {comment_id}: {path_result.issues}")
-
-    file_path = path_result.safe_path
-    already_saved = unique_key in existing_files or is_file_logged(file_log, unique_key)
-    archive_enriched = _has_archive_text(archived_data, ('body',))
-    if is_given_up(file_log.get(unique_key)):
-        return 0, 0  # failed MAX_ITEM_FAILURES times; no longer retried
-    if already_saved and not (archive_enriched and _is_link_only_csv_export(file_path)):
-        return 0, 0  # skipped
+        return RunStats(skipped=1)
 
     dir_path = os.path.dirname(file_path)
-    if dir_path not in created_dirs_cache:
+    if dir_path not in ctx.created_dirs_cache:
         os.makedirs(dir_path, exist_ok=True)
-        created_dirs_cache.add(dir_path)
+        ctx.created_dirs_cache.add(dir_path)
 
-    reddit_url = f"https://www.reddit.com{permalink}" if permalink else f"https://www.reddit.com/comments/{comment_id}"
-    content = _csv_only_comment_markdown(
-        comment_id,
-        reddit_url,
-        archived_data if archive_enriched else None,
-    )
-
-    return _write_csv_only_export(
-        file_path,
-        content,
-        unique_key,
-        'GDPR_COMMENT',
-        comment_id,
-        archive_enriched,
-        existing_files,
-        file_log,
-        save_directory,
-    )
+    reddit_url = f"https://www.reddit.com{permalink}" if permalink else f"https://www.reddit.com/comments/{item_id}"
+    content = kind.render_csv_only(item_id, reddit_url, archived_data if archive_enriched else None)
+    return _write_csv_only_export(file_path, content, unique_key, kind.category, item_id, archive_enriched, ctx)
 
 
-def _is_link_only_csv_export(file_path):
+def _is_link_only_csv_export(file_path: str) -> bool:
     """Return whether an existing CSV-only export is missing archived content."""
     try:
         with open(file_path, encoding='utf-8') as export_file:
@@ -152,42 +82,32 @@ def _is_link_only_csv_export(file_path):
         return False
 
 
-def _write_csv_only_export(
-    file_path,
-    content,
-    unique_key,
-    content_type,
-    item_id,
-    archive_enriched,
-    existing_files,
-    file_log,
-    save_directory,
-):
+def _write_csv_only_export(file_path: str, content: str, unique_key: str, content_type: str, item_id: str,
+                           archive_enriched: bool, ctx: SaveContext) -> RunStats:
     """Write a new or archive-enriched CSV-only export and update its log entry."""
-    previous_entry = file_log.get(unique_key)
+    previous_entry = ctx.file_log.get(unique_key)
 
     try:
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)
 
         file_size = os.path.getsize(file_path)
-        log_file(file_log, unique_key,
+        record_saved_file(ctx.file_log, unique_key,
                  {
                      'file_path': file_path,
                      'type': content_type,
                      'id': item_id,
                      'archive_enriched': archive_enriched,
                  },
-                 save_directory)
+                 ctx.save_directory)
     except Exception as e:
         # Never leave a key from a failed write looking saved; retry next run.
-        record_failure(file_log, unique_key, e, previous_entry)
+        record_failure(ctx.file_log, unique_key, e, previous_entry)
         raise
-    existing_files.add(unique_key)
-    return 1, file_size
+    return RunStats(processed=1, total_size=file_size)
 
 
-def _extract_subreddit_from_permalink(permalink):
+def _extract_subreddit_from_permalink(permalink: str) -> str:
     """Extract subreddit name from a Reddit permalink, or return a fallback."""
     if permalink:
         # Permalink format: /r/SubredditName/comments/...
@@ -197,12 +117,12 @@ def _extract_subreddit_from_permalink(permalink):
     return "r_unknown"
 
 
-def _csv_only_post_markdown(post_id, reddit_url, archived_data):
+def _csv_only_post_markdown(post_id: str, reddit_url: str, archived_data: dict[str, Any] | None) -> str:
     """Render a CSV-only post export, including archive text when available."""
     archive_enriched = _has_archive_text(archived_data, ('title', 'selftext'))
     title = _archive_text(archived_data.get('title')) if archive_enriched else None
     title = title or f'GDPR Export Post: {post_id}'
-    frontmatter = _yaml_frontmatter({
+    frontmatter = yaml_frontmatter({
         'id': post_id,
         'title': title,
         'permalink': reddit_url,
@@ -230,11 +150,11 @@ def _csv_only_post_markdown(post_id, reddit_url, archived_data):
     )
 
 
-def _csv_only_comment_markdown(comment_id, reddit_url, archived_data):
+def _csv_only_comment_markdown(comment_id: str, reddit_url: str, archived_data: dict[str, Any] | None) -> str:
     """Render a CSV-only comment export, including archive text when available."""
     archive_enriched = _has_archive_text(archived_data, ('body',))
     title = f'GDPR Export Comment: {comment_id}'
-    frontmatter = _yaml_frontmatter({
+    frontmatter = yaml_frontmatter({
         'id': comment_id,
         'title': title,
         'permalink': reddit_url,
@@ -262,28 +182,19 @@ def _csv_only_comment_markdown(comment_id, reddit_url, archived_data):
     )
 
 
-def _archive_text(value):
+def _archive_text(value: Any) -> str | None:
     """Return non-empty archive text without turning missing values into strings."""
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _has_archive_text(archived_data, fields):
+def _has_archive_text(archived_data: Any, fields: tuple) -> bool:
     """Return whether archive data contains content worth exporting."""
     return isinstance(archived_data, dict) and any(
         _archive_text(archived_data.get(field)) for field in fields
     )
 
 
-def _yaml_frontmatter(fields):
-    """Render a YAML header with JSON-encoded scalar values."""
-    lines = ['---']
-    for key, value in fields.items():
-        lines.append(f'{key}: {json.dumps(value, ensure_ascii=False)}')
-    lines.extend(['---', ''])
-    return '\n'.join(lines) + '\n'
-
-
-def _archive_id(item_id):
+def _archive_id(item_id: Any) -> str:
     """Normalize a Reddit fullname to the base36 ID used in archive responses."""
     if item_id is None or str(item_id).strip() == '':
         return ''
@@ -291,46 +202,45 @@ def _archive_id(item_id):
     return normalized_id[3:] if normalized_id.startswith(('t1_', 't3_')) else normalized_id
 
 
-def _fetch_from_archive(ids, content_type, archive_client, archive_fallback=None):
+def _lookup_archive(client: Any, content_type: str, ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Ask one archive for a batch, keeping whatever it found before any failure."""
+    fetch = client.fetch_posts if content_type == 'posts' else client.fetch_comments
+    try:
+        records = fetch(ids)
+    except ArchiveLookupError as error:
+        logger.warning(f'Archive lookup incomplete for GDPR {content_type}: {error}')
+        records = error.records
+    except Exception as error:
+        logger.warning(f'Archive lookup failed for GDPR {content_type}: {error}')
+        return {}
+    if not isinstance(records, dict):
+        return {}
+    return {
+        _archive_id(item_id): record
+        for item_id, record in records.items()
+        if isinstance(record, dict)
+    }
+
+
+def _fetch_from_archive(ids: list[str], content_type: str, archive_client: ArcticShiftClient | None,
+                        archive_fallback: PullPushProvider | None = None) -> dict[str, dict[str, Any]]:
     """Fetch a batch from Arctic Shift, then enrich missing records from PullPush."""
     normalized_ids = list(dict.fromkeys(
         normalized_id
         for item_id in ids
         if (normalized_id := _archive_id(item_id))
     ))
-    fetch_method = archive_client.fetch_posts if content_type == 'posts' else archive_client.fetch_comments
 
-    try:
-        records = fetch_method(normalized_ids)
-    except Exception as error:
-        logger.warning(f'Archive lookup failed for GDPR {content_type}: {error}')
-        records = {}
-
-    records = records if isinstance(records, dict) else {}
-    normalized_records = {
-        _archive_id(item_id): record
-        for item_id, record in records.items()
-        if isinstance(record, dict)
-    }
-    missing_ids = [item_id for item_id in normalized_ids if item_id not in normalized_records]
+    records = _lookup_archive(archive_client, content_type, normalized_ids) if archive_client else {}
+    missing_ids = [item_id for item_id in normalized_ids if item_id not in records]
 
     if archive_fallback and missing_ids:
-        try:
-            fallback_records = archive_fallback.fetch_metadata_by_ids(content_type, missing_ids)
-        except Exception as error:
-            logger.warning(f'PullPush fallback failed for GDPR {content_type}: {error}')
-            fallback_records = {}
-        fallback_records = fallback_records if isinstance(fallback_records, dict) else {}
-        normalized_records.update({
-            _archive_id(item_id): record
-            for item_id, record in fallback_records.items()
-            if isinstance(record, dict)
-        })
+        records.update(_lookup_archive(archive_fallback, content_type, missing_ids))
 
-    return normalized_records
+    return records
 
 
-def _fetch_reddit_items(reddit, item_ids, fullname_prefix):
+def _fetch_reddit_items(reddit: praw.Reddit, item_ids: list[str], fullname_prefix: str) -> dict[str, Any]:
     """Fetch GDPR items in Reddit's 100-item fullnames batches."""
     items = {}
     normalized_ids = [_archive_id(item_id) for item_id in item_ids]
@@ -344,172 +254,82 @@ def _fetch_reddit_items(reddit, item_ids, fullname_prefix):
     return items
 
 
-def process_gdpr_export(
-    reddit,
-    save_directory,
-    existing_files,
-    created_dirs_cache,
-    file_log,
-    archive_client=None,
-    archive_fallback=None,
-):
-    """Process saved posts/comments from GDPR export CSVs.
+@dataclass(frozen=True)
+class _GdprKind:
+    """What differs between the saved-posts and saved-comments exports."""
+    noun: str
+    fullname_prefix: str
+    category: str
+    archive_fields: tuple
+    render_csv_only: Callable
+    save_function: Callable
+    reddit_accessor: str
 
-    When reddit is None (no API credentials), saves minimal markdown files
-    using only CSV metadata (post IDs and permalinks).
-    """
-    processed_count = 0
-    skipped_count = 0
-    failed_count = 0
-    total_size = 0
 
-    csv_only_mode = reddit is None
-    if csv_only_mode:
-        print("Running in CSV-only mode (no API credentials). "
-              "Fetching archived post and comment text when it is available.")
-        if archive_client is None:
-            archive_client = ArcticShiftClient()
-            archive_fallback = archive_fallback or PullPushProvider()
+_POSTS = _GdprKind('post', 't3', 'GDPR_POST', ('title', 'selftext'),
+                   _csv_only_post_markdown, save_submission, 'submission')
+_COMMENTS = _GdprKind('comment', 't1', 'GDPR_COMMENT', ('body',),
+                      _csv_only_comment_markdown, save_comment_and_context, 'comment')
+
+
+def _process_gdpr_rows(kind: _GdprKind, gdpr_dir: str, reddit: praw.Reddit | None, ctx: SaveContext,
+                       archive_client: ArcticShiftClient | None,
+                       archive_fallback: PullPushProvider | None) -> RunStats:
+    """Process one export CSV, through the archive when reddit is None, else the API."""
+    export_path = os.path.join(gdpr_dir, f'saved_{kind.noun}s.csv')
+    if not os.path.exists(export_path):
+        return RunStats()
+
+    logger.info(f"Processing saved {kind.noun}s from GDPR export...")
+    rows = _read_csv_rows(export_path)
+    ids = [row.get('id', '') for row in rows]
+
+    if reddit is None:
+        archived = _fetch_from_archive(ids, f'{kind.noun}s', archive_client, archive_fallback)
+
+        def save_row(row: dict[str, str]) -> RunStats:
+            return _save_csv_only(row, ctx, kind, archived.get(_archive_id(row['id'])))
     else:
-        # Load the ignore_tls_errors setting only when API is available
-        ignore_tls_errors = get_ignore_tls_errors()
+        fetched = _fetch_reddit_items(reddit, ids, kind.fullname_prefix)
 
-    gdpr_dir = get_gdpr_directory(save_directory)
+        def save_row(row: dict[str, str]) -> RunStats:
+            item_id = _archive_id(row['id'])
+            item = fetched.get(item_id) or getattr(reddit, kind.reddit_accessor)(id=item_id)
+            # Logged under POST, not the GDPR category: existing file_log keys depend on it.
+            return save_item(item, kind.save_function, ctx, kind.category, 'POST')
 
-    # Process saved posts
-    posts_file = os.path.join(gdpr_dir, 'saved_posts.csv')
-    if os.path.exists(posts_file):
-        print("\nProcessing saved posts from GDPR export...")
-        rows = _read_csv_rows(posts_file)
-        ids = [row.get('id', '') for row in rows]
-        archived_posts = (
-            _fetch_from_archive(ids, 'posts', archive_client, archive_fallback)
-            if csv_only_mode else {}
-        )
-        reddit_posts = _fetch_reddit_items(reddit, ids, 't3') if not csv_only_mode else {}
+    stats = RunStats()
+    for row in tqdm(rows, total=len(rows), desc=f"Processing GDPR {kind.noun.capitalize()}s"):
+        try:
+            stats += save_row(row)
+        except Exception as e:
+            logger.error(f"Error processing GDPR {kind.noun} {row.get('id')}: {e}")
+            stats += RunStats(failed=1)
+    return stats
 
-        for row in tqdm(rows, total=len(rows), desc="Processing GDPR Posts"):
+
+def process_gdpr_export(reddit: praw.Reddit | None, ctx: SaveContext,
+                        archive_client: ArcticShiftClient | None = None,
+                        archive_fallback: PullPushProvider | None = None) -> RunStats:
+    """Process saved posts/comments from GDPR export CSVs and return RunStats.
+
+    When reddit is None (no API credentials), saves minimal markdown files using
+    CSV metadata, plus archive text from the [Recovery] providers that are enabled.
+    """
+    if reddit is None:
+        logger.info("Running in CSV-only mode (no API credentials). "
+                    "Fetching archived post and comment text when it is available.")
+        if archive_client is None or archive_fallback is None:
             try:
-                if csv_only_mode:
-                    count, size = _save_csv_only_post(
-                        row,
-                        save_directory,
-                        existing_files,
-                        file_log,
-                        created_dirs_cache,
-                        archived_posts.get(_archive_id(row['id'])),
-                    )
-                    if count == 0:
-                        skipped_count += 1
-                    else:
-                        processed_count += count
-                        total_size += size
-                else:
-                    item_id = _archive_id(row['id'])
-                    submission = reddit_posts.get(item_id) or reddit.submission(id=item_id)
-                    # Use secure path creation to prevent directory traversal
-                    path_result = create_reddit_file_path(
-                        save_directory, submission.subreddit.display_name, "GDPR_POST", submission.id
-                    )
-                    if not path_result.is_safe:
-                        logger.error(f"Unsafe path for GDPR submission {submission.id}: {path_result.issues}")
-                        failed_count += 1
-                        continue
+                recovery = load_recovery_config()
+            except ValueError as e:
+                raise ValueError(f"Invalid value in the [Recovery] section of settings.ini: {e}") from e
+            timeout = recovery.timeout_seconds
+            if recovery.use_arctic_shift and archive_client is None:
+                archive_client = ArcticShiftClient(timeout=timeout)
+            if recovery.use_pullpush and archive_fallback is None:
+                archive_fallback = PullPushProvider(timeout)
 
-                    file_path = path_result.safe_path
-
-                    # Use existing save_to_file function
-                    already_saved, _ = save_to_file(
-                        submission,
-                        file_path,
-                        save_submission,
-                        existing_files,
-                        file_log,
-                        save_directory,
-                        created_dirs_cache,
-                        ignore_tls_errors=ignore_tls_errors,
-                    )
-                    if already_saved is None:
-                        failed_count += 1
-                        continue
-                    if already_saved:
-                        skipped_count += 1
-                        continue
-
-                    processed_count += 1
-                    total_size += os.path.getsize(file_path)
-                    dynamic_sleep(len(submission.selftext) if submission.is_self else 0)
-
-            except Exception as e:
-                print(f"Error processing GDPR post {row['id']}: {e}")
-                failed_count += 1
-
-    # Process saved comments
-    comments_file = os.path.join(gdpr_dir, 'saved_comments.csv')
-    if os.path.exists(comments_file):
-        print("\nProcessing saved comments from GDPR export...")
-        rows = _read_csv_rows(comments_file)
-        ids = [row.get('id', '') for row in rows]
-        archived_comments = (
-            _fetch_from_archive(ids, 'comments', archive_client, archive_fallback)
-            if csv_only_mode else {}
-        )
-        reddit_comments = _fetch_reddit_items(reddit, ids, 't1') if not csv_only_mode else {}
-
-        for row in tqdm(rows, total=len(rows), desc="Processing GDPR Comments"):
-            try:
-                if csv_only_mode:
-                    count, size = _save_csv_only_comment(
-                        row,
-                        save_directory,
-                        existing_files,
-                        file_log,
-                        created_dirs_cache,
-                        archived_comments.get(_archive_id(row['id'])),
-                    )
-                    if count == 0:
-                        skipped_count += 1
-                    else:
-                        processed_count += count
-                        total_size += size
-                else:
-                    item_id = _archive_id(row['id'])
-                    comment = reddit_comments.get(item_id) or reddit.comment(id=item_id)
-                    # Use secure path creation to prevent directory traversal
-                    path_result = create_reddit_file_path(
-                        save_directory, comment.subreddit.display_name, "GDPR_COMMENT", comment.id
-                    )
-                    if not path_result.is_safe:
-                        logger.error(f"Unsafe path for GDPR comment {comment.id}: {path_result.issues}")
-                        failed_count += 1
-                        continue
-
-                    file_path = path_result.safe_path
-
-                    # Use existing save_to_file function
-                    already_saved, _ = save_to_file(
-                        comment,
-                        file_path,
-                        save_comment_and_context,
-                        existing_files,
-                        file_log,
-                        save_directory,
-                        created_dirs_cache,
-                        ignore_tls_errors=ignore_tls_errors,
-                    )
-                    if already_saved is None:
-                        failed_count += 1
-                        continue
-                    if already_saved:
-                        skipped_count += 1
-                        continue
-
-                    processed_count += 1
-                    total_size += os.path.getsize(file_path)
-                    dynamic_sleep(len(comment.body))
-
-            except Exception as e:
-                print(f"Error processing GDPR comment {row['id']}: {e}")
-                failed_count += 1
-
-    return processed_count, skipped_count, total_size, failed_count
+    gdpr_dir = get_gdpr_directory(ctx.save_directory)
+    return (_process_gdpr_rows(_POSTS, gdpr_dir, reddit, ctx, archive_client, archive_fallback)
+            + _process_gdpr_rows(_COMMENTS, gdpr_dir, reddit, ctx, archive_client, archive_fallback))
