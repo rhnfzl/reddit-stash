@@ -9,10 +9,12 @@ import ipaddress
 import logging
 import socket
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from urllib.parse import urlparse, urlunparse
 from dataclasses import dataclass, field
-from utils.constants import MAX_URL_LENGTH, MIN_URL_LENGTH, URL_VALIDATION_TIMEOUT
+from utils.constants import DNS_CACHE_SECONDS, MAX_URL_LENGTH, MIN_URL_LENGTH, URL_VALIDATION_TIMEOUT
 
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,28 @@ class URLSecurityValidator:
         re.compile(r'\.\./', re.IGNORECASE), # Directory traversal
         re.compile(r'%2e%2e%2f', re.IGNORECASE),  # URL-encoded traversal
     ]
+
+    def __init__(self) -> None:
+        self._dns_answers: dict[str, tuple[float, list]] = {}
+        self._dns_host_locks: dict[str, threading.Lock] = {}
+        self._dns_locks_guard = threading.Lock()
+
+    def _lookup(self, hostname: str) -> list:
+        """Resolve a host, sharing one lookup between callers.
+
+        A gallery checks each image several times from parallel workers, which is enough
+        lookups to trip a resolver's rate limit. Every caller still checks the addresses,
+        and downloads are pinned to them. Failed lookups are not remembered.
+        """
+        with self._dns_locks_guard:
+            host_lock = self._dns_host_locks.setdefault(hostname, threading.Lock())
+        with host_lock:
+            answer = self._dns_answers.get(hostname)
+            if answer and answer[0] > time.monotonic():
+                return answer[1]
+            results = _resolve_hostname(hostname)
+            self._dns_answers[hostname] = (time.monotonic() + DNS_CACHE_SECONDS, results)
+            return results
 
     def validate_url(self, url: str) -> ValidationResult:
         """
@@ -185,7 +209,7 @@ class URLSecurityValidator:
             return issues, "medium"
 
         try:
-            addresses = {result[4][0] for result in _resolve_hostname(hostname)}
+            addresses = {result[4][0] for result in self._lookup(hostname)}
         except OSError as error:
             issues.append(f"Could not resolve domain '{hostname}': {error}")
             return issues, _UNRESOLVED_RISK
@@ -229,7 +253,7 @@ class URLSecurityValidator:
             return (str(address),) if address.is_global else ()
 
         try:
-            addresses = {result[4][0] for result in _resolve_hostname(hostname)}
+            addresses = {result[4][0] for result in self._lookup(hostname)}
         except OSError:
             return ()
 

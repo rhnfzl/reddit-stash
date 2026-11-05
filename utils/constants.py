@@ -94,6 +94,7 @@ CHROME_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit
 MAX_URL_LENGTH = 2048
 MIN_URL_LENGTH = 10
 URL_VALIDATION_TIMEOUT = 5.0  # Timeout for URL validation checks
+DNS_CACHE_SECONDS = 60  # How long a successful DNS answer is reused by URL validation
 
 # Processing Pipeline
 DYNAMIC_SLEEP_BASE_SECONDS = 0.005  # Courtesy delay between items (PRAW handles API rate limiting)
