@@ -56,7 +56,7 @@ class TestDnsLookupCache(unittest.TestCase):
     def test_lookup_runs_again_after_the_entry_expires(self):
         validator = URLSecurityValidator()
         with patch(LOOKUP, side_effect=[PUBLIC, PRIVATE]), \
-                patch('utils.media_services.url_security.time.monotonic', side_effect=[0.0, 0.0, 1000.0, 1000.0]):
+                patch('utils.media_services.url_security.DNS_CACHE_SECONDS', -1):
             self.assertTrue(validator.is_safe_for_download(URL))
             self.assertFalse(validator.is_safe_for_download(URL))
 
