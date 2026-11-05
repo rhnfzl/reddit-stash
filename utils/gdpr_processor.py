@@ -256,7 +256,7 @@ def _fetch_reddit_items(reddit: praw.Reddit, item_ids: list[str], fullname_prefi
 
 @dataclass(frozen=True)
 class _GdprKind:
-    """What differs between the saved-posts and saved-comments exports."""
+    """What differs between the export CSVs this module reads."""
     noun: str
     fullname_prefix: str
     category: str
@@ -264,24 +264,34 @@ class _GdprKind:
     render_csv_only: Callable
     save_function: Callable
     reddit_accessor: str
+    csv_name: str
+    log_category: str = 'POST'  # API mode key; saved items keep POST, existing file_log keys depend on it
+    upvotes_only: bool = False
 
 
 _POSTS = _GdprKind('post', 't3', 'GDPR_POST', ('title', 'selftext'),
-                   _csv_only_post_markdown, save_submission, 'submission')
+                   _csv_only_post_markdown, save_submission, 'submission', 'saved_posts.csv')
 _COMMENTS = _GdprKind('comment', 't1', 'GDPR_COMMENT', ('body',),
-                      _csv_only_comment_markdown, save_comment_and_context, 'comment')
+                      _csv_only_comment_markdown, save_comment_and_context, 'comment', 'saved_comments.csv')
+# Reddit's upvoted listing returns posts only, so the export is the one source of upvoted comments.
+# Same file names and keys as the API upvoted path would use.
+_UPVOTED_COMMENTS = _GdprKind('comment', 't1', 'UPVOTE_COMMENT', ('body',),
+                              _csv_only_comment_markdown, save_comment_and_context, 'comment',
+                              'comment_votes.csv', log_category='UPVOTE_COMMENT', upvotes_only=True)
 
 
 def _process_gdpr_rows(kind: _GdprKind, gdpr_dir: str, reddit: praw.Reddit | None, ctx: SaveContext,
                        archive_client: ArcticShiftClient | None,
                        archive_fallback: PullPushProvider | None) -> RunStats:
     """Process one export CSV, through the archive when reddit is None, else the API."""
-    export_path = os.path.join(gdpr_dir, f'saved_{kind.noun}s.csv')
+    export_path = os.path.join(gdpr_dir, kind.csv_name)
     if not os.path.exists(export_path):
         return RunStats()
 
-    logger.info(f"Processing saved {kind.noun}s from GDPR export...")
+    logger.info(f"Processing {kind.csv_name} from GDPR export...")
     rows = _read_csv_rows(export_path)
+    if kind.upvotes_only:
+        rows = [row for row in rows if row.get('direction') == 'up']
     ids = [row.get('id', '') for row in rows]
 
     if reddit is None:
@@ -295,11 +305,10 @@ def _process_gdpr_rows(kind: _GdprKind, gdpr_dir: str, reddit: praw.Reddit | Non
         def save_row(row: dict[str, str]) -> RunStats:
             item_id = _archive_id(row['id'])
             item = fetched.get(item_id) or getattr(reddit, kind.reddit_accessor)(id=item_id)
-            # Logged under POST, not the GDPR category: existing file_log keys depend on it.
-            return save_item(item, kind.save_function, ctx, kind.category, 'POST')
+            return save_item(item, kind.save_function, ctx, kind.category, kind.log_category)
 
     stats = RunStats()
-    for row in tqdm(rows, total=len(rows), desc=f"Processing GDPR {kind.noun.capitalize()}s"):
+    for row in tqdm(rows, total=len(rows), desc=f"GDPR {kind.csv_name}"):
         try:
             stats += save_row(row)
         except Exception as e:
@@ -311,7 +320,7 @@ def _process_gdpr_rows(kind: _GdprKind, gdpr_dir: str, reddit: praw.Reddit | Non
 def process_gdpr_export(reddit: praw.Reddit | None, ctx: SaveContext,
                         archive_client: ArcticShiftClient | None = None,
                         archive_fallback: PullPushProvider | None = None) -> RunStats:
-    """Process saved posts/comments from GDPR export CSVs and return RunStats.
+    """Process saved posts/comments and upvoted comments from GDPR export CSVs and return RunStats.
 
     When reddit is None (no API credentials), saves minimal markdown files using
     CSV metadata, plus archive text from the [Recovery] providers that are enabled.
@@ -332,4 +341,5 @@ def process_gdpr_export(reddit: praw.Reddit | None, ctx: SaveContext,
 
     gdpr_dir = get_gdpr_directory(ctx.save_directory)
     return (_process_gdpr_rows(_POSTS, gdpr_dir, reddit, ctx, archive_client, archive_fallback)
-            + _process_gdpr_rows(_COMMENTS, gdpr_dir, reddit, ctx, archive_client, archive_fallback))
+            + _process_gdpr_rows(_COMMENTS, gdpr_dir, reddit, ctx, archive_client, archive_fallback)
+            + _process_gdpr_rows(_UPVOTED_COMMENTS, gdpr_dir, reddit, ctx, archive_client, archive_fallback))

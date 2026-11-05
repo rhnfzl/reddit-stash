@@ -1250,7 +1250,7 @@ process_api = true                     # Use Reddit API for content
     | **`ALL`** | Everything: your posts, comments, saved items, upvoted posts | `POST_`, `COMMENT_`, `SAVED_POST_`, `SAVED_COMMENT_`, `UPVOTE_POST_` | Complete Reddit archive |
     | **`SAVED`** | Only items you saved | `SAVED_POST_`, `SAVED_COMMENT_` | Personal knowledge base |
     | **`ACTIVITY`** | Only your posts & comments | `POST_`, `COMMENT_` | Your Reddit contributions |
-    | **`UPVOTED`** | Only upvoted posts. Reddit's upvoted listing does not return comments, so save a comment to back it up | `UPVOTE_POST_` | Track interests |
+    | **`UPVOTED`** | Only upvoted posts. Reddit's upvoted listing does not return comments; save a comment to back it up, or import `comment_votes.csv` from a GDPR export | `UPVOTE_POST_` | Track interests |
     
   - **Performance Comparison** (approximate, 1000 items each):
     ```
@@ -1354,7 +1354,7 @@ process_api = true                     # Use Reddit API for content
   - **Purpose**: Access complete Reddit history including items beyond 1000-item API limits
   - **Requirements**:
     - GDPR export CSV files in `{save_directory}/gdpr_data/`
-    - Expected files: `saved_posts.csv`, `saved_comments.csv`
+    - Expected files: `saved_posts.csv`, `saved_comments.csv`, and optionally `comment_votes.csv` (its upvoted comments are saved as `UPVOTE_COMMENT_` files)
   - **How It Works**:
     1. Reads post/comment IDs from CSV files
     2. Fetches full content via Reddit API when credentials are available
