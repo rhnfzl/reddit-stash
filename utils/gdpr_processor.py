@@ -1,6 +1,7 @@
 import os
 import csv
 import logging
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Any
 from collections.abc import Callable
@@ -43,7 +44,8 @@ def _save_csv_only(row: dict[str, str], ctx: SaveContext, kind: "_GdprKind",
                    archived_data: dict[str, Any] | None = None) -> RunStats:
     """Save a minimal markdown file for a GDPR row using only CSV metadata (no API)."""
     item_id = str(row['id'])
-    permalink = row.get('permalink', '')
+    # Exports have used both '/r/...' paths and full 'https://www.reddit.com/r/...' URLs.
+    permalink = urlparse(row.get('permalink', '')).path
     unique_key = f"{kind.category}_{item_id}"
 
     # Use a generic subreddit folder when the CSV permalink does not name one

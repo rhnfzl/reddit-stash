@@ -156,6 +156,18 @@ class TestGdprExportProcessing(unittest.TestCase):
         self.assertEqual(set(file_log), {'up1-test-Mock-UPVOTE_COMMENT'})
         self.assertTrue((Path(self.save_directory) / 'test' / 'UPVOTE_COMMENT_up1.md').exists())
 
+    def test_csv_only_mode_reads_full_url_permalinks(self):
+        with (self.gdpr_directory / 'saved_posts.csv').open('w', newline='', encoding='utf-8') as export_file:
+            writer = csv.DictWriter(export_file, fieldnames=['id', 'permalink'])
+            writer.writeheader()
+            writer.writerow({'id': 'abc', 'permalink': 'https://www.reddit.com/r/Python/comments/abc/title/'})
+        config = RecoveryConfig(timeout_seconds=7, use_arctic_shift=False, use_pullpush=False)
+        with patch('utils.gdpr_processor.load_recovery_config', return_value=config):
+            self._process(None)
+
+        export = Path(self.save_directory) / 'r_Python' / 'GDPR_POST_abc.md'
+        self.assertIn('[https://www.reddit.com/r/Python/comments/abc/title/]', export.read_text(encoding='utf-8'))
+
     def test_csv_only_mode_saves_only_upvoted_comments(self):
         self._write_votes([('up1', 'up'), ('down1', 'down')])
         config = RecoveryConfig(timeout_seconds=7, use_arctic_shift=False, use_pullpush=False)
