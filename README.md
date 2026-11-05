@@ -10,7 +10,7 @@
 
 > **Reddit API Policy Change (November 2025):** Reddit now requires pre-approval to create new API apps. **If you already have API credentials, they still work normally.** New users must apply at [Reddit's API Request Form](https://support.reddithelp.com/hc/en-us/requests/new?ticket_form_id=14868593862164) (expect 2-4 weeks for approval). Alternatively, you can use the [GDPR Export Mode](#gdpr-only-mode-no-api-credentials-needed) to create an index of your saved content without any API credentials. See [Getting API Credentials](#getting-api-credentials) for full details.
 
-**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved/ posted/ upvoted** posts and comments to Dropbox, AWS S3, or your local machine. Utilizing GitHub Actions, this script runs every 3 hours during peak hours and twice during off-peak hours, automating the process of archiving your Reddit data after a simple setup.
+**Reddit Stash** is a Python script designed to help you effortlessly back up your Reddit **saved and posted** posts and comments, plus your **upvoted** posts, to Dropbox, AWS S3, or your local machine. Utilizing GitHub Actions, this script runs every 3 hours during peak hours and twice during off-peak hours, automating the process of archiving your Reddit data after a simple setup.
 
 > **Looking for search & AI chat?** Check out [reddit-stash-insights](https://github.com/rhnfzl/reddit-stash-insights) — a companion tool that adds semantic search and RAG chat to your Reddit archive.
 
@@ -27,7 +27,6 @@ reddit/
 │   └── SAVED_COMMENT_def012.md   # Comments you saved
 ├── r_ProgrammerHumor/
 │   ├── UPVOTE_POST_ghi345.md     # Posts you upvoted
-│   ├── UPVOTE_COMMENT_mno901.md  # Comments you upvoted
 │   └── GDPR_POST_jkl678.md       # From GDPR export (if enabled)
 ├── gdpr_data/                    # GDPR CSV files (if processing enabled)
 │   ├── saved_posts.csv
@@ -1248,10 +1247,10 @@ process_api = true                     # Use Reddit API for content
     
     | Value | What It Downloads | File Prefixes | Use Case |
     |-------|------------------|---------------|----------|
-    | **`ALL`** | Everything: your posts, comments, saved items, upvoted items | `POST_`, `COMMENT_`, `SAVED_POST_`, `SAVED_COMMENT_`, `UPVOTE_POST_`, `UPVOTE_COMMENT_` | Complete Reddit archive |
+    | **`ALL`** | Everything: your posts, comments, saved items, upvoted posts | `POST_`, `COMMENT_`, `SAVED_POST_`, `SAVED_COMMENT_`, `UPVOTE_POST_` | Complete Reddit archive |
     | **`SAVED`** | Only items you saved | `SAVED_POST_`, `SAVED_COMMENT_` | Personal knowledge base |
     | **`ACTIVITY`** | Only your posts & comments | `POST_`, `COMMENT_` | Your Reddit contributions |
-    | **`UPVOTED`** | Only upvoted items | `UPVOTE_POST_`, `UPVOTE_COMMENT_` | Track interests |
+    | **`UPVOTED`** | Only upvoted posts. Reddit's upvoted listing does not return comments, so save a comment to back it up | `UPVOTE_POST_` | Track interests |
     
   - **Performance Comparison** (approximate, 1000 items each):
     ```
@@ -3139,7 +3138,6 @@ Reddit Stash organizes content by subreddit with a clear file naming convention:
 - **Saved Posts**: `SAVED_POST_[post_id].md`
 - **Saved Comments**: `SAVED_COMMENT_[comment_id].md`
 - **Upvoted Posts**: `UPVOTE_POST_[post_id].md`
-- **Upvoted Comments**: `UPVOTE_COMMENT_[comment_id].md`
 - **GDPR Posts**: `GDPR_POST_[post_id].md`
 - **GDPR Comments**: `GDPR_COMMENT_[comment_id].md`
 
