@@ -8,6 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from praw.exceptions import ClientException
+
+from utils.constants import MAX_ITEM_FAILURES
 from utils.content_recovery.recovery_config import RecoveryConfig
 from utils.file_operations import RunStats, SaveContext, SaveStatus
 from utils.gdpr_processor import _COMMENTS, _POSTS, _UPVOTED_COMMENTS, process_gdpr_export
@@ -167,6 +170,36 @@ class TestGdprExportProcessing(unittest.TestCase):
 
         export = Path(self.save_directory) / 'r_Python' / 'GDPR_POST_abc.md'
         self.assertIn('[https://www.reddit.com/r/Python/comments/abc/title/]', export.read_text(encoding='utf-8'))
+
+    def _run_gone_comment(self, file_log, archive_records):
+        self._write_votes([('gone1', 'up')])
+        reddit = Mock()
+        reddit.info.return_value = []
+        gone = Mock()
+        type(gone).body = property(lambda _self: (_ for _ in ()).throw(ClientException('No data returned')))
+        reddit.comment.return_value = gone
+        archive = Mock()
+        archive.fetch_comments.return_value = archive_records
+        return process_gdpr_export(reddit, SaveContext(self.save_directory, set(), file_log, set()),
+                                   archive_client=archive, archive_fallback=Mock(fetch_comments=Mock(return_value={})))
+
+    def test_comment_gone_from_reddit_is_saved_from_the_archive_once(self):
+        file_log = {}
+        stats = self._run_gone_comment(file_log, {'gone1': {'id': 'gone1', 'body': 'archived text'}})
+
+        self.assertEqual((stats.processed, stats.failed), (1, 0))
+        export = Path(self.save_directory) / 'r_test' / 'UPVOTE_COMMENT_gone1.md'
+        self.assertIn('archived text', export.read_text(encoding='utf-8'))
+        again = self._run_gone_comment(file_log, {'gone1': {'id': 'gone1', 'body': 'archived text'}})
+        self.assertEqual((again.skipped, again.processed), (1, 0))
+
+    def test_comment_gone_everywhere_stops_after_the_failure_limit(self):
+        file_log = {}
+        results = [self._run_gone_comment(file_log, {}) for _ in range(MAX_ITEM_FAILURES + 1)]
+
+        self.assertEqual([r.failed for r in results], [1] * MAX_ITEM_FAILURES + [0])
+        self.assertEqual(results[-1].skipped, 1)
+        self.assertEqual(file_log['UPVOTE_COMMENT_gone1']['attempts'], MAX_ITEM_FAILURES)
 
     def test_csv_only_mode_saves_only_upvoted_comments(self):
         self._write_votes([('up1', 'up'), ('down1', 'down')])
