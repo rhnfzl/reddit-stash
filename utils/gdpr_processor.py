@@ -7,6 +7,8 @@ from typing import Any
 from collections.abc import Callable
 
 import praw
+import prawcore
+from praw.exceptions import ClientException
 from tqdm import tqdm
 from utils.content_recovery import ArchiveLookupError, ArcticShiftClient
 from utils.content_recovery.providers import PullPushProvider
@@ -256,6 +258,37 @@ def _fetch_reddit_items(reddit: praw.Reddit, item_ids: list[str], fullname_prefi
     return items
 
 
+def _load_from_reddit(reddit: praw.Reddit, kind: "_GdprKind", item_id: str) -> Any | None:
+    """Load one item Reddit's batch lookup left out; None when Reddit no longer has it."""
+    item = getattr(reddit, kind.reddit_accessor)(id=item_id)
+    try:
+        getattr(item, kind.archive_fields[0])  # forces PRAW's lazy fetch
+    except (ClientException, prawcore.exceptions.NotFound) as error:
+        logger.info(f"GDPR {kind.noun} {item_id} is gone from Reddit ({error}); trying the archives")
+        return None
+    return item
+
+
+def _save_from_archive(row: dict[str, str], ctx: SaveContext, kind: "_GdprKind",
+                       archive_client: ArcticShiftClient | None,
+                       archive_fallback: PullPushProvider | None) -> RunStats:
+    """Save an item Reddit no longer returns from the public archives.
+
+    Found: saved once and never fetched again. Not found: counted as a failure, so it
+    stops after MAX_ITEM_FAILURES imports instead of being tried forever.
+    """
+    item_id = _archive_id(row['id'])
+    unique_key = f"{kind.category}_{item_id}"
+    entry = ctx.file_log.get(unique_key)
+    if is_given_up(entry) or is_file_logged(ctx.file_log, unique_key):
+        return RunStats(skipped=1)
+    archived = _fetch_from_archive([item_id], f'{kind.noun}s', archive_client, archive_fallback).get(item_id)
+    if _has_archive_text(archived, kind.archive_fields):
+        return _save_csv_only(row, ctx, kind, archived)
+    record_failure(ctx.file_log, unique_key, 'Not on Reddit and not in the public archives', entry)
+    return RunStats(failed=1)
+
+
 @dataclass(frozen=True)
 class _GdprKind:
     """What differs between the export CSVs this module reads."""
@@ -306,7 +339,9 @@ def _process_gdpr_rows(kind: _GdprKind, gdpr_dir: str, reddit: praw.Reddit | Non
 
         def save_row(row: dict[str, str]) -> RunStats:
             item_id = _archive_id(row['id'])
-            item = fetched.get(item_id) or getattr(reddit, kind.reddit_accessor)(id=item_id)
+            item = fetched.get(item_id) or _load_from_reddit(reddit, kind, item_id)
+            if item is None:
+                return _save_from_archive(row, ctx, kind, archive_client, archive_fallback)
             return save_item(item, kind.save_function, ctx, kind.category, kind.log_category)
 
     stats = RunStats()
@@ -330,16 +365,17 @@ def process_gdpr_export(reddit: praw.Reddit | None, ctx: SaveContext,
     if reddit is None:
         logger.info("Running in CSV-only mode (no API credentials). "
                     "Fetching archived post and comment text when it is available.")
-        if archive_client is None or archive_fallback is None:
-            try:
-                recovery = load_recovery_config()
-            except ValueError as e:
-                raise ValueError(f"Invalid value in the [Recovery] section of settings.ini: {e}") from e
-            timeout = recovery.timeout_seconds
-            if recovery.use_arctic_shift and archive_client is None:
-                archive_client = ArcticShiftClient(timeout=timeout)
-            if recovery.use_pullpush and archive_fallback is None:
-                archive_fallback = PullPushProvider(timeout)
+    # API mode needs the archives too, for items Reddit no longer returns.
+    if archive_client is None or archive_fallback is None:
+        try:
+            recovery = load_recovery_config()
+        except ValueError as e:
+            raise ValueError(f"Invalid value in the [Recovery] section of settings.ini: {e}") from e
+        timeout = recovery.timeout_seconds
+        if recovery.use_arctic_shift and archive_client is None:
+            archive_client = ArcticShiftClient(timeout=timeout)
+        if recovery.use_pullpush and archive_fallback is None:
+            archive_fallback = PullPushProvider(timeout)
 
     gdpr_dir = get_gdpr_directory(ctx.save_directory)
     return (_process_gdpr_rows(_POSTS, gdpr_dir, reddit, ctx, archive_client, archive_fallback)
