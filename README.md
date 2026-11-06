@@ -1359,13 +1359,14 @@ process_api = true                     # Use Reddit API for content
     1. Reads post/comment IDs from CSV files
     2. Fetches full content via Reddit API when credentials are available
     3. In CSV-only mode, batches IDs through Arctic Shift and uses PullPush for archive records Arctic Shift does not return
-    4. Saves with `GDPR_POST_` or `GDPR_COMMENT_` prefix
-    5. Respects API and archive rate limits
+    4. With credentials, an item Reddit no longer returns is looked up in the same archives: a copy found there is saved once, otherwise the item counts as failed and is dropped after 5 runs
+    5. Saves with `GDPR_POST_` or `GDPR_COMMENT_` prefix, and upvoted comments with `UPVOTE_COMMENT_`
+    6. Respects API and archive rate limits
   - **GDPR Export Process**:
     1. Visit https://www.reddit.com/settings/data-request
     2. Request data (takes 2-30 days to process)
     3. Download ZIP file when ready
-    4. Extract `saved_posts.csv` and `saved_comments.csv`
+    4. Extract `saved_posts.csv`, `saved_comments.csv` and, for upvoted comments, `comment_votes.csv`
     5. Place in `{save_directory}/gdpr_data/`
   - **Performance Impact**:
     - Processes AFTER regular API content
@@ -1380,7 +1381,7 @@ process_api = true                     # Use Reddit API for content
   - **Common Issues**:
     - "GDPR directory not found" → Create `{save_directory}/gdpr_data/`
     - "No CSV files found" → Verify files named exactly `saved_posts.csv`
-    - Deleted content → GDPR has IDs but content may be deleted (404 errors normal)
+    - Deleted content → GDPR has IDs but content may be deleted; the archives are tried, and items found nowhere stop being retried after 5 runs
 
 * **`process_api`** - Fetch content from Reddit API
   - **Type**: Boolean
@@ -2455,7 +2456,7 @@ If you can't obtain API credentials, you can still create a structured index of 
 
 1. **Request your Reddit data** at https://www.reddit.com/settings/data-request (takes 2-30 days)
 2. Download and extract the ZIP file
-3. Place `saved_posts.csv` and `saved_comments.csv` in `{save_directory}/gdpr_data/`
+3. Place `saved_posts.csv` and `saved_comments.csv` in `{save_directory}/gdpr_data/`. Add `comment_votes.csv` to also back up the comments you upvoted, which the API cannot list
 4. Configure `settings.ini`:
    ```ini
    [Settings]
@@ -2467,7 +2468,7 @@ If you can't obtain API credentials, you can still create a structured index of 
    python reddit_stash.py
    ```
 
-In CSV-only mode, the script creates Markdown files with Reddit links for each saved item, organized by subreddit. It also adds archived titles and post or comment bodies from Arctic Shift when available, with PullPush as a fallback. No media file is downloaded from archive text. If you later obtain API credentials, you can re-run with `process_api = true` to fetch full content for each item.
+In CSV-only mode, the script creates Markdown files with Reddit links for each saved item, organized by subreddit. It also adds archived titles and post or comment bodies from Arctic Shift when available, with PullPush as a fallback. No media file is downloaded from archive text. CSV-only files go in `r_<subreddit>` folders, and links in either export format (`/r/...` or full `https://www.reddit.com/r/...` URLs) are handled. If you later obtain API credentials, you can re-run with `process_api = true` to fetch full content for each item; the CSV-only files stay alongside.
 
 #### Setting Up Reddit Environment Variables
 
