@@ -3216,6 +3216,23 @@ Feel free to open issues or submit pull requests if you have any improvements or
 
 **Dependencies:** edit version ranges in `requirements-minimal.txt`, or `requirements.txt` for `curl-cffi`, which adds only that package to the minimal set for environments where it will not install. The storage backends are separate: `requirements-dropbox.txt` and `requirements-s3.txt`. The scheduled workflows and Docker image install the exact versions in `constraints.txt`; its header has the refresh command, and the compatibility workflow's scheduled `dependency-audit` job fails when a pin has a known vulnerability.
 
+### Local checks
+
+With Python 3.12 and an active virtual environment, install the same pinned dependencies
+used by pull requests, then run Ruff and the full test suite.
+
+```sh
+python -m pip install -r requirements.txt -r requirements-dropbox.txt -r requirements-s3.txt -c constraints.txt
+python -m pip install ruff==0.17.4
+ruff check .
+python -m unittest discover tests
+```
+
+For quick feedback before committing, add `ruff check .` to your local pre-commit hook.
+GitHub Actions runs the full dependency set on Python 3.11 through 3.14 and runs the
+suite again on Python 3.12 with the requests fallback. It builds the Docker image on
+both Linux architectures for each Python version.
+
 ### Acknowledgement
 - This project was inspired by [reddit-saved-saver](https://github.com/tobiasvl/reddit-saved-saver).
 
