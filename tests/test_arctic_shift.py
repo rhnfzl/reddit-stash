@@ -68,12 +68,14 @@ class TestArcticShiftClient(unittest.TestCase):
         self.assertEqual(session.calls[1][1]['ids'], 'b2')
         self.assertIn('title', session.calls[0][1]['fields'])
 
-    def test_unusable_archive_payloads_are_failed_lookups(self):
+    @patch('utils.content_recovery.arctic_shift.rate_limit_manager')
+    def test_unusable_archive_payloads_are_failed_lookups(self, limiter):
+        limiter.acquire.return_value = True
         for payload in ({'unexpected': []}, {'error': 'overloaded'}, {'data': 'x'}, [], None):
             with self.subTest(payload=payload):
                 client = ArcticShiftClient(session=_Session([_Response(payload)]))
 
-                with self.assertRaises(ArchiveLookupError):
+                with self.assertRaisesRegex(ArchiveLookupError, 'unexpected response shape'):
                     client.fetch_comments(['t1_comment'])
 
 

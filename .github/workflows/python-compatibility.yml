@@ -10,10 +10,10 @@ on:
     # Test weekly on Sundays at 02:00 UTC
     - cron: "0 2 * * 0"
 
-# Prevent multiple workflow runs executing simultaneously
+# Cancel superseded PR revisions without interrupting main or scheduled checks.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -25,7 +25,6 @@ jobs:
 
     strategy:
       fail-fast: false
-      max-parallel: 3
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
@@ -52,7 +51,6 @@ jobs:
           PIP_NO_WARN_SCRIPT_LOCATION: 1
           PIP_ROOT_USER_ACTION: ignore
         run: |
-          python -m pip install --upgrade pip
           # The weekly run takes the latest releases as an early warning; the rest test the pins.
           if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
             pip install -r requirements.txt -r requirements-dropbox.txt -r requirements-s3.txt
@@ -96,19 +94,17 @@ jobs:
           "
 
       - name: Validate code syntax
-        run: |
-          # Check for syntax errors in main files
-          python -m py_compile reddit_stash.py
-          python -m py_compile storage_utils.py
-          find utils/ -name "*.py" -exec python -m py_compile {} \;
-          echo "All Python files compile successfully"
+        run: python -m compileall -q reddit_stash.py storage_utils.py utils
 
       - name: Run test suite
         run: python -m unittest discover tests
 
       - name: Run linter
+        if: matrix.python-version == '3.12'
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: 1
         run: |
-          python -m pip install ruff
+          python -m pip install ruff==0.17.4
           ruff check .
 
   # The requests fallback path behaves differently, so it gets its own test run.
@@ -136,9 +132,7 @@ jobs:
           PIP_DISABLE_PIP_VERSION_CHECK: 1
           PIP_NO_WARN_SCRIPT_LOCATION: 1
           PIP_ROOT_USER_ACTION: ignore
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-minimal.txt -r requirements-dropbox.txt -c constraints.txt
+        run: pip install -r requirements-minimal.txt -r requirements-dropbox.txt -c constraints.txt
 
       - name: Run test suite
         run: python -m unittest discover tests
