@@ -1,95 +1,134 @@
-import os
+"""Atomic, thread-safe file-log persistence.
+
+A corrupt log is never silently replaced with an empty dictionary. Doing that
+would make a backup run forget what it had already archived.
+"""
+from __future__ import annotations
+
 import json
+import os
 import tempfile
 import threading
+from pathlib import Path
+from typing import Any
 
-from utils.constants import FILE_LOG_CHECKPOINT_INTERVAL
+try:
+    from utils.constants import FILE_LOG_CHECKPOINT_INTERVAL
+except Exception:  # pragma: no cover - defensive fallback for standalone tools
+    FILE_LOG_CHECKPOINT_INTERVAL = 100
 
-# RLock is needed because log_file() may call save_file_log() while already
-# holding the lock.
 _log_lock = threading.RLock()
 
 
-def get_log_file_path(save_directory):
-    """Return the path to the log file inside the save_directory."""
-    return os.path.join(save_directory, 'file_log.json')
+class FileLogError(RuntimeError):
+    """Base class for unsafe file-log states."""
 
 
-def load_file_log(save_directory):
-    """Load the file log from a JSON file in the specified directory.
+class CorruptFileLogError(FileLogError):
+    """Raised when file_log.json exists but cannot be trusted."""
 
-    If the log is missing, return an empty dict.
-    If the log exists but is corrupted, move it aside and start fresh.
-    """
-    log_file_path = get_log_file_path(save_directory)
 
-    if not os.path.exists(log_file_path):
+class MissingFileLogError(FileLogError):
+    """Raised when the archive exists but its dedupe log is missing."""
+
+
+def get_log_file_path(save_directory: str | os.PathLike[str]) -> str:
+    return str(Path(save_directory) / "file_log.json")
+
+
+def _contains_archived_markdown(save_directory: str | os.PathLike[str]) -> bool:
+    root = Path(save_directory)
+    if not root.exists():
+        return False
+    for path in root.rglob("*.md"):
+        if path.is_file() and not path.name.startswith("."):
+            return True
+    return False
+
+
+def load_file_log(
+    save_directory: str | os.PathLike[str],
+    *,
+    allow_missing_with_archive: bool = False,
+) -> dict:
+    """Load a log or fail closed if existing archive data would be forgotten."""
+    log_path = Path(get_log_file_path(save_directory))
+    if not log_path.exists():
+        if _contains_archived_markdown(save_directory) and not allow_missing_with_archive:
+            raise MissingFileLogError(
+                f"{log_path} is missing although Markdown archive files exist. "
+                "Rebuild it with `python rebuild_file_log.py --archive "
+                f"{str(save_directory)} --apply` before using check_type=LOG."
+            )
         return {}
 
     try:
-        with open(log_file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        broken_path = f"{log_file_path}.broken"
-        try:
-            os.replace(log_file_path, broken_path)
-            print(f"⚠️ Corrupted log moved to {broken_path}; starting with an empty log.")
-        except OSError:
-            print("⚠️ Corrupted log detected; starting with an empty log.")
-        return {}
+        with log_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise CorruptFileLogError(
+            f"Cannot trust {log_path}: {exc}. The file was left untouched. "
+            "Restore it from backup or rebuild it from the Markdown archive."
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise CorruptFileLogError(
+            f"{log_path} must contain a JSON object; found {type(data).__name__}. "
+            "The file was left untouched."
+        )
+    return data
 
 
-def save_file_log(log_data, save_directory):
-    """Save the file log to a JSON file in the specified directory.
-
-    Writes atomically to avoid half-written JSON files.
-    """
-    log_file_path = get_log_file_path(save_directory)
-    os.makedirs(save_directory, exist_ok=True)
+def save_file_log(log_data: dict, save_directory: str | os.PathLike[str]) -> None:
+    if not isinstance(log_data, dict):
+        raise TypeError("log_data must be a dictionary")
+    directory = Path(save_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = Path(get_log_file_path(directory))
 
     with _log_lock:
-        fd, tmp_path = tempfile.mkstemp(prefix='file_log.', suffix='.tmp', dir=save_directory)
+        fd, temporary_path = tempfile.mkstemp(
+            prefix="file_log.", suffix=".tmp", dir=str(directory)
+        )
         try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                json.dump(log_data, f, indent=4)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, log_file_path)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(log_data, handle, indent=2, ensure_ascii=False, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, destination)
+            # Best-effort directory fsync makes the rename durable on POSIX.
+            try:
+                dir_fd = os.open(str(directory), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
         except Exception:
             try:
-                os.unlink(tmp_path)
+                os.unlink(temporary_path)
             except OSError:
                 pass
             raise
 
 
-def is_file_logged(log_data, unique_key):
-    """Check if a unique key is already logged."""
+def is_file_logged(log_data: dict, unique_key: str) -> bool:
     return unique_key in log_data
 
 
-def log_file(log_data, unique_key, file_info, save_directory):
-    """Add a file information to the log with the provided unique key.
-
-    Thread-safe: uses _log_lock to serialize dict mutation and checkpoint writes.
-    """
+def log_file(log_data: dict, unique_key: str, file_info: dict, save_directory: str) -> None:
+    """Thread-safe log mutation with periodic atomic checkpoints."""
     with _log_lock:
-        # Convert the absolute file path to a relative one
-        relative_file_path = os.path.relpath(file_info['file_path'], start=save_directory)
-
-        # Update the file info with the relative path
-        file_info['file_path'] = relative_file_path
-
-        # Add the file info to the log with the unique key
-        log_data[unique_key] = file_info
-
-        # Periodic checkpoint: save every N items to limit data loss on crash
-        # Final save happens in file_operations.py:save_user_activity()
-        if len(log_data) % FILE_LOG_CHECKPOINT_INTERVAL == 0:
+        info = dict(file_info)
+        file_path = info.get("file_path")
+        if file_path:
+            try:
+                info["file_path"] = os.path.relpath(file_path, start=save_directory)
+            except ValueError:
+                info["file_path"] = str(file_path)
+        log_data[unique_key] = info
+        interval = int(FILE_LOG_CHECKPOINT_INTERVAL or 0)
+        if interval > 0 and len(log_data) % interval == 0:
             save_file_log(log_data, save_directory)
-
-
-def convert_to_absolute_path(relative_path, save_directory):
-    """Convert a relative path from the log back to an absolute path."""
-    return os.path.join(save_directory, relative_path)

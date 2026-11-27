@@ -1,261 +1,246 @@
 #!/usr/bin/env python3
-"""
-Selective cleanup script for reddit folder and file_log.json.
-Allows cleaning specific types of items (upvoted, saved, comments, submissions).
-"""
+"""Safely remove selected archive categories and their matching log entries.
 
-import os
+No deletion occurs unless --apply is supplied. The archive path defaults to
+Settings.save_directory from the selected settings file, not a hard-coded
+`reddit/` directory.
+"""
+from __future__ import annotations
+
+import argparse
+import configparser
 import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Iterable
 
-def clean_items(reddit_dir="reddit", file_log_path="reddit/file_log.json",
-                upvoted=False, saved=False, comments=False, submissions=False):
-    """
-    Remove specific types of items (files and log entries) while preserving others.
+from utils.config_paths import get_settings_file_path
+from utils.log_utils import load_file_log
+from utils.archive_index import iter_archive_index
 
-    Args:
-        reddit_dir: Path to the reddit directory
-        file_log_path: Path to the file_log.json file
-        upvoted: Remove upvoted items (UPVOTE_POST_, UPVOTE_COMMENT_)
-        saved: Remove saved items (SAVED_POST_, SAVED_COMMENT_)
-        comments: Remove comment items (COMMENT_, but preserve SAVED_COMMENT_, UPVOTE_COMMENT_)
-        submissions: Remove submission items (POST_, but preserve SAVED_POST_, UPVOTE_POST_)
-    """
+PREFIX_GROUPS = {
+    "upvoted": ("UPVOTE_POST_", "UPVOTE_COMMENT_"),
+    "saved": ("SAVED_POST_", "SAVED_COMMENT_"),
+    "comments": ("COMMENT_", "GDPR_COMMENT_"),
+    "submissions": ("POST_", "GDPR_POST_"),
+    "votes": ("GDPR_VOTE_",),
+}
 
-    removed_files = 0
-    removed_log_entries = 0
 
-    # Determine what to clean based on arguments
-    prefixes_to_remove = []
-    cleanup_types = []
+def configured_archive_dir() -> Path:
+    parser = configparser.ConfigParser()
+    if not parser.read(get_settings_file_path()):
+        raise FileNotFoundError(
+            f"Could not read settings file {get_settings_file_path()}; "
+            "pass --reddit-dir explicitly."
+        )
+    configured = parser.get("Settings", "save_directory", fallback="reddit_dropbox/")
+    path = Path(configured).expanduser()
+    return path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
 
-    if upvoted:
-        prefixes_to_remove.extend(["UPVOTE_POST_", "UPVOTE_COMMENT_"])
-        cleanup_types.append("upvoted items")
 
-    if saved:
-        prefixes_to_remove.extend(["SAVED_POST_", "SAVED_COMMENT_"])
-        cleanup_types.append("saved items")
+def _resolve_log_entry_path(archive_dir: Path, value: object) -> Path | None:
+    if not isinstance(value, dict) or not value.get("file_path"):
+        return None
+    candidate = Path(str(value["file_path"])).expanduser()
+    if not candidate.is_absolute():
+        candidate = archive_dir / candidate
+    try:
+        return candidate.resolve()
+    except OSError:
+        return candidate.absolute()
 
-    if comments:
-        prefixes_to_remove.append("COMMENT_")
-        cleanup_types.append("user comments")
 
-    if submissions:
-        prefixes_to_remove.append("POST_")
-        cleanup_types.append("user submissions")
+def _selected_prefixes(groups: Iterable[str]) -> tuple[str, ...]:
+    prefixes: list[str] = []
+    for group in groups:
+        prefixes.extend(PREFIX_GROUPS[group])
+    return tuple(prefixes)
 
-    if not cleanup_types:
-        print("❌ No cleanup type specified. Use --upvoted, --saved, --comments, or --submissions")
-        return 0, 0
 
-    print(f"🧹 Cleaning {', '.join(cleanup_types)} from reddit folder...")
-    print(f"📁 Reddit directory: {reddit_dir}")
-    print(f"📄 File log: {file_log_path}")
-    print(f"🎯 Target prefixes: {', '.join(prefixes_to_remove)}")
-    print("-" * 60)
+def _load_selected_log(archive: Path, log_path: Path) -> dict:
+    """Load the requested log path; never silently replace corrupt JSON."""
+    standard_path = (archive / "file_log.json").resolve()
+    if log_path.resolve() == standard_path:
+        return load_file_log(archive)
+    if not log_path.exists():
+        if any(path.is_file() for path in archive.rglob("*.md")):
+            raise FileNotFoundError(
+                f"Selected file log is missing: {log_path}. Rebuild the archive index "
+                "before running destructive cleanup."
+            )
+        return {}
+    try:
+        with log_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot trust custom file log {log_path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Custom file log {log_path} must contain a JSON object")
+    return payload
 
-    # 1. Remove files with specified prefixes
-    if os.path.exists(reddit_dir):
-        for root, dirs, files in os.walk(reddit_dir):
-            for file in files:
-                # Check if file starts with any of the target prefixes
-                if any(file.startswith(prefix) for prefix in prefixes_to_remove):
-                    file_path = os.path.join(root, file)
-                    try:
-                        os.remove(file_path)
-                        removed_files += 1
-                        print(f"  ❌ Removed: {os.path.relpath(file_path, reddit_dir)}")
-                    except Exception as e:
-                        print(f"  ⚠️  Error removing {file_path}: {e}")
 
-    # 2. Clean file_log.json entries
-    if os.path.exists(file_log_path):
+def _atomic_write_log(log_path: Path, payload: dict) -> None:
+    """Atomically write the exact log path selected by the caller."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=log_path.name + ".", suffix=".tmp", dir=str(log_path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, log_path)
+    except Exception:
         try:
-            with open(file_log_path, 'r') as f:
-                file_log = json.load(f)
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
-            original_count = len(file_log)
-            cleaned_log = {}
 
-            for key, value in file_log.items():
-                should_remove = False
+def clean_items(
+    reddit_dir: str | os.PathLike[str],
+    *,
+    file_log_path: str | os.PathLike[str] | None = None,
+    upvoted: bool = False,
+    saved: bool = False,
+    comments: bool = False,
+    submissions: bool = False,
+    votes: bool = False,
+    apply: bool = False,
+) -> tuple[int, int]:
+    groups = [
+        name for name, enabled in (
+            ("upvoted", upvoted), ("saved", saved),
+            ("comments", comments), ("submissions", submissions), ("votes", votes),
+        ) if enabled
+    ]
+    if not groups:
+        raise ValueError("Select at least one of --upvoted, --saved, --comments, --submissions, --votes")
 
-                # Check if this entry should be removed based on file path
-                if isinstance(value, dict) and 'file_path' in value:
-                    file_path = value['file_path']
-                    filename = os.path.basename(file_path)
-
-                    if any(filename.startswith(prefix) for prefix in prefixes_to_remove):
-                        should_remove = True
-
-                # Also check if the key contains the target patterns (for category-based keys)
-                if upvoted and 'UPVOTE' in key:
-                    should_remove = True
-                elif saved and any(pattern in key for pattern in ['SAVED_POST', 'SAVED_COMMENT']):
-                    should_remove = True
-                elif comments and key.endswith('-Submission-COMMENT'):  # User comments
-                    should_remove = True
-                elif submissions and key.endswith('-Submission-POST'):  # User submissions
-                    should_remove = True
-
-                if should_remove:
-                    removed_log_entries += 1
-                    print(f"  📝 Removed log entry: {key}")
-                else:
-                    cleaned_log[key] = value
-
-            # Save cleaned log
-            with open(file_log_path, 'w') as f:
-                json.dump(cleaned_log, f, indent=2)
-
-            print(f"\n📊 File log cleaned: {original_count} → {len(cleaned_log)} entries")
-
-        except Exception as e:
-            print(f"⚠️  Error processing file_log.json: {e}")
+    archive = Path(reddit_dir).expanduser().resolve()
+    if not archive.is_dir():
+        raise FileNotFoundError(f"Archive directory does not exist: {archive}")
+    if file_log_path:
+        requested_log = Path(file_log_path).expanduser()
+        log_path = (requested_log if requested_log.is_absolute() else archive / requested_log).resolve()
     else:
-        print("⚠️  file_log.json not found")
+        log_path = archive / "file_log.json"
+    prefixes = _selected_prefixes(groups)
+    selected_categories = {
+        "upvoted": {"UPVOTE_POST", "UPVOTE_COMMENT"},
+        "saved": {"SAVED_POST", "SAVED_COMMENT"},
+        "comments": {"COMMENT", "GDPR_COMMENT"},
+        "submissions": {"POST", "GDPR_POST"},
+        "votes": {"GDPR_VOTE"},
+    }
+    selected_suffixes = {
+        f"-{category}"
+        for group in groups
+        for category in selected_categories[group]
+    }
 
-    # 3. Summary
-    print("\n" + "=" * 60)
-    print("✅ Cleanup Complete!")
-    print(f"   • Files removed: {removed_files}")
-    print(f"   • Log entries removed: {removed_log_entries}")
-    print(f"   • Cleaned types: {', '.join(cleanup_types)}")
+    # Load before touching files. A corrupt log must stop cleanup rather than
+    # produce a partially modified archive with an untrusted index.
+    file_log = _load_selected_log(archive, log_path)
 
-    if removed_files == 0 and removed_log_entries == 0:
-        print(f"\n💡 No {', '.join(cleanup_types)} found to clean.")
-        print("   This is normal if you haven't run the script yet or")
-        print("   if these items were already cleaned.")
+    index_by_relative_path = {
+        info["file_path"]: key for key, info in iter_archive_index(archive)
+    }
+    candidates: list[Path] = []
+    for path in archive.rglob("*"):
+        if path.is_file() and path.name.startswith(prefixes):
+            candidates.append(path)
+    removed_paths: set[Path] = set()
+    removed_keys: set[str] = set()
+    failed_keys: set[str] = set()
+    removed_files = 0
+    for path in candidates:
+        relative = path.relative_to(archive).as_posix()
+        archive_key = index_by_relative_path.get(relative)
+        if not apply:
+            print(f"Would remove: {relative}")
+            removed_paths.add(path.resolve())
+            if archive_key:
+                removed_keys.add(archive_key)
+            continue
+        try:
+            path.unlink()
+            removed_files += 1
+            removed_paths.add(path.resolve())
+            if archive_key:
+                removed_keys.add(archive_key)
+            print(f"Removed: {relative}")
+        except OSError as exc:
+            if archive_key:
+                failed_keys.add(archive_key)
+            print(f"Could not remove {relative}: {exc}")
+
+    removed_log_entries = 0
+    cleaned_log = {}
+    for key, value in file_log.items():
+        category_match = isinstance(key, str) and any(key.endswith(suffix) for suffix in selected_suffixes)
+        entry_path = _resolve_log_entry_path(archive, value)
+        path_match = bool(entry_path and entry_path in removed_paths)
+        stale_category_entry = (
+            category_match
+            and key not in failed_keys
+            and (key in removed_keys or entry_path is None or not entry_path.exists())
+        )
+        if path_match or stale_category_entry:
+            removed_log_entries += 1
+            continue
+        cleaned_log[key] = value
+
+    if apply and removed_log_entries:
+        _atomic_write_log(log_path, cleaned_log)
+
+    print(f"Selected categories: {', '.join(groups)}")
+    if apply:
+        print(f"Deleted files: {removed_files}; removed log entries: {removed_log_entries}")
     else:
-        print("\n🎯 You can now run 'python reddit_stash.py' to re-download these item types.")
+        print(f"DRY RUN: {len(removed_paths)} matching files and {removed_log_entries} log entries would be removed.")
+        print("No changes made. Re-run with --apply to execute this cleanup.")
+    return removed_files if apply else len(removed_paths), removed_log_entries
 
-    return removed_files, removed_log_entries
 
-
-def main():
-    """Main function to run the cleanup."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Selectively remove specific types of items from reddit folder",
-        epilog="""
-Examples:
-  python clean_items.py --upvoted                    # Clean only upvoted items
-  python clean_items.py --saved --upvoted           # Clean saved and upvoted items
-  python clean_items.py --comments --submissions    # Clean user posts and comments
-  python clean_items.py --upvoted --dry-run         # Preview upvoted items cleanup
-        """,
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-
-    parser.add_argument(
-        "--reddit-dir",
-        default="reddit",
-        help="Path to reddit directory (default: reddit)"
-    )
-
-    # Item type arguments
-    parser.add_argument(
-        "--upvoted",
-        action="store_true",
-        help="Remove upvoted items (UPVOTE_POST_, UPVOTE_COMMENT_)"
-    )
-
-    parser.add_argument(
-        "--saved",
-        action="store_true",
-        help="Remove saved items (SAVED_POST_, SAVED_COMMENT_)"
-    )
-
-    parser.add_argument(
-        "--comments",
-        action="store_true",
-        help="Remove user comments (COMMENT_) - excludes saved/upvoted comments"
-    )
-
-    parser.add_argument(
-        "--submissions",
-        action="store_true",
-        help="Remove user submissions (POST_) - excludes saved/upvoted posts"
-    )
-
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Remove all types (equivalent to --upvoted --saved --comments --submissions)"
-    )
-
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be removed without actually removing"
-    )
-
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--reddit-dir", default=None, help="Archive directory (defaults to Settings.save_directory)")
+    parser.add_argument("--file-log", default=None, help="Explicit file_log.json path (defaults to <archive>/file_log.json)")
+    parser.add_argument("--upvoted", action="store_true")
+    parser.add_argument("--saved", action="store_true")
+    parser.add_argument("--comments", action="store_true")
+    parser.add_argument("--submissions", action="store_true")
+    parser.add_argument("--votes", action="store_true", help="Select GDPR vote records")
+    parser.add_argument("--all", action="store_true", help="Select all archive categories")
+    parser.add_argument("--apply", action="store_true", help="Actually delete; without this, dry-run only")
     args = parser.parse_args()
 
-    # Handle --all flag
-    if args.all:
-        args.upvoted = True
-        args.saved = True
-        args.comments = True
-        args.submissions = True
-
-    # Validate at least one type is specified
-    if not any([args.upvoted, args.saved, args.comments, args.submissions]):
-        parser.error("Must specify at least one item type: --upvoted, --saved, --comments, --submissions, or --all")
-
-    if args.dry_run:
-        print("🔍 DRY RUN MODE - No files will be actually removed")
-        print("-" * 60)
-
-        # Determine prefixes to check
-        prefixes_to_check = []
-        types_to_check = []
-
-        if args.upvoted:
-            prefixes_to_check.extend(["UPVOTE_POST_", "UPVOTE_COMMENT_"])
-            types_to_check.append("upvoted")
-
-        if args.saved:
-            prefixes_to_check.extend(["SAVED_POST_", "SAVED_COMMENT_"])
-            types_to_check.append("saved")
-
-        if args.comments:
-            prefixes_to_check.append("COMMENT_")
-            types_to_check.append("comments")
-
-        if args.submissions:
-            prefixes_to_check.append("POST_")
-            types_to_check.append("submissions")
-
-        print(f"🎯 Would clean: {', '.join(types_to_check)}")
-        print(f"📋 Target prefixes: {', '.join(prefixes_to_check)}")
-        print()
-
-        # List what would be removed
-        reddit_dir = args.reddit_dir
-        count = 0
-
-        if os.path.exists(reddit_dir):
-            for root, dirs, files in os.walk(reddit_dir):
-                for file in files:
-                    if any(file.startswith(prefix) for prefix in prefixes_to_check):
-                        file_path = os.path.join(root, file)
-                        print(f"  Would remove: {os.path.relpath(file_path, reddit_dir)}")
-                        count += 1
-
-        print(f"\n📊 Would remove {count} files")
-
-    else:
-        # Actually perform the cleanup
+    try:
+        archive = Path(args.reddit_dir).expanduser().resolve() if args.reddit_dir else configured_archive_dir()
+        selected = args.all or any((args.upvoted, args.saved, args.comments, args.submissions, args.votes))
+        if not selected:
+            parser.error("Select at least one category or --all")
         clean_items(
-            reddit_dir=args.reddit_dir,
-            upvoted=args.upvoted,
-            saved=args.saved,
-            comments=args.comments,
-            submissions=args.submissions
+            archive,
+            file_log_path=args.file_log,
+            upvoted=args.upvoted or args.all,
+            saved=args.saved or args.all,
+            comments=args.comments or args.all,
+            submissions=args.submissions or args.all,
+            votes=args.votes or args.all,
+            apply=args.apply,
         )
+        return 0
+    except Exception as exc:
+        print(f"ERROR: {exc}")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

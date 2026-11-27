@@ -1,102 +1,76 @@
-version: '3.8'
+name: reddit-stash
+
+x-common-environment: &common-environment
+  REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+  REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+  REDDIT_USERNAME: ${REDDIT_USERNAME:-}
+  REDDIT_PASSWORD: ${REDDIT_PASSWORD:-}
+  DROPBOX_APP_KEY: ${DROPBOX_APP_KEY:-}
+  DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET:-}
+  DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+  AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
+  S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+  STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
+  MEGA_REMOTE: ${MEGA_REMOTE:-mega}
+  MEGA_EMAIL: ${MEGA_EMAIL:-}
+  MEGA_PASSWORD: ${MEGA_PASSWORD:-}
+  MEGA_2FA: ${MEGA_2FA:-}
+  RCLONE_CONFIG: ${RCLONE_CONFIG:-}
+  SETTINGS_FILE: ${SETTINGS_FILE:-}
+
+x-common-volumes: &common-volumes
+  - ./reddit_dropbox:/app/reddit_dropbox
+  - ./reddit_mega:/app/reddit_mega
+  - ./settings.ini:/app/settings.ini:ro
+  - ./mega_settings.ini:/app/mega_settings.ini:ro
 
 services:
   reddit-stash:
     build: .
+    image: reddit-stash:local
     container_name: reddit-stash
     environment:
-      # Reddit API credentials (required)
-      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID}
-      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET}
-      REDDIT_USERNAME: ${REDDIT_USERNAME}
-      REDDIT_PASSWORD: ${REDDIT_PASSWORD}
-
-      # Dropbox credentials (optional)
-      DROPBOX_APP_KEY: ${DROPBOX_APP_KEY:-}
-      DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET:-}
-      DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN:-}
-
-      # S3 credentials (optional — or use IAM roles)
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
-      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
-      S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
-      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
-    volumes:
-      # Mount local reddit directory for persistent data
-      - ./reddit:/app/reddit
-      # Mount settings.ini for easy configuration changes
-      - ./settings.ini:/app/settings.ini:ro
+      <<: *common-environment
+      SCHEDULE_MODE: ${SCHEDULE_MODE:-periodic}
+      SCHEDULE_INTERVAL: ${SCHEDULE_INTERVAL:-7200}
+    volumes: *common-volumes
     restart: unless-stopped
-    profiles:
-      - main
+    profiles: [main]
 
-  # Service for one-time operations
   reddit-stash-oneshot:
     build: .
+    image: reddit-stash:local
     container_name: reddit-stash-oneshot
     environment:
-      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID}
-      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET}
-      REDDIT_USERNAME: ${REDDIT_USERNAME}
-      REDDIT_PASSWORD: ${REDDIT_PASSWORD}
-      DROPBOX_APP_KEY: ${DROPBOX_APP_KEY:-}
-      DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET:-}
-      DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN:-}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
-      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
-      S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
-      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
-    volumes:
-      - ./reddit:/app/reddit
-      - ./settings.ini:/app/settings.ini:ro
-    profiles:
-      - oneshot
+      <<: *common-environment
+      SCHEDULE_MODE: once
+    volumes: *common-volumes
+    profiles: [oneshot]
 
-  # Service for storage operations only (Dropbox or S3)
-  reddit-stash-storage:
+  reddit-stash-storage-upload:
     build: .
-    container_name: reddit-stash-storage
+    image: reddit-stash:local
+    container_name: reddit-stash-storage-upload
     environment:
-      DROPBOX_APP_KEY: ${DROPBOX_APP_KEY:-}
-      DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET:-}
-      DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN:-}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
-      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
-      S3_STORAGE_CLASS: ${S3_STORAGE_CLASS:-}
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
-      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
-    volumes:
-      - ./reddit:/app/reddit
-      - ./settings.ini:/app/settings.ini:ro
-    profiles:
-      - storage
+      <<: *common-environment
+      SCHEDULE_MODE: once
+    command: ["python", "storage_utils.py", "--upload"]
+    volumes: *common-volumes
+    profiles: [storage]
 
-  # Legacy Dropbox-only service (backward compatibility)
+  # Compatibility alias for older commands. This now actually runs the storage
+  # utility instead of invoking `python python storage_utils.py` via the wrapper.
   reddit-stash-dropbox:
     build: .
+    image: reddit-stash:local
     container_name: reddit-stash-dropbox
     environment:
-      DROPBOX_APP_KEY: ${DROPBOX_APP_KEY}
-      DROPBOX_APP_SECRET: ${DROPBOX_APP_SECRET}
-      DROPBOX_REFRESH_TOKEN: ${DROPBOX_REFRESH_TOKEN}
-    volumes:
-      - ./reddit:/app/reddit
-    profiles:
-      - dropbox
-
-# Example usage:
-# 1. Copy .env.example to .env and fill in your credentials
-# 2. Run main service: docker-compose --profile main up
-# 3. Run one-shot: docker-compose --profile oneshot run --rm reddit-stash-oneshot
-# 4. Storage upload: docker-compose --profile storage run --rm reddit-stash-storage python storage_utils.py --upload
-# 5. Storage download: docker-compose --profile storage run --rm reddit-stash-storage python storage_utils.py --download
-# 6. Migrate: docker-compose --profile storage run --rm reddit-stash-storage python storage_utils.py --migrate --source dropbox --target s3 --execute
-# 7. Legacy Dropbox: docker-compose --profile dropbox run --rm reddit-stash-dropbox python dropbox_utils.py --upload
+      <<: *common-environment
+      SCHEDULE_MODE: once
+    command: ["python", "storage_utils.py", "--upload"]
+    volumes: *common-volumes
+    profiles: [dropbox]

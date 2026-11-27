@@ -4,6 +4,7 @@ import configparser
 import logging
 import os
 import threading
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterable, Tuple
 
@@ -23,6 +24,9 @@ from utils.save_utils import (
 )
 from utils.time_utilities import dynamic_sleep
 from utils.path_security import create_safe_path, create_reddit_file_path
+from .archive_index import canonical_item_key, iter_archive_index
+from .save_result import SaveResult, SaveStatus
+from .failure_tracker import clear_failure, record_failure
 
 logger = logging.getLogger(__name__)
 
@@ -83,49 +87,8 @@ def get_existing_files_from_log(file_log):
     return set(file_log.keys())
 
 def get_existing_files_from_dir(save_directory):
-    """Build a set of all existing files in the save directory using os.walk."""
-    existing_files = set()
-
-    for root, _dirs, files in os.walk(save_directory):
-        rel_root = os.path.relpath(root, save_directory)
-        parts = [] if rel_root in (".", os.curdir) else rel_root.split(os.sep)
-        subreddit_name = parts[0] if parts else "unknown"
-
-        for file in files:
-            filename = os.path.splitext(file)[0]
-            content_type = None
-
-            if filename.startswith("POST_"):
-                file_id = filename.split("POST_", 1)[1]
-                content_type = "Submission"
-            elif filename.startswith("COMMENT_"):
-                file_id = filename.split("COMMENT_", 1)[1]
-                content_type = "Comment"
-            elif filename.startswith("SAVED_POST_"):
-                file_id = filename.split("SAVED_POST_", 1)[1]
-                content_type = "Submission"
-            elif filename.startswith("SAVED_COMMENT_"):
-                file_id = filename.split("SAVED_COMMENT_", 1)[1]
-                content_type = "Comment"
-            elif filename.startswith("UPVOTE_POST_"):
-                file_id = filename.split("UPVOTE_POST_", 1)[1]
-                content_type = "Submission"
-            elif filename.startswith("UPVOTE_COMMENT_"):
-                file_id = filename.split("UPVOTE_COMMENT_", 1)[1]
-                content_type = "Comment"
-            elif filename.startswith("GDPR_POST_"):
-                file_id = filename.split("GDPR_POST_", 1)[1]
-                content_type = "Submission"
-            elif filename.startswith("GDPR_COMMENT_"):
-                file_id = filename.split("GDPR_COMMENT_", 1)[1]
-                content_type = "Comment"
-            else:
-                continue
-
-            unique_key = f"{file_id}-{subreddit_name}-{content_type}"
-            existing_files.add(unique_key)
-
-    return existing_files
+    """Index recognized Markdown archive files using the canonical save key."""
+    return {key for key, _info in iter_archive_index(save_directory)}
 
 def save_to_file(
     content,
@@ -139,31 +102,40 @@ def save_to_file(
     unsave=False,
     ignore_tls_errors=None,
 ):
-    """Save content to a file using the specified save function."""
+    """Atomically save one item and distinguish saved, skipped, and failed."""
     from .praw_helpers import RecoveredItem
 
+    if unsave:
+        return SaveResult(
+            SaveStatus.FAILED,
+            error=(
+                "Automatic unsaving is disabled until the remote archive upload "
+                "has a verified post-upload commit stage."
+            ),
+        )
+
     is_recovered = isinstance(content, RecoveredItem)
-    file_id = content.id
-
+    file_id = str(content.id)
     if is_recovered:
-        recovered_data = content.recovered_data if hasattr(content, "recovered_data") else {}
-        subreddit_name = recovered_data.get("subreddit", "unknown")
+        recovered_data = getattr(content, "recovered_data", {}) or {}
+        subreddit_name = str(recovered_data.get("subreddit") or "unknown")
     else:
-        subreddit_name = content.subreddit.display_name
+        subreddit_name = str(content.subreddit.display_name)
 
-    unique_key = f"{file_id}-{subreddit_name}-{type(content).__name__}-{category}"
-
-    # Original behavior: if we already know about this item, do not resave it.
+    unique_key = canonical_item_key(file_id, subreddit_name, category)
     if unique_key in existing_files:
-        return True, 0
+        return SaveResult(SaveStatus.SKIPPED)
+
+    if os.path.exists(file_path):
+        return SaveResult(
+            SaveStatus.FAILED,
+            error=f"Destination exists but is not indexed: {file_path}",
+        )
 
     path_result = create_safe_path(save_directory, subreddit_name)
     if not path_result.is_safe:
         logger.error("Unsafe subreddit name '%s': %s", subreddit_name, path_result.issues)
-        fallback_name = "sanitized_subreddit"
-        path_result = create_safe_path(save_directory, fallback_name)
-        if not path_result.is_safe:
-            raise ValueError(f"Cannot create safe directory path: {path_result.issues}")
+        return SaveResult(SaveStatus.FAILED, error=f"Unsafe archive path: {path_result.issues}")
 
     sub_dir = path_result.safe_path
     with _dir_cache_lock:
@@ -171,25 +143,40 @@ def save_to_file(
             os.makedirs(sub_dir, exist_ok=True)
             created_dirs_cache.add(sub_dir)
 
+    temporary_path = None
     try:
         _reset_media_tracker()
-
-        with open(file_path, "w", encoding="utf-8") as f:
+        parent = os.path.dirname(file_path) or save_directory
+        os.makedirs(parent, exist_ok=True)
+        fd, temporary_path = tempfile.mkstemp(
+            prefix=os.path.basename(file_path) + ".",
+            suffix=".part",
+            dir=parent,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             save_function(
                 content,
-                f,
-                unsave=unsave,
+                handle,
+                unsave=False,
                 ignore_tls_errors=ignore_tls_errors,
             )
+            handle.flush()
+            os.fsync(handle.fileno())
 
-        media_size = _get_media_size()
+        # Publish the completed Markdown file atomically. The destination was
+        # checked above; os.replace protects readers from partial content.
+        os.replace(temporary_path, file_path)
+        temporary_path = None
+        media_size = int(_get_media_size() or 0)
+        existing_files.add(unique_key)
 
         file_info = {
+            "id": file_id,
             "subreddit": subreddit_name,
-            "type": type(content).__name__,
+            "type": "Comment" if "COMMENT" in category.upper() else "Submission",
+            "category": category.upper(),
             "file_path": file_path,
         }
-
         if is_recovered and hasattr(content, "recovery_result"):
             recovery_result = content.recovery_result
             if recovery_result and recovery_result.metadata:
@@ -200,17 +187,19 @@ def save_to_file(
                 if recovery_result.recovered_url:
                     file_info["recovery_url"] = recovery_result.recovered_url
 
+        # If log persistence fails, the Markdown file remains available to the
+        # directory index/rebuild utility; the run will still report a failure.
         log_file(file_log, unique_key, file_info, save_directory)
-        return False, media_size
+        return SaveResult(SaveStatus.SAVED, media_size=media_size)
 
-    except Exception as e:
-        logger.error("Failed to save %s: %s", file_path, e)
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except OSError:
-            pass
-        return False, 0
+    except Exception as exc:
+        logger.exception("Failed to save %s", file_path)
+        if temporary_path:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+        return SaveResult(SaveStatus.FAILED, error=str(exc))
 
 def handle_dynamic_sleep(item):
     """Handle dynamic sleep based on the type of Reddit item."""
@@ -255,12 +244,8 @@ def _fetch_items(reddit_instance, fetch_method_name, limit, label):
         return safe_fetch_items_one_by_one(items_iter, label)
 
 def _merge_results(*results):
-    """Merge (processed, skipped, size, media_size) tuples from parallel threads."""
-    processed = sum(r[0] for r in results)
-    skipped = sum(r[1] for r in results)
-    size = sum(r[2] for r in results)
-    media_size = sum(r[3] for r in results)
-    return processed, skipped, size, media_size
+    """Merge (processed, skipped, failed, Markdown bytes, media bytes) tuples."""
+    return tuple(sum(result[index] for result in results) for index in range(5))
 
 def _process_submissions_batch(
     submissions,
@@ -274,26 +259,23 @@ def _process_submissions_batch(
     tqdm_desc="Processing Submissions",
     tqdm_position=0,
 ):
-    processed_count = 0
-    skipped_count = 0
-    total_size = 0
-    total_media_size = 0
-
+    processed_count = skipped_count = failed_count = total_size = total_media_size = 0
     for submission in tqdm(submissions, desc=tqdm_desc, position=tqdm_position, leave=True):
         path_result = create_reddit_file_path(
-            save_directory,
-            submission.subreddit.display_name,
-            category,
-            submission.id,
+            save_directory, submission.subreddit.display_name, category, submission.id
         )
         if not path_result.is_safe:
-            logger.error(
-                "Unsafe path for submission %s: %s", submission.id, path_result.issues
-            )
+            logger.error("Unsafe path for submission %s: %s", submission.id, path_result.issues)
+            failed_count += 1
+            try:
+                record_failure(save_directory, submission.id, submission.subreddit.display_name, category,
+                               f"Unsafe archive path: {path_result.issues}")
+            except Exception:
+                logger.exception("Could not record unsafe path failure for %s", submission.id)
             continue
-
         file_path = path_result.safe_path
-        save_result, media_size = save_to_file(
+
+        result = save_to_file(
             submission,
             file_path,
             save_submission,
@@ -302,25 +284,41 @@ def _process_submissions_batch(
             save_directory,
             created_dirs_cache,
             category=category,
-            unsave=unsave,
+            unsave=False,
             ignore_tls_errors=ignore_tls_errors,
         )
-
-        if save_result:
+        item_id = str(getattr(submission, "id", "unknown"))
+        subreddit_name = str(getattr(getattr(submission, "subreddit", None), "display_name", "unknown"))
+        if result.status is SaveStatus.SKIPPED:
+            try:
+                clear_failure(save_directory, item_id, subreddit_name, category)
+            except Exception:
+                logger.exception("Could not clear previous failure for %s", item_id)
             skipped_count += 1
             continue
-
+        if result.status is SaveStatus.FAILED:
+            failed_count += 1
+            logger.error("Item %s was not archived: %s", item_id, result.error)
+            try:
+                record_failure(save_directory, item_id, subreddit_name, category, result.error or "Unknown error")
+            except Exception:
+                logger.exception("Could not persist failure for %s", item_id)
+            continue
+    
         processed_count += 1
-        total_media_size += media_size
+        total_media_size += int(result.media_size or 0)
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
         except OSError:
-            pass
-
+            logger.warning("Could not stat saved archive file %s", file_path)
+        try:
+            clear_failure(save_directory, item_id, subreddit_name, category)
+        except Exception:
+            logger.exception("Could not clear previous failure for %s", item_id)
         handle_dynamic_sleep(submission)
 
-    return processed_count, skipped_count, total_size, total_media_size
+    return processed_count, skipped_count, failed_count, total_size, total_media_size
 
 def _process_comments_batch(
     comments,
@@ -334,24 +332,23 @@ def _process_comments_batch(
     tqdm_desc="Processing Comments",
     tqdm_position=1,
 ):
-    processed_count = 0
-    skipped_count = 0
-    total_size = 0
-    total_media_size = 0
-
+    processed_count = skipped_count = failed_count = total_size = total_media_size = 0
     for comment in tqdm(comments, desc=tqdm_desc, position=tqdm_position, leave=True):
         path_result = create_reddit_file_path(
-            save_directory,
-            comment.subreddit.display_name,
-            category,
-            comment.id,
+            save_directory, comment.subreddit.display_name, category, comment.id
         )
         if not path_result.is_safe:
             logger.error("Unsafe path for comment %s: %s", comment.id, path_result.issues)
+            failed_count += 1
+            try:
+                record_failure(save_directory, comment.id, comment.subreddit.display_name, category,
+                               f"Unsafe archive path: {path_result.issues}")
+            except Exception:
+                logger.exception("Could not record unsafe path failure for %s", comment.id)
             continue
-
         file_path = path_result.safe_path
-        save_result, media_size = save_to_file(
+
+        result = save_to_file(
             comment,
             file_path,
             save_comment_and_context,
@@ -360,25 +357,41 @@ def _process_comments_batch(
             save_directory,
             created_dirs_cache,
             category=category,
-            unsave=unsave,
+            unsave=False,
             ignore_tls_errors=ignore_tls_errors,
         )
-
-        if save_result:
+        item_id = str(getattr(comment, "id", "unknown"))
+        subreddit_name = str(getattr(getattr(comment, "subreddit", None), "display_name", "unknown"))
+        if result.status is SaveStatus.SKIPPED:
+            try:
+                clear_failure(save_directory, item_id, subreddit_name, category)
+            except Exception:
+                logger.exception("Could not clear previous failure for %s", item_id)
             skipped_count += 1
             continue
-
+        if result.status is SaveStatus.FAILED:
+            failed_count += 1
+            logger.error("Item %s was not archived: %s", item_id, result.error)
+            try:
+                record_failure(save_directory, item_id, subreddit_name, category, result.error or "Unknown error")
+            except Exception:
+                logger.exception("Could not persist failure for %s", item_id)
+            continue
+    
         processed_count += 1
-        total_media_size += media_size
+        total_media_size += int(result.media_size or 0)
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
         except OSError:
-            pass
-
+            logger.warning("Could not stat saved archive file %s", file_path)
+        try:
+            clear_failure(save_directory, item_id, subreddit_name, category)
+        except Exception:
+            logger.exception("Could not clear previous failure for %s", item_id)
         handle_dynamic_sleep(comment)
 
-    return processed_count, skipped_count, total_size, total_media_size
+    return processed_count, skipped_count, failed_count, total_size, total_media_size
 
 def _process_mixed_items(
     items,
@@ -393,33 +406,31 @@ def _process_mixed_items(
     tqdm_desc="Processing Items",
     tqdm_position=0,
 ):
-    processed_count = 0
-    skipped_count = 0
-    total_size = 0
-    total_media_size = 0
-
+    processed_count = skipped_count = failed_count = total_size = total_media_size = 0
     for item in tqdm(items, desc=tqdm_desc, position=tqdm_position, leave=True):
         if isinstance(item, Submission):
-            category = sub_category
-            save_fn = save_submission
+            category, save_fn = sub_category, save_submission
         elif isinstance(item, Comment):
-            category = comment_category
-            save_fn = save_comment_and_context
+            category, save_fn = comment_category, save_comment_and_context
         else:
+            logger.warning("Skipping unsupported Reddit item type: %s", type(item).__name__)
+            failed_count += 1
             continue
-
         path_result = create_reddit_file_path(
-            save_directory,
-            item.subreddit.display_name,
-            category,
-            item.id,
+            save_directory, item.subreddit.display_name, category, item.id
         )
         if not path_result.is_safe:
             logger.error("Unsafe path for item %s: %s", item.id, path_result.issues)
+            failed_count += 1
+            try:
+                record_failure(save_directory, item.id, item.subreddit.display_name, category,
+                               f"Unsafe archive path: {path_result.issues}")
+            except Exception:
+                logger.exception("Could not record unsafe path failure for %s", item.id)
             continue
-
         file_path = path_result.safe_path
-        save_result, media_size = save_to_file(
+
+        result = save_to_file(
             item,
             file_path,
             save_fn,
@@ -428,34 +439,55 @@ def _process_mixed_items(
             save_directory,
             created_dirs_cache,
             category=category,
-            unsave=unsave,
+            unsave=False,
             ignore_tls_errors=ignore_tls_errors,
         )
-
-        if save_result:
+        item_id = str(getattr(item, "id", "unknown"))
+        subreddit_name = str(getattr(getattr(item, "subreddit", None), "display_name", "unknown"))
+        if result.status is SaveStatus.SKIPPED:
+            try:
+                clear_failure(save_directory, item_id, subreddit_name, category)
+            except Exception:
+                logger.exception("Could not clear previous failure for %s", item_id)
             skipped_count += 1
             continue
-
+        if result.status is SaveStatus.FAILED:
+            failed_count += 1
+            logger.error("Item %s was not archived: %s", item_id, result.error)
+            try:
+                record_failure(save_directory, item_id, subreddit_name, category, result.error or "Unknown error")
+            except Exception:
+                logger.exception("Could not persist failure for %s", item_id)
+            continue
+    
         processed_count += 1
-        total_media_size += media_size
+        total_media_size += int(result.media_size or 0)
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
         except OSError:
-            pass
-
+            logger.warning("Could not stat saved archive file %s", file_path)
+        try:
+            clear_failure(save_directory, item_id, subreddit_name, category)
+        except Exception:
+            logger.exception("Could not clear previous failure for %s", item_id)
         handle_dynamic_sleep(item)
 
-    return processed_count, skipped_count, total_size, total_media_size
+    return processed_count, skipped_count, failed_count, total_size, total_media_size
 
 def save_user_activity(reddit, save_directory, file_log, unsave=False):
-    """Save user's posts, comments, saved items, and upvoted content."""
+    """Archive Reddit user activity and return explicit saved/skipped/failed totals."""
+    if unsave:
+        raise ValueError(
+            "Automatic unsaving is disabled until a verified post-upload commit stage exists."
+        )
     ignore_tls_errors = get_ignore_tls_errors()
 
     active_check_type = _get_check_type()
     if active_check_type == "LOG":
-        print("Check type is LOG. Using JSON log to find existing files.")
+        print("Check type is LOG. Using JSON log plus the on-disk archive index.")
         existing_files = get_existing_files_from_log(file_log)
+        existing_files.update(get_existing_files_from_dir(save_directory))
     elif active_check_type == "DIR":
         print("Check type is DIR. Using directory scan to find existing files.")
         existing_files = get_existing_files_from_dir(save_directory)
@@ -470,123 +502,64 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
         file_log=file_log,
         ignore_tls_errors=ignore_tls_errors,
     )
-
     active_save_type = _get_save_type()
+
     if active_save_type == "ALL":
         endpoints = [
-            ("submissions", "submission"),
-            ("comments", "comment"),
-            ("saved", "saved"),
-            ("upvoted", "upvoted"),
+            ("submissions", "submission"), ("comments", "comment"),
+            ("saved", "saved"), ("upvoted", "upvoted"),
         ]
-
         fetched = {}
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {}
-            for method, label in endpoints:
-                r = _clone_reddit(reddit)
-                futures[label] = pool.submit(_fetch_items, r, method, 1000, label)
+            futures = {
+                label: pool.submit(_fetch_items, _clone_reddit(reddit), method, 1000, label)
+                for method, label in endpoints
+            }
             for label, future in futures.items():
                 fetched[label] = future.result()
 
-        submissions = fetched["submission"]
-        comments = fetched["comment"]
-        saved_items = fetched["saved"]
-        upvoted_items = fetched["upvoted"]
-
         with ThreadPoolExecutor(max_workers=4) as pool:
-            f1 = pool.submit(
-                _process_submissions_batch,
-                submissions,
-                category="POST",
-                tqdm_desc="Submissions",
-                tqdm_position=0,
-                **shared_args,
-            )
-            f2 = pool.submit(
-                _process_comments_batch,
-                comments,
-                category="COMMENT",
-                tqdm_desc="Comments",
-                tqdm_position=1,
-                **shared_args,
-            )
-            f3 = pool.submit(
-                _process_mixed_items,
-                saved_items,
-                sub_category="SAVED_POST",
-                comment_category="SAVED_COMMENT",
-                unsave=unsave,
-                tqdm_desc="Saved Items",
-                tqdm_position=2,
-                **shared_args,
-            )
-            f4 = pool.submit(
-                _process_mixed_items,
-                upvoted_items,
-                sub_category="UPVOTE_POST",
-                comment_category="UPVOTE_COMMENT",
-                tqdm_desc="Upvoted Items",
-                tqdm_position=3,
-                **shared_args,
-            )
-            results = [f.result() for f in [f1, f2, f3, f4]]
-
-        processed_count, skipped_count, total_size, total_media_size = _merge_results(*results)
+            futures = [
+                pool.submit(_process_submissions_batch, fetched["submission"], category="POST",
+                            tqdm_desc="Submissions", tqdm_position=0, **shared_args),
+                pool.submit(_process_comments_batch, fetched["comment"], category="COMMENT",
+                            tqdm_desc="Comments", tqdm_position=1, **shared_args),
+                pool.submit(_process_mixed_items, fetched["saved"], sub_category="SAVED_POST",
+                            comment_category="SAVED_COMMENT", tqdm_desc="Saved Items",
+                            tqdm_position=2, **shared_args),
+                pool.submit(_process_mixed_items, fetched["upvoted"], sub_category="UPVOTE_POST",
+                            comment_category="UPVOTE_COMMENT", tqdm_desc="Upvoted Items",
+                            tqdm_position=3, **shared_args),
+            ]
+            results = [future.result() for future in futures]
+        totals = _merge_results(*results)
 
     elif active_save_type == "ACTIVITY":
         with ThreadPoolExecutor(max_workers=2) as pool:
-            r1 = _clone_reddit(reddit)
-            r2 = _clone_reddit(reddit)
-            f_sub = pool.submit(_fetch_items, r1, "submissions", 1000, "submission")
-            f_com = pool.submit(_fetch_items, r2, "comments", 1000, "comment")
-            submissions = f_sub.result()
-            comments = f_com.result()
-
+            f_sub = pool.submit(_fetch_items, _clone_reddit(reddit), "submissions", 1000, "submission")
+            f_com = pool.submit(_fetch_items, _clone_reddit(reddit), "comments", 1000, "comment")
+            submissions, comments = f_sub.result(), f_com.result()
         with ThreadPoolExecutor(max_workers=2) as pool:
-            f1 = pool.submit(
-                _process_submissions_batch,
-                submissions,
-                category="POST",
-                tqdm_desc="Submissions",
-                tqdm_position=0,
-                **shared_args,
-            )
-            f2 = pool.submit(
-                _process_comments_batch,
-                comments,
-                category="COMMENT",
-                tqdm_desc="Comments",
-                tqdm_position=1,
-                **shared_args,
-            )
-            processed_count, skipped_count, total_size, total_media_size = _merge_results(
-                f1.result(),
-                f2.result(),
-            )
+            f1 = pool.submit(_process_submissions_batch, submissions, category="POST",
+                             tqdm_desc="Submissions", tqdm_position=0, **shared_args)
+            f2 = pool.submit(_process_comments_batch, comments, category="COMMENT",
+                             tqdm_desc="Comments", tqdm_position=1, **shared_args)
+            totals = _merge_results(f1.result(), f2.result())
 
     elif active_save_type == "SAVED":
         saved_items = _fetch_items(reddit, "saved", 1000, "saved")
-        processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
-            saved_items,
-            sub_category="SAVED_POST",
-            comment_category="SAVED_COMMENT",
-            unsave=unsave,
-            tqdm_desc="Saved Items",
-            **shared_args,
+        totals = _process_mixed_items(
+            saved_items, sub_category="SAVED_POST", comment_category="SAVED_COMMENT",
+            tqdm_desc="Saved Items", **shared_args,
         )
-
     elif active_save_type == "UPVOTED":
         upvoted_items = _fetch_items(reddit, "upvoted", 1000, "upvoted")
-        processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
-            upvoted_items,
-            sub_category="UPVOTE_POST",
-            comment_category="UPVOTE_COMMENT",
-            tqdm_desc="Upvoted Items",
-            **shared_args,
+        totals = _process_mixed_items(
+            upvoted_items, sub_category="UPVOTE_POST", comment_category="UPVOTE_COMMENT",
+            tqdm_desc="Upvoted Items", **shared_args,
         )
     else:
         raise ValueError(f"Unknown save_type: {active_save_type}")
 
     save_file_log(file_log, save_directory)
-    return processed_count, skipped_count, total_size, total_media_size
+    return totals

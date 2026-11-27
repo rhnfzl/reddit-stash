@@ -17,6 +17,7 @@ from utils.config_paths import get_storage_provider
 from utils.media_services.reddit_media import RedditMediaDownloader
 from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
 from utils.time_utilities import lazy_load_comments
+from .media_quota import media_size_limit, stream_response_to_file
 
 logger = logging.getLogger(__name__)
 # Thread-local storage for media size tracking
@@ -196,52 +197,46 @@ def _download_image_fallback(
     submission_id: str,
     ignore_tls_errors: Optional[bool] = None,
 ):
-    """
-    Fallback download method kept for compatibility.
-    """
+    """Compatibility fallback using the same per-file/daily limits as the manager."""
+    response = None
     try:
         if ignore_tls_errors is None:
             ignore_tls_errors = get_ignore_tls_errors()
         save_directory = _resolve_media_save_dir(save_directory)
         existing_path = _find_existing_media_file(save_directory, submission_id, image_url)
         if existing_path:
-            try:
-                return existing_path, os.path.getsize(existing_path)
-            except OSError:
-                return existing_path, 0
-        request_kwargs = {}
+            return existing_path, os.path.getsize(existing_path)
+
+        request_kwargs = {
+            "stream": True,
+            "timeout": (5, 30),
+            "headers": {"User-Agent": "Reddit Stash Media Downloader/1.0"},
+        }
         if ignore_tls_errors:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             request_kwargs["verify"] = False
-
         response = requests.get(image_url, **request_kwargs)
         response.raise_for_status()
-        extension = os.path.splitext(image_url)[1]
-        if extension.lower() not in [
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".gif",
-            ".webp",
-            ".mp4",
-            ".webm",
-        ]:
+
+        extension = os.path.splitext(urlparse(image_url).path)[1].lower()
+        if extension not in {
+            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm",
+            ".bmp", ".tiff", ".mov", ".mkv",
+        }:
             extension = ".jpg"
-
-        image_filename = f"{submission_id}{extension}"
-        image_path = os.path.join(save_directory, image_filename)
-        os.makedirs(save_directory, exist_ok=True)
-        with open(image_path, "wb") as f:
-            f.write(response.content)
-
-        try:
-            file_size = os.path.getsize(image_path)
-            return image_path, file_size
-        except OSError:
-            return image_path, 0
-    except Exception as e:
-        logger.error(f"Fallback download failed for {image_url}: {e}")
+        image_path = os.path.join(save_directory, f"{submission_id}{extension}")
+        size = stream_response_to_file(
+            response,
+            image_path,
+            media_size_limit(image_url, response.headers.get("Content-Type", "")),
+        )
+        return image_path, size
+    except Exception as exc:
+        logger.error("Fallback download failed for %s: %s", image_url, exc)
         return None, 0
+    finally:
+        if response is not None:
+            response.close()
 
 
 def _is_image_url(
@@ -492,7 +487,9 @@ def save_submission(
     context_mode: bool = False,
     include_media: bool = True,
 ) -> None:
-    """Save a submission and its metadata, optionally unsaving it after."""
+    """Save a submission and its metadata."""
+    if unsave:
+        raise RuntimeError("Automatic unsaving is disabled until remote upload verification exists.")
     try:
         is_recovered = isinstance(submission, RecoveredItem)
         if recovery_metadata or is_recovered:
@@ -550,11 +547,15 @@ def save_submission(
                 else:
                     f.write("**Media omitted in this context view.**\n")
             except Exception as media_err:
-                if context_mode:
-                    logger.info(f"Context mode media fallback for {submission.id}: {media_err}")
-                    f.write(f"**Media:** [Link]({submission.url})\n")
-                else:
-                    raise
+                logger.warning(
+                    "Media download failed for submission %s; preserving Markdown: %s",
+                    submission.id,
+                    media_err,
+                )
+                f.write(
+                    f"**Media download failed; original link:** "
+                    f"[Link]({submission.url or '[unavailable]'})\n"
+                )
         f.write("\n\n## Comments:\n\n")
         lazy_comments = lazy_load_comments(submission)
         process_comments(lazy_comments, f)
@@ -579,6 +580,8 @@ def save_comment_and_context(
     recovery_metadata=None,
 ) -> None:
     """Save a comment, its context, and any child comments."""
+    if unsave:
+        raise RuntimeError("Automatic unsaving is disabled until remote upload verification exists.")
     try:
         is_recovered = isinstance(comment, RecoveredItem)
 

@@ -33,8 +33,12 @@ class MegaStorageProvider(StorageProviderProtocol):
     MANIFEST_NAME = "media_manifest.json"
     STAGING_DIR = ".reddit-stash-staging"
 
-    def __init__(self, mega_remote: str = "mega"):
-        self._mega_remote = mega_remote
+    def __init__(self, mega_remote: Optional[str] = None):
+        configured_remote = mega_remote or os.getenv("MEGA_REMOTE") or "mega"
+        configured_remote = configured_remote.strip()
+        if not configured_remote or any(char in configured_remote for char in ":/\\"):
+            raise ValueError("MEGA_REMOTE must be a non-empty rclone remote name without path separators")
+        self._mega_remote = configured_remote
         self._connected = False
 
     # ------------------------------------------------------------------
@@ -71,6 +75,11 @@ class MegaStorageProvider(StorageProviderProtocol):
 
     def _ensure_remote_configured(self) -> None:
         result = self._run(["listremotes"])
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(
+                f"Could not inspect configured rclone remotes: {detail or 'unknown error'}"
+            )
         if f"{self._mega_remote}:" in result.stdout:
             return
 
@@ -128,7 +137,10 @@ class MegaStorageProvider(StorageProviderProtocol):
         }
         root = Path(local_directory)
         for path in sorted(root.rglob("*")):
-            if not path.is_file():
+            if not path.is_file() or path.name.startswith("."):
+                # Dropbox and S3 collectors also ignore dotfiles. Keep the MEGA
+                # manifest aligned with what is actually transferred (including
+                # the local media_usage.sqlite3 quota database).
                 continue
             rel = self._norm_rel(str(path.relative_to(root)))
             if rel in {self.CANONICAL_LOG_NAME, self.LEGACY_LOG_NAME, self.MANIFEST_NAME}:
@@ -151,33 +163,52 @@ class MegaStorageProvider(StorageProviderProtocol):
     # Remote listing / duplicate-safe replacement
     # ------------------------------------------------------------------
     def list_files(self, remote_directory: str) -> List[StorageFileInfo]:
+        """List files; return [] only for a confirmed missing remote directory."""
         remote_spec = self._remote_prefix(remote_directory)
         proc = self._run(["lsjson", remote_spec, "--recursive"])
         if proc.returncode != 0:
-            return []
+            detail = (proc.stderr or proc.stdout or "").strip()
+            lowered = detail.lower()
+            missing_markers = (
+                "directory not found", "path not found", "object not found",
+                "directory does not exist", "path does not exist", "doesn't exist",
+            )
+            if any(marker in lowered for marker in missing_markers):
+                return []
+            raise RuntimeError(
+                f"rclone lsjson failed for {remote_spec!r} (exit {proc.returncode}): "
+                f"{detail or 'no error text returned'}"
+            )
         try:
             entries = json.loads(proc.stdout or "[]")
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"rclone returned invalid JSON for {remote_spec!r}: {exc}") from exc
+        if not isinstance(entries, list):
+            raise RuntimeError(
+                f"rclone lsjson returned {type(entries).__name__}, expected a JSON list"
+            )
 
         prefix = self._norm_rel(remote_directory)
         files: List[StorageFileInfo] = []
-        for entry in entries:
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"Invalid rclone listing entry {index}: expected an object")
             if entry.get("IsDir"):
                 continue
-            rel_path = entry.get("Path") or entry.get("Name") or ""
-            rel_path = self._norm_rel(rel_path)
+            rel_path = self._norm_rel(entry.get("Path") or entry.get("Name") or "")
             if not rel_path:
                 continue
+            try:
+                size = int(entry.get("Size") or 0)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Invalid size in rclone listing entry {rel_path!r}") from exc
             remote_path = f"{prefix}/{rel_path}" if prefix else rel_path
-            files.append(
-                StorageFileInfo(
-                    remote_path=remote_path,
-                    content_hash=None,
-                    size_bytes=int(entry.get("Size") or 0),
-                    last_modified=entry.get("ModTime"),
-                )
-            )
+            files.append(StorageFileInfo(
+                remote_path=remote_path,
+                content_hash=None,
+                size_bytes=size,
+                last_modified=entry.get("ModTime"),
+            ))
         return files
 
     def _remote_matches(self, remote_directory: str, relative_path: str) -> List[StorageFileInfo]:
@@ -204,14 +235,26 @@ class MegaStorageProvider(StorageProviderProtocol):
                 )
 
     def _cleanup_staging(self, remote_directory: str) -> None:
+        """Ensure staging exists without deleting files left by interrupted uploads.
+
+        A staged object may be the only verified remote copy if a previous run
+        deleted the old final-path object and then failed during ``moveto``.
+        Deleting staging contents at the beginning of the next run would turn
+        that recoverable interruption into permanent data loss.  Therefore
+        this method intentionally preserves all staged files and only reports
+        pending leftovers for operator review.
+        """
         staging_directory = f"{self._norm_rel(remote_directory)}/{self.STAGING_DIR}".strip("/")
-        for item in self.list_files(staging_directory):
-            proc = self._run(["deletefile", self._remote_join("", self._norm_rel(item.remote_path))])
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    proc.stderr.strip() or proc.stdout.strip() or
-                    f"Failed cleaning MEGA staging file {item.remote_path}"
-                )
+        self._run(["mkdir", self._remote_prefix(staging_directory)], check=True)
+        pending = self.list_files(staging_directory)
+        if pending:
+            print(
+                f"WARNING: MEGA staging contains {len(pending)} pending file(s). "
+                "They are being preserved because they may be the only verified "
+                "copy from an interrupted replacement. Inspect and verify final "
+                "remote files before manually removing anything from "
+                f"{self._remote_prefix(staging_directory)}."
+            )
 
     def _stage_and_replace(
         self,
@@ -330,7 +373,12 @@ class MegaStorageProvider(StorageProviderProtocol):
     def _download_gdpr_data(self, remote_directory: str, local_directory: str) -> SyncResult:
         start = time.time()
         remote = f"{self._norm_rel(remote_directory)}/gdpr_data".strip("/")
-        if not self.list_files(remote):
+        parent_entries = self.list_files(remote_directory)
+        remote_prefix = self._norm_rel(remote)
+        if not any(
+            self._norm_rel(item.remote_path).startswith(remote_prefix + "/")
+            for item in parent_entries
+        ):
             return SyncResult(elapsed_seconds=time.time() - start)
         local = os.path.join(local_directory, "gdpr_data")
         os.makedirs(local, exist_ok=True)
@@ -452,7 +500,10 @@ class MegaStorageProvider(StorageProviderProtocol):
                 )
 
                 self._delete_known_matches(remote_directory, self.LEGACY_LOG_NAME, legacy_existing)
-                self._run(["rmdirs", f"{self._remote_prefix(remote_directory)}/{self.STAGING_DIR}"], check=False)
+                # Do not recursively remove the staging directory here. It may
+                # contain files left by a previously interrupted replacement;
+                # those can be the only verified remote copy of an archive item.
+                # Successfully moved current uploads no longer have staged files.
 
         except Exception as exc:
             failed += 1

@@ -7,9 +7,12 @@ on:
     - cron: "0 23,3 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-script:
@@ -79,14 +82,28 @@ jobs:
 
       - name: Install rclone
         run: |
-          curl https://rclone.org/install.sh | sudo bash
+          sudo apt-get update
+          sudo apt-get install -y rclone
+          rclone version
 
-      - name: Run Reddit Stash Script
+      - name: Download archive from MEGA
+        id: download
         timeout-minutes: 90
         env:
           STORAGE_PROVIDER: mega
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+          MEGA_2FA: ${{ secrets.MEGA_2FA }}
+        run: python storage_utils.py --download
+
+      - name: Run Reddit Stash Script
+        id: scrape
+        timeout-minutes: 90
+        env:
+          STORAGE_PROVIDER: mega
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+          MEGA_2FA: ${{ secrets.MEGA_2FA }}
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
@@ -95,14 +112,14 @@ jobs:
           REDGIFS_TRACE: "1"
           MEDIA_TRACE: "1"
           PYTHONUNBUFFERED: "1"
-        run: |
-          python storage_utils.py --download
-          python reddit_stash.py
+        run: python reddit_stash.py
 
       - name: Upload updated archive to MEGA
+        if: ${{ always() && steps.download.outcome == 'success' && steps.scrape.outcome != 'cancelled' }}
         env:
           STORAGE_PROVIDER: mega
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+          MEGA_2FA: ${{ secrets.MEGA_2FA }}
         run: |
           python storage_utils.py --upload

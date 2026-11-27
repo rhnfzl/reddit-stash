@@ -5,9 +5,8 @@ Downloads everything from source to a temp directory, then uploads
 to target.  Supports dry-run mode (default) and explicit execution.
 """
 
-"""Safe storage migration between Reddit Stash storage providers."""
-
 from __future__ import annotations
+
 import os
 import shutil
 import tempfile

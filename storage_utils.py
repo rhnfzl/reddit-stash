@@ -20,18 +20,41 @@ LOG_NAME = "file_log.json"
 
 def _load_parser() -> configparser.ConfigParser:
     parser = configparser.ConfigParser()
-    parser.read(get_settings_file_path())
+    settings_path = get_settings_file_path()
+    if not parser.read(settings_path):
+        raise FileNotFoundError(f"Storage settings file not found: {settings_path}")
     return parser
 
 
-def _load_local_dir() -> str:
+def _load_local_dir(*, create: bool = False, writable: bool = False) -> str:
+    """Resolve the configured archive path without falling back to another folder."""
     parser = _load_parser()
-    local_dir = (
+    raw_path = (
         parser.get("Settings", "save_directory", fallback=None)
         or parser.get("Storage", "save_directory", fallback=None)
-        or "reddit/"
+        or "reddit_dropbox/"
     )
-    return validate_and_set_directory(local_dir)
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    candidate = candidate.resolve()
+
+    if create:
+        candidate.mkdir(parents=True, exist_ok=True)
+    elif not candidate.is_dir():
+        raise FileNotFoundError(
+            f"Configured archive directory does not exist: {candidate}. "
+            "Refusing to upload from an empty fallback directory."
+        )
+    if not candidate.is_dir():
+        raise NotADirectoryError(f"Configured archive path is not a directory: {candidate}")
+    required = os.R_OK | os.X_OK
+    if create or writable:
+        required |= os.W_OK
+    if not os.access(candidate, required):
+        mode = "readable and writable" if create or writable else "readable"
+        raise PermissionError(f"Configured archive directory is not {mode}: {candidate}")
+    return str(candidate)
 
 
 def _load_check_type() -> str:
@@ -139,7 +162,7 @@ def cmd_download(_: argparse.Namespace) -> int:
         print("No storage provider configured.")
         return 1
     _connect(provider)
-    local_dir = _load_local_dir()
+    local_dir = _load_local_dir(create=True, writable=True)
     check_type = _load_check_type()
     remote_dir = _remote_root_for(config.provider.value)
 

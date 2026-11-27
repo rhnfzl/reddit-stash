@@ -14,6 +14,10 @@ import requests
 
 from ..constants import FFMPEG_TIMEOUT_SECONDS
 from ..feature_flags import get_media_config as get_media_feature_config
+from ..media_quota import (
+    MediaLimitExceeded, file_signature, media_size_limit,
+    register_downloaded_file, stream_response_to_file,
+)
 from ..service_abstractions import (
     DownloadResult,
     DownloadStatus,
@@ -57,23 +61,16 @@ class RedditMediaDownloader:
         self._media_config = get_media_feature_config()
 
     def _get_media_size_limit(self, media_kind: str) -> int:
-        """Return the configured size limit for the requested media kind."""
-        default_limit = self.config.max_file_size
-        try:
-            media_cfg = self._media_config.get_media_config()
-        except Exception:
-            media_cfg = {}
-
-        if not media_cfg or not media_cfg.get("media_enabled", False):
-            return default_limit
-
+        """Return a byte limit from the active MediaConfig dataclass."""
+        # get_media_feature_config is an alias for feature_flags.get_media_config,
+        # which already returns the typed MediaConfig dataclass.
+        config = get_media_feature_config()
+        self._media_config = config
+        if not config.is_media_enabled():
+            return int(self.config.max_file_size)
         if media_kind in ("image", "preview"):
-            return int(media_cfg.get("max_image_size", default_limit) or default_limit)
-        if media_kind == "video":
-            return int(media_cfg.get("max_video_size", default_limit) or default_limit)
-        if media_kind == "audio":
-            return int(media_cfg.get("max_video_size", default_limit) or default_limit)
-        return default_limit
+            return int(config.max_image_size())
+        return int(config.max_video_size())
 
     def can_handle(self, url: str) -> bool:
         """Check if this service can handle the given URL."""
@@ -206,11 +203,8 @@ class RedditMediaDownloader:
         return ""
 
     def _download_generic(self, url: str, save_path: str) -> DownloadResult:
-        return self._download_with_requests(
-            url,
-            save_path,
-            max_file_size=self._get_media_size_limit("video"),
-        )
+        # Content-Type and URL extension determine whether image or video limits apply.
+        return self._download_with_requests(url, save_path, max_file_size=None)
 
     def _download_reddit_image(self, url: str, save_path: str) -> DownloadResult:
         """Download Reddit hosted image (i.redd.it) with optimized headers."""
@@ -272,6 +266,20 @@ class RedditMediaDownloader:
         output_dir = os.path.dirname(save_path) or "."
         base_name = os.path.splitext(os.path.basename(save_path))[0]
         outtmpl = os.path.join(output_dir, f"{base_name}.%(ext)s")
+        max_video_size = int(self._get_media_size_limit("video"))
+        patterns = (
+            os.path.join(output_dir, f"{base_name}.*"),
+            os.path.join(output_dir, f"{base_name}*.mp4"),
+            os.path.join(output_dir, f"{base_name}*.webm"),
+            os.path.join(output_dir, f"{base_name}*.mkv"),
+            os.path.join(output_dir, f"{base_name}*.mov"),
+        )
+        before_signatures = {
+            path: file_signature(path)
+            for pattern in patterns
+            for path in glob.glob(pattern)
+            if os.path.isfile(path)
+        }
         options = {
             "outtmpl": outtmpl,
             "format": "bv*+ba/b",
@@ -282,6 +290,8 @@ class RedditMediaDownloader:
             "retries": 3,
             "socket_timeout": 30,
             "paths": {"home": output_dir},
+            "max_filesize": max_video_size,
+            "nooverwrites": True,
         }
 
         try:
@@ -289,82 +299,61 @@ class RedditMediaDownloader:
             with yt_dlp.YoutubeDL(options) as ydl:  # type: ignore[attr-defined]
                 ydl.extract_info(url, download=True)
 
-            candidates: List[str] = []
-            for pattern in (
-                os.path.join(output_dir, f"{base_name}.*"),
-                os.path.join(output_dir, f"{base_name}*.mp4"),
-                os.path.join(output_dir, f"{base_name}*.webm"),
-                os.path.join(output_dir, f"{base_name}*.mkv"),
-            ):
+            candidates = []
+            for pattern in patterns:
                 candidates.extend(glob.glob(pattern))
-
-            candidates = [
+            candidates = list(dict.fromkeys(
                 path for path in candidates
-                if os.path.isfile(path)
-                and not path.endswith(".part")
-                and not path.endswith(".ytdl")
-            ]
-
+                if os.path.isfile(path) and not path.endswith((".part", ".ytdl"))
+            ))
             if not candidates:
                 if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                    file_size = os.path.getsize(save_path)
-                    return DownloadResult(
-                        status=DownloadStatus.SUCCESS,
-                        local_path=save_path,
-                        bytes_downloaded=file_size,
-                    )
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message="yt-dlp completed but no output file was found",
-                )
+                    size = os.path.getsize(save_path)
+                    return DownloadResult(status=DownloadStatus.SUCCESS, local_path=save_path,
+                                          bytes_downloaded=size)
+                return DownloadResult(status=DownloadStatus.FAILED,
+                                      error_message="yt-dlp completed but no output file was found")
 
-            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
             final_path = candidates[0]
-
-            if final_path != save_path and os.path.exists(final_path):
-                try:
-                    if os.path.exists(save_path):
-                        os.remove(save_path)
-                    shutil.move(final_path, save_path)
-                    final_path = save_path
-                except Exception:
-                    final_path = candidates[0]
-
+            was_downloaded_now = file_signature(final_path) != before_signatures.get(final_path)
             file_size = os.path.getsize(final_path)
             if file_size <= 0:
-                return DownloadResult(
-                    status=DownloadStatus.FAILED,
-                    error_message="Downloaded video file was empty",
-                )
+                return DownloadResult(status=DownloadStatus.FAILED,
+                                      error_message="Downloaded video file was empty")
+
+            if was_downloaded_now:
+                file_size = register_downloaded_file(final_path, max_video_size)
+
+            # Do not destroy a previously archived file. Return the actual new
+            # yt-dlp path if the requested destination already exists.
+            if final_path != save_path and not os.path.exists(save_path):
+                try:
+                    os.replace(final_path, save_path)
+                    final_path = save_path
+                except OSError:
+                    _logger.warning("Could not move yt-dlp output to %s; retaining %s", save_path, final_path)
 
             return DownloadResult(
                 status=DownloadStatus.SUCCESS,
                 local_path=final_path,
                 bytes_downloaded=file_size,
             )
+        except MediaLimitExceeded as exc:
+            return DownloadResult(status=DownloadStatus.FAILED, error_message=str(exc))
         except subprocess.TimeoutExpired:
-            return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message="yt-dlp download timed out",
-            )
-        except Exception as e:
-            return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message=f"yt-dlp download failed: {str(e)}",
-            )
+            return DownloadResult(status=DownloadStatus.FAILED,
+                                  error_message="yt-dlp download timed out")
+        except Exception as exc:
+            return DownloadResult(status=DownloadStatus.FAILED,
+                                  error_message=f"yt-dlp download failed: {exc}")
 
     def _download_with_requests(
-        self,
-        url: str,
-        save_path: str,
-        max_file_size: Optional[int] = None,
+        self, url: str, save_path: str, max_file_size: Optional[int] = None
     ) -> DownloadResult:
-        """Simple streamed download fallback."""
+        response = None
         try:
-            headers = {
-                "User-Agent": self.config.user_agent,
-                "Accept": "*/*",
-            }
+            headers = {"User-Agent": self.config.user_agent, "Accept": "*/*"}
             response = requests.get(
                 url,
                 stream=True,
@@ -373,94 +362,58 @@ class RedditMediaDownloader:
                 allow_redirects=True,
             )
             response.raise_for_status()
-
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            downloaded = 0
-            with open(save_path, "wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 256):
-                    if not chunk:
-                        continue
-                    downloaded += len(chunk)
-                    if max_file_size and downloaded > max_file_size:
-                        return DownloadResult(
-                            status=DownloadStatus.FAILED,
-                            error_message="File exceeds configured size limit",
-                        )
-                    handle.write(chunk)
-
-            if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                return DownloadResult(
-                    status=DownloadStatus.SUCCESS,
-                    local_path=save_path,
-                    bytes_downloaded=os.path.getsize(save_path),
-                )
-
-            return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message="Downloaded file was empty",
+            limit = int(
+                max_file_size if max_file_size is not None
+                else media_size_limit(url, response.headers.get("Content-Type", ""))
             )
-        except Exception as e:
+            written = stream_response_to_file(response, save_path, limit)
             return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message=f"Requests download failed: {str(e)}",
+                status=DownloadStatus.SUCCESS,
+                local_path=save_path,
+                bytes_downloaded=written,
             )
+        except Exception as exc:
+            return DownloadResult(status=DownloadStatus.FAILED, error_message=str(exc))
+        finally:
+            if response is not None:
+                response.close()
 
     def _download_with_reddit_headers(
-        self,
-        url: str,
-        save_path: str,
-        max_file_size: Optional[int] = None,
+        self, url: str, save_path: str, max_file_size: Optional[int] = None
     ) -> DownloadResult:
-        """Download Reddit images with optimal headers to prevent HTML wrapper pages."""
-        reddit_headers = {
+        response = None
+        headers = {
             "Accept": "image/*,*/*;q=0.8",
             "User-Agent": self.config.user_agent,
             "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "gzip, deflate, br",
             "Cache-Control": "no-cache",
         }
-
         try:
             response = requests.get(
                 url,
                 stream=True,
                 timeout=(self.config.connect_timeout, self.config.read_timeout),
-                headers=reddit_headers,
+                headers=headers,
                 allow_redirects=True,
                 verify=self.config.verify_ssl,
             )
             response.raise_for_status()
-
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            total = 0
-            with open(save_path, "wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 256):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if max_file_size and total > max_file_size:
-                        return DownloadResult(
-                            status=DownloadStatus.FAILED,
-                            error_message="File exceeds configured size limit",
-                        )
-                    handle.write(chunk)
-
-            if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                return DownloadResult(
-                    status=DownloadStatus.SUCCESS,
-                    local_path=save_path,
-                    bytes_downloaded=os.path.getsize(save_path),
-                )
-
-            return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message="Downloaded file was empty",
+            limit = int(
+                max_file_size if max_file_size is not None
+                else media_size_limit(url, response.headers.get("Content-Type", "image/"))
             )
-        except Exception as e:
+            written = stream_response_to_file(response, save_path, limit)
             return DownloadResult(
-                status=DownloadStatus.FAILED,
-                error_message=f"Reddit header download failed: {str(e)}",
+                status=DownloadStatus.SUCCESS,
+                local_path=save_path,
+                bytes_downloaded=written,
             )
+        except Exception as exc:
+            return DownloadResult(status=DownloadStatus.FAILED, error_message=str(exc))
+        finally:
+            if response is not None:
+                response.close()
 
     def _is_ffmpeg_available(self) -> bool:
         """Check if ffmpeg is available in system PATH."""

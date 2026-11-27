@@ -1,3 +1,3 @@
-# Optional S3 storage backend dependency
-# Install alongside main requirements when using provider=s3
-boto3>=1.35.0
+# Optional S3 storage provider dependency
+# Kept separate so deployments can remove this line if S3 support is not needed.
+boto3>=1.34,<2

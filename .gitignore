@@ -182,3 +182,10 @@ cleanup_corrupt_images.py
 fix_double_extensions.py
 reddit_local/
 clean_upvoted_items.py
+reddit_archive.db
+
+notion_import.csv
+
+media_usage.sqlite3
+
+failed_items.json

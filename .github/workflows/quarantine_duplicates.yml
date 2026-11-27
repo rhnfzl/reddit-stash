@@ -1,5 +1,8 @@
 name: Quarantine exact duplicates (Mega)
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -32,7 +35,9 @@ jobs:
 
       - name: Install rclone
         run: |
-          curl https://rclone.org/install.sh | sudo bash
+          sudo apt-get update
+          sudo apt-get install -y rclone
+          rclone version
 
       - name: Configure Mega remote
         env:

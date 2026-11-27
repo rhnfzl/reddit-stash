@@ -12,6 +12,12 @@ from urllib.parse import urlparse
 
 import requests
 
+from utils.feature_flags import get_media_config
+from utils.media_quota import (
+    MediaLimitExceeded, file_signature, media_size_limit,
+    register_downloaded_file, stream_response_to_file,
+)
+
 from .media_services.reddit_media import RedditMediaDownloader
 
 logger = logging.getLogger(__name__)
@@ -343,6 +349,9 @@ class MediaDownloadManager:
         self._downloaded_urls: Dict[str, str] = {}
         self._failed_urls: Dict[str, int] = {}
         self._reddit_downloader = RedditMediaDownloader()
+        self._download_semaphore = threading.BoundedSemaphore(
+            max(1, int(get_media_config().max_concurrent_downloads()))
+        )
 
     def _should_skip_url(self, url: str) -> bool:
         return self._failed_urls.get(url, 0) >= 2
@@ -351,94 +360,97 @@ class MediaDownloadManager:
         self._failed_urls[url] = self._failed_urls.get(url, 0) + 1
 
     def _download_with_requests(self, url: str, save_path: str) -> Optional[str]:
+        response = None
         try:
-            response = requests.get(url, stream=True, timeout=30)
+            response = requests.get(
+                url,
+                stream=True,
+                timeout=(10, int(get_media_config().download_timeout())),
+                headers={"User-Agent": "Reddit Stash Media Downloader/1.0"},
+            )
             response.raise_for_status()
-
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 256):
-                    if chunk:
-                        handle.write(chunk)
-
-            if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                return save_path
-            return None
+            limit = int(media_size_limit(url, response.headers.get("Content-Type", "")))
+            stream_response_to_file(response, save_path, limit)
+            return save_path
         except Exception as exc:
-            self._logger.debug(f"Generic download failed for {url}: {exc}")
+            self._logger.warning("Media download rejected/failed for %s: %s", url, exc)
             return None
+        finally:
+            if response is not None:
+                response.close()
 
     def _download_with_ytdlp(self, url: str, save_path: str) -> Optional[str]:
         if not YT_DLP_AVAILABLE:
             return None
-
+        output_dir = os.path.dirname(save_path) or "."
+        base_name = os.path.splitext(os.path.basename(save_path))[0]
+        outtmpl = os.path.join(output_dir, f"{base_name}.%(ext)s")
+        max_video_size = int(get_media_config().max_video_size())
+        patterns = (
+            os.path.join(output_dir, f"{base_name}.*"),
+            os.path.join(output_dir, f"{base_name}*.mp4"),
+            os.path.join(output_dir, f"{base_name}*.webm"),
+            os.path.join(output_dir, f"{base_name}*.mkv"),
+            os.path.join(output_dir, f"{base_name}*.mov"),
+        )
+        before_signatures = {
+            path: file_signature(path)
+            for pattern in patterns
+            for path in glob.glob(pattern)
+            if os.path.isfile(path)
+        }
+        options = {
+            "outtmpl": outtmpl,
+            "format": "bv*+ba/b",
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "retries": 3,
+            "socket_timeout": 30,
+            "paths": {"home": output_dir},
+            "max_filesize": max_video_size,
+            "nooverwrites": True,
+        }
         try:
-            output_dir = os.path.dirname(save_path) or "."
-            base_name = os.path.splitext(os.path.basename(save_path))[0]
-            outtmpl = os.path.join(output_dir, f"{base_name}.%(ext)s")
-
-            options = {
-                "outtmpl": outtmpl,
-                "format": "bv*+ba/b",
-                "merge_output_format": "mp4",
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "retries": 3,
-                "socket_timeout": 30,
-                "paths": {"home": output_dir},
-                "http_headers": {
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/123.0.0.0 Safari/537.36"
-                    ),
-                    "Referer": url,
-                },
-            }
-
             os.makedirs(output_dir, exist_ok=True)
             with yt_dlp.YoutubeDL(options) as ydl:  # type: ignore[attr-defined]
                 ydl.extract_info(url, download=True)
-
             candidates = []
-            for pattern in (
-                os.path.join(output_dir, f"{base_name}.*"),
-                os.path.join(output_dir, f"{base_name}*.mp4"),
-                os.path.join(output_dir, f"{base_name}*.webm"),
-                os.path.join(output_dir, f"{base_name}*.mkv"),
-                os.path.join(output_dir, f"{base_name}*.mov"),
-            ):
+            for pattern in patterns:
                 candidates.extend(glob.glob(pattern))
-
-            candidates = [
-                path
-                for path in candidates
-                if os.path.isfile(path) and not path.endswith(".part") and not path.endswith(".ytdl")
-            ]
-
+            candidates = list(dict.fromkeys(
+                path for path in candidates
+                if os.path.isfile(path) and not path.endswith((".part", ".ytdl"))
+            ))
             if not candidates:
                 if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                    return save_path
+                    return save_path  # existing file: not charged again
                 return None
 
-            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
             final_path = candidates[0]
+            was_downloaded_now = file_signature(final_path) != before_signatures.get(final_path)
+            size = os.path.getsize(final_path)
+            if size <= 0:
+                return None
+            if was_downloaded_now:
+                size = register_downloaded_file(final_path, max_video_size)
 
-            if final_path != save_path:
+            # Preserve an existing requested file. Otherwise publish the new
+            # output at the requested path; a move failure leaves a valid file.
+            if final_path != save_path and not os.path.exists(save_path):
                 try:
-                    if os.path.exists(save_path):
-                        os.remove(save_path)
                     os.replace(final_path, save_path)
                     final_path = save_path
-                except Exception:
-                    pass
-
-            if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
-                return final_path
+                except OSError:
+                    self._logger.warning("Could not move yt-dlp output to %s; retaining %s", save_path, final_path)
+            return final_path
+        except MediaLimitExceeded as exc:
+            self._logger.warning("yt-dlp output rejected for %s: %s", url, exc)
             return None
         except Exception as exc:
-            self._logger.debug(f"yt-dlp download failed for {url}: {exc}")
+            self._logger.debug("yt-dlp download failed for %s: %s", url, exc)
             return None
 
     def _has_audio_stream(self, file_path: str) -> bool:
@@ -575,6 +587,11 @@ class MediaDownloadManager:
             return None
 
     def download_media(self, url: str, save_path: str) -> Optional[str]:
+        """Bound concurrent network transfers across all media providers."""
+        with self._download_semaphore:
+            return self._download_media_unlocked(url, save_path)
+
+    def _download_media_unlocked(self, url: str, save_path: str) -> Optional[str]:
         """
         Download media and return the saved file path, or None on failure.
         """

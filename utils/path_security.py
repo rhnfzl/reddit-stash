@@ -208,7 +208,7 @@ class SecurePathHandler:
         """Create a safe file path for Reddit content."""
         valid_types = {
             "POST", "COMMENT", "SAVED_POST", "SAVED_COMMENT",
-            "UPVOTE_POST", "UPVOTE_COMMENT", "GDPR_POST", "GDPR_COMMENT",
+            "UPVOTE_POST", "UPVOTE_COMMENT", "GDPR_POST", "GDPR_COMMENT", "GDPR_VOTE",
         }
         if content_type not in valid_types:
             return PathValidationResult(
